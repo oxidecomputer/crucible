@@ -923,10 +923,12 @@ impl DownstairsClient {
             DsState::Faulted
             | DsState::Replaced
             | DsState::LiveRepairReady
-            | DsState::Stopping(..) => EnqueueResult::Skip,
-            // XXX there are some `Stopping` cases which should never happen,
-            // should we panic on them (like we do for negotiation states
-            // below)?
+            | DsState::Stopping(
+                ClientStopReason::Fault(..)
+                | ClientStopReason::Disabled
+                | ClientStopReason::Replacing
+                | ClientStopReason::NegotiationFailed(..),
+            ) => EnqueueResult::Skip,
 
             // We conditionally send jobs if we're in live-repair, depending on
             // the current extent.
@@ -955,7 +957,8 @@ impl DownstairsClient {
             DsState::New
             | DsState::WaitActive
             | DsState::WaitQuorum
-            | DsState::Reconcile => panic!(
+            | DsState::Reconcile
+            | DsState::Stopping(ClientStopReason::Deactivated) => panic!(
                 "enqueue should not be called from state {:?}",
                 self.state
             ),
