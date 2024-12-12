@@ -39,6 +39,7 @@ for t in "$input/rbins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+export RUST_BACKTRACE=1
 
 banner setup
 pfexec plimit -n 9123456 $$
