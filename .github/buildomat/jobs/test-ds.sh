@@ -39,6 +39,7 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+export RUST_BACKTRACE=1
 
 banner test_ds
 ptime -m bash "$input/scripts/test_ds.sh"

@@ -78,6 +78,7 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+export RUST_BACKTRACE=1
 
 echo "BINDIR is $BINDIR"
 echo "bindir contains:"
