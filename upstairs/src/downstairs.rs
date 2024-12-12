@@ -442,11 +442,26 @@ impl Downstairs {
     /// Helper function to set all 3x clients as active, legally
     #[cfg(test)]
     pub fn force_active(&mut self) {
+        let up_state = UpstairsState::GoActive(BlockRes::dummy());
         for cid in ClientId::iter() {
-            self.clients[cid].checked_state_transition(
-                &UpstairsState::Initializing,
-                DsState::Active,
-            );
+            for state in [
+                NegotiationState::WaitActive,
+                NegotiationState::WaitForPromote,
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
+                NegotiationState::Reconcile,
+            ] {
+                self.clients[cid].checked_state_transition(
+                    &up_state,
+                    DsState::Connecting {
+                        state,
+                        mode: ConnectionMode::New,
+                    },
+                );
+            }
+            self.clients[cid]
+                .checked_state_transition(&up_state, DsState::Active);
         }
     }
 
@@ -3638,12 +3653,7 @@ impl Downstairs {
     fn repair_test_all_active() -> Self {
         let mut ds = Self::test_default();
 
-        for cid in ClientId::iter() {
-            ds.clients[cid].checked_state_transition(
-                &UpstairsState::Active,
-                DsState::Active,
-            );
-        }
+        ds.force_active();
 
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
@@ -3662,15 +3672,7 @@ impl Downstairs {
 
         // Set one of the clients to want a repair
         let to_repair = ClientId::new(1);
-        ds.fault_client(
-            to_repair,
-            &UpstairsState::Active,
-            ClientFaultReason::RequestedFault,
-        );
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
-            DsState::LiveRepair,
-        );
+        test::move_to_live_repair(&mut ds, to_repair);
 
         // At this point you might think it makes sense to run
         //   `self.start_live_repair(&UpstairsState::Active, gw, 3, 0);`
@@ -4393,7 +4395,7 @@ pub(crate) mod test {
         downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
-        BlockOpWaiter, ClientId, CrucibleError, DsState, ExtentFix,
+        BlockOpWaiter, BlockRes, ClientId, CrucibleError, DsState, ExtentFix,
         ExtentRepairIDs, IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId,
         RawReadResponse, ReconcileIO, ReconcileIOState, ReconciliationId,
         SnapshotDetails,
@@ -4472,7 +4474,10 @@ pub(crate) mod test {
     }
 
     /// Helper function to legally move the given client to live-repair
-    fn move_to_live_repair(ds: &mut Downstairs, to_repair: ClientId) {
+    pub(super) fn move_to_live_repair(
+        ds: &mut Downstairs,
+        to_repair: ClientId,
+    ) {
         to_live_repair_ready(ds, to_repair);
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,
@@ -4482,16 +4487,18 @@ pub(crate) mod test {
 
     fn set_all_reconcile(ds: &mut Downstairs) {
         let mode = ConnectionMode::New;
+        let up_state = UpstairsState::GoActive(BlockRes::dummy());
         for cid in ClientId::iter() {
             for state in [
-                NegotiationState::Start { auto_promote: true },
+                NegotiationState::WaitActive,
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
                 NegotiationState::Reconcile,
             ] {
                 ds.clients[cid].checked_state_transition(
-                    &UpstairsState::Active,
+                    &up_state,
                     DsState::Connecting { state, mode },
                 );
             }
@@ -6152,7 +6159,6 @@ pub(crate) mod test {
                 },
             ),
         ]));
-        set_all_reconcile(&mut ds);
 
         // Send the first reconciliation req
         assert!(!ds.send_next_reconciliation_req());
