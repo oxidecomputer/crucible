@@ -939,12 +939,6 @@ impl DownstairsClient {
     /// will panic if there is not a valid state transition edge between the
     /// current `self.state` and the requested `new_state`.
     ///
-    /// For example, transitioning to a `new_state` of [DsState::Replacing] is
-    /// *always* possible, so this will never panic for that state transition.
-    /// On the other hand, [DsState::Replaced] can *only* follow
-    /// [DsState::Replacing], so if the current state is *anything else*, that
-    /// indicates a logic error happened in some other part of the code.
-    ///
     /// If the state transition is valid, this function simply sets `self.state`
     /// to the newly requested state. There's no magic here beyond that; this
     /// function does not change anything about the state or any other internal
@@ -954,11 +948,129 @@ impl DownstairsClient {
     /// If the transition is not valid
     pub(crate) fn checked_state_transition(
         &mut self,
-        _up_state: &UpstairsState,
+        up_state: &UpstairsState,
         new_state: DsState,
     ) {
-        // TODO reimplement all of the checks
+        if !Self::is_state_transition_valid(up_state, self.state, new_state) {
+            panic!(
+                "invalid state transition from {:?} -> {:?} \
+                 (with up_state: {:?}",
+                self.state, new_state, up_state
+            );
+        }
         self.state = new_state;
+    }
+
+    /// Check if a state transition is valid, returning `true` or `false`
+    fn is_state_transition_valid(
+        up_state: &UpstairsState,
+        prev_state: DsState,
+        next_state: DsState,
+    ) -> bool {
+        use ConnectionMode as C;
+        use DsState as D;
+        use NegotiationState as N;
+        use UpstairsState as U;
+        match (prev_state, next_state) {
+            (
+                D::Connecting {
+                    state: prev_state,
+                    mode: prev_mode,
+                },
+                D::Connecting {
+                    state: next_state,
+                    mode: next_mode,
+                },
+            ) => {
+                if next_mode == C::New && matches!(up_state, U::Active) {
+                    return false;
+                }
+                next_mode == prev_mode
+                    && NegotiationState::is_transition_valid(
+                        prev_mode, prev_state, next_state,
+                    )
+            }
+            (D::Connecting { state, mode }, D::Active) => {
+                // We can go to Active either through reconciliation or replay;
+                // in other cases, we must use live-repair
+                matches!(
+                    (state, mode),
+                    (N::GetLastFlush, C::Offline)
+                        | (N::Reconcile, C::New)
+                        | (N::LiveRepairReady, C::Faulted | C::Replaced)
+                )
+            }
+            (D::Connecting { state, mode }, D::LiveRepair) => {
+                matches!(
+                    (state, mode),
+                    (N::LiveRepairReady, C::Faulted | C::Replaced)
+                )
+            }
+            (D::LiveRepair, D::Active) => true,
+            // When can we stop the IO task ourselves?
+            (
+                D::Connecting { .. },
+                D::Stopping(
+                    ClientStopReason::NegotiationFailed(..)
+                    | ClientStopReason::Replacing
+                    | ClientStopReason::Disabled
+                    | ClientStopReason::Fault(..),
+                ),
+            ) => true,
+            (
+                D::Active | D::LiveRepair,
+                D::Stopping(
+                    ClientStopReason::Fault(..)
+                    | ClientStopReason::Replacing
+                    | ClientStopReason::Disabled,
+                ),
+            ) => true,
+            (_, D::Stopping(ClientStopReason::Deactivated)) => {
+                matches!(up_state, U::Deactivating(..))
+            }
+
+            (D::Stopping(r), D::Connecting { mode, state }) => {
+                use ClientStopReason as R;
+                matches!(
+                    (r, mode, state),
+                    (R::Fault(..), C::Faulted, N::Start { .. })
+                        | (
+                            R::Deactivated | R::Disabled,
+                            C::New,
+                            N::Start {
+                                auto_promote: false
+                            }
+                        )
+                        | (
+                            R::Replacing,
+                            C::Replaced,
+                            N::Start { auto_promote: true }
+                        )
+                        | (
+                            R::Replacing,
+                            C::New,
+                            N::Start {
+                                auto_promote: false
+                            }
+                        )
+                        | (R::NegotiationFailed(..), C::New, N::Start { .. })
+                )
+            }
+
+            // When the upstairs is active, we can always spontaneously
+            // disconnect, which brings us to either Offline or Faulted
+            // depending on whether replay is valid
+            (
+                _,
+                D::Connecting {
+                    mode: C::Offline | C::Faulted,
+                    state: N::Start { auto_promote: true },
+                },
+            ) => matches!(up_state, U::Active),
+
+            // Anything not allowed is prohibited
+            _ => false,
+        }
     }
 
     /// Sets `repair_info` to `None` and increments `live_repair_aborted`
@@ -1902,6 +2014,43 @@ pub enum NegotiationState {
     LiveRepairReady,
 }
 
+impl NegotiationState {
+    fn is_transition_valid(
+        mode: ConnectionMode,
+        prev_state: Self,
+        next_state: Self,
+    ) -> bool {
+        use ConnectionMode as C;
+        use NegotiationState as N;
+
+        matches!(
+            (prev_state, next_state, mode),
+            (N::Start { auto_promote: true }, N::WaitForPromote, _)
+                | (
+                    N::Start {
+                        auto_promote: false,
+                    },
+                    N::WaitActive,
+                    _,
+                )
+                | (N::WaitActive, N::WaitForPromote, _)
+                | (N::WaitForPromote, N::WaitForRegionInfo, _)
+                | (N::WaitForRegionInfo, N::GetLastFlush, C::Offline)
+                | (
+                    N::WaitForRegionInfo,
+                    N::GetExtentVersions,
+                    C::New | C::Faulted | C::Replaced,
+                )
+                | (N::GetExtentVersions, N::WaitQuorum, C::New)
+                | (N::WaitQuorum, N::Reconcile, C::New)
+                | (
+                    N::GetExtentVersions,
+                    N::LiveRepairReady,
+                    C::Faulted | C::Replaced,
+                )
+        )
+    }
+}
 /// Result value returned when negotiation is complete
 pub(crate) enum NegotiationResult {
     NotDone,
