@@ -1057,13 +1057,7 @@ impl DownstairsClient {
                             C::Replaced,
                             N::Start { auto_promote: true }
                         )
-                        | (
-                            R::Replacing,
-                            C::New,
-                            N::Start {
-                                auto_promote: false
-                            }
-                        )
+                        | (R::Replacing, C::New, N::Start { .. })
                         | (R::NegotiationFailed(..), C::New, N::Start { .. })
                 )
             }
