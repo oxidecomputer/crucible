@@ -973,6 +973,16 @@ impl DownstairsClient {
         use UpstairsState as U;
         match (prev_state, next_state) {
             (
+                D::Connecting { .. },
+                D::Connecting {
+                    state: N::Start { .. },
+                    ..
+                },
+            ) => {
+                // restarting negotiation is allowed
+                true
+            }
+            (
                 D::Connecting {
                     state: prev_state,
                     mode: prev_mode,
@@ -982,6 +992,7 @@ impl DownstairsClient {
                     mode: next_mode,
                 },
             ) => {
+                // Check normal negotiation path
                 if next_mode == C::New && matches!(up_state, U::Active) {
                     return false;
                 }
