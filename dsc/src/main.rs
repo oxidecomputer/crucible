@@ -44,9 +44,9 @@ enum Action {
         #[clap(subcommand)]
         client_command: ClientCommand,
 
-        /// URL location of the Crucible control server
-        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        server: String,
+        /// The IP/Port where the control server is listening
+        #[clap(long, default_value = "127.0.0.1:9998", action)]
+        server: SocketAddr,
     },
     /// Create a downstairs region then exit.
     Create {
@@ -275,6 +275,7 @@ impl DownstairsInfo {
         };
 
         let region_dir = self.region_dir.clone();
+        println!("Run run command for {}", self.port);
         let cmd = Command::new(self.ds_bin.clone())
             .args([
                 "run",
@@ -285,13 +286,15 @@ impl DownstairsInfo {
                 "--mode",
                 &mode,
             ])
+            .stdin(Stdio::null())
             .stdout(Stdio::from(outputs))
             .stderr(Stdio::from(errors))
+            .kill_on_drop(true)
             .spawn()
             .context("Failed trying to run downstairs")?;
 
         println!(
-            "Downstairs {} port {} PID:{:?}",
+            "Downstairs {} port {} PID:{:?} was started",
             region_dir,
             self.port,
             cmd.id()
@@ -1043,7 +1046,9 @@ async fn start_dsc(
                                 action_tx.send(
                                     DownstairsAction::DisableRestart
                                 ).await.unwrap();
-                                action_tx.send(DownstairsAction::Stop).await.unwrap();
+                                action_tx.send(
+                                    DownstairsAction::Stop
+                                ).await.unwrap();
                             }
                             println!("Shut it down");
                             timeout_deadline =
@@ -1189,7 +1194,15 @@ async fn start_ds(
     .unwrap();
 
     // Create a new process that will run the downstairs
-    let cmd = ds.start().unwrap();
+    println!("call ds.start for port {}", ds.port);
+    let cmd = match ds.start() {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            println!("failed starting port {} with {:?}", ds.port, e);
+            panic!("failed starting port {} {:?}", ds.port, e);
+        }
+    };
+    println!("Now send message about Running for port {}", ds.port);
     tx.send(MonitorInfo {
         port: ds.port,
         client_id: ds.client_id,
@@ -1512,6 +1525,7 @@ fn cleanup(output_dir: PathBuf, region_dir: Vec<PathBuf>) -> Result<()> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    //console_subscriber::init();
     let runtime = Builder::new_multi_thread()
         .worker_threads(10)
         .thread_name("dsc")
@@ -1631,6 +1645,7 @@ fn main() -> Result<()> {
 
             let dsci_c = Arc::clone(&dsci);
             // Start the dropshot control endpoint
+            console_subscriber::init();
             runtime.spawn(control::begin(dsci_c, control));
 
             runtime.block_on(start_dsc(&dsci, notify_rx))

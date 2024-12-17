@@ -8,6 +8,7 @@ edition = "2021"
 anyhow.workspace = true
 byte-unit.workspace = true
 clap.workspace = true
+console-subscriber.workspace = true
 crucible-client-types.workspace = true
 crucible-common.workspace = true
 crucible-workspace-hack.workspace = true

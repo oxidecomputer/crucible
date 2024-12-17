@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use dsc_client::Client;
+use std::net::SocketAddr;
 
 use anyhow::Result;
 
@@ -84,8 +85,9 @@ pub enum ClientCommand {
 
 // Connect to the DSC and run a command.
 #[tokio::main]
-pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
-    let dsc = Client::new(&server);
+pub async fn client_main(server: SocketAddr, cmd: ClientCommand) -> Result<()> {
+    let url = format!("http://{}", server);
+    let dsc = Client::new(&url);
     match cmd {
         ClientCommand::AllRunning => {
             let res = dsc.dsc_all_running().await.unwrap();
