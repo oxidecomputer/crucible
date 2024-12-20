@@ -110,6 +110,12 @@ const IO_CACHED_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 /// them comes back.
 const IO_CACHED_MAX_JOBS: u64 = 10000;
 
+// Re-exports for unit testing
+#[cfg(feature = "integration-tests")]
+pub mod testing {
+    pub const IO_CACHED_MAX_JOBS: u64 = super::IO_CACHED_MAX_JOBS;
+}
+
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
 /// between flushes are performed in.
@@ -375,11 +381,6 @@ mod cdt {
     fn ds__repair__done(_: u64, _: u8) {}
     fn ds__noop__done(_: u64, _: u8) {}
     fn ds__reopen__done(_: u64, _: u8) {}
-    fn up__to__ds__read__done(_: u64) {}
-    fn up__to__ds__write__done(_: u64) {}
-    fn up__to__ds__write__unwritten__done(_: u64) {}
-    fn up__to__ds__flush__done(_: u64) {}
-    fn up__to__ds__barrier__done(_: u64) {}
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
@@ -511,12 +512,6 @@ pub struct WorkCounts {
     error: u64,   // This IO had an error.
     skipped: u64, // Skipped
     done: u64,    // This IO has completed
-}
-
-impl WorkCounts {
-    fn completed_ok(&self) -> u64 {
-        self.done
-    }
 }
 
 #[derive(Debug, Copy, Clone)]
