@@ -6,7 +6,7 @@ source.rust.release = true
 source.paths = [
   { from = "agent/smf", to = "/var/svc/manifest/site/crucible" },
   { from = "agent/downstairs_method_script.sh", to = "/opt/oxide/lib/svc/manifest/crucible/downstairs.sh" },
-  { from = "tools/dtrace/downstairs_count.d", to = "/opt/oxide/dtrace/downstairs_count.d" },
+  { from = "tools/dtrace/downstairs_count.d", to = "/opt/oxide/dtrace/crucible/downstairs_count.d" },
 ]
 output.type = "zone"
 
@@ -19,11 +19,12 @@ source.paths = [
   { from = "pantry/smf/pantry.xml", to = "/var/svc/manifest/site/crucible/pantry.xml" },
   { from = "tools/dtrace/upstairs_info.d", to = "/opt/oxide/dtrace/upstairs_info.d" },
   { from = "tools/dtrace/upstairs_repair.d", to = "/opt/oxide/dtrace/upstairs_repair.d" },
-  { from = "tools/dtrace/upstairs_raw.d", to = "/opt/oxide/dtrace/upstairs_raw.d" },
-  { from = "tools/dtrace/get-lr-state.sh", to = "/opt/oxide/dtrace/get-lr-state.sh" },
-  { from = "tools/dtrace/get-ds-state.sh", to = "/opt/oxide/dtrace/get-ds-state.sh" },
-  { from = "tools/dtrace/single_up_info.d", to = "/opt/oxide/dtrace/single_up_info.d" },
-  { from = "tools/dtrace/sled_upstairs_info.d", to = "/opt/oxide/dtrace/sled_upstairs_info.d" },
-  { from = "tools/dtrace/all_downstairs.d", to = "/opt/oxide/dtrace/all_downstairs.d" },
+  { from = "tools/dtrace/upstairs_raw.d", to = "/opt/oxide/dtrace/crucible/upstairs_raw.d" },
+  { from = "tools/dtrace/get-lr-state.sh", to = "/opt/oxide/dtrace/crucible/get-lr-state.sh" },
+  { from = "tools/dtrace/get-ds-state.sh", to = "/opt/oxide/dtrace/crucible/get-ds-state.sh" },
+  { from = "tools/dtrace/single_up_info.d", to = "/opt/oxide/dtrace/crucible/single_up_info.d" },
+  { from = "tools/dtrace/sled_upstairs_info.d", to = "/opt/oxide/dtrace/crucible/sled_upstairs_info.d" },
+  { from = "tools/dtrace/all_downstairs.d", to = "/opt/oxide/dtrace/crucible/all_downstairs.d" },
+  { from = "tools/dtrace/up-info.d", to = "/opt/oxide/dtrace/crucible/up-info.d" },
 ]
 output.type = "zone"
