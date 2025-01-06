@@ -878,14 +878,16 @@ impl Upstairs {
     }
 
     /// Checks if a repair is possible. If so, checks if any Downstairs is in
-    /// the [DsState::LiveRepairReady] state, indicating it needs to be
-    /// repaired. If a Downstairs needs to be repaired, try to start repairing
-    /// it. When starting the repair fails, this function will schedule a task
-    /// to retry the repair by setting [Self::repair_check_deadline].
+    /// the [DsState::Connecting] state with the negotiation state of
+    /// [NegotiationState::LiveRepairReady], indicating it needs to be repaired.
+    /// If a Downstairs needs to be repaired, try to start repairing it. When
+    /// starting the repair fails, this function will schedule a task to retry
+    /// the repair by setting [Self::repair_check_deadline].
     ///
     /// If this Upstairs is [UpstairsConfig::read_only], this function will move
-    /// any Downstairs from [DsState::LiveRepairReady] back to [DsState::Active]
-    /// without actually performing any repair.
+    /// any Downstairs from
+    /// `DsState::Connecting { state:  NegotiationState::LiveRepairReady, .. }`
+    /// back to [DsState::Active] without actually performing any repair.
     pub(crate) fn on_repair_check(&mut self) {
         info!(self.log, "Checking if live repair is needed");
         if !matches!(self.state, UpstairsState::Active) {
