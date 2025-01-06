@@ -1409,7 +1409,6 @@ impl DownstairsClient {
             );
             return Ok(NegotiationResult::NotDone);
         };
-        let mut out = NegotiationResult::NotDone;
         let mode = *mode; // mode is immutable here
         match m {
             Message::YesItsMe {
@@ -1453,6 +1452,7 @@ impl DownstairsClient {
                     // Nothing to do here, wait for set_active_request
                     *state = NegotiationState::WaitActive;
                 }
+                Ok(NegotiationResult::NotDone)
             }
             Message::VersionMismatch { version } => {
                 error!(
@@ -1464,6 +1464,7 @@ impl DownstairsClient {
                     up_state,
                     ClientNegotiationFailed::Incompatible,
                 );
+                Ok(NegotiationResult::NotDone)
             }
             Message::EncryptedMismatch { expected } => {
                 error!(
@@ -1475,6 +1476,7 @@ impl DownstairsClient {
                     up_state,
                     ClientNegotiationFailed::Incompatible,
                 );
+                Ok(NegotiationResult::NotDone)
             }
             Message::ReadOnlyMismatch { expected } => {
                 error!(
@@ -1486,6 +1488,7 @@ impl DownstairsClient {
                     up_state,
                     ClientNegotiationFailed::Incompatible,
                 );
+                Ok(NegotiationResult::NotDone)
             }
             Message::YouAreNowActive {
                 upstairs_id,
@@ -1560,6 +1563,7 @@ impl DownstairsClient {
 
                 *state = NegotiationState::WaitForRegionInfo;
                 self.send(Message::RegionInfoPlease);
+                Ok(NegotiationResult::NotDone)
             }
             Message::RegionInfo { region_def } => {
                 if *state != NegotiationState::WaitForRegionInfo {
@@ -1722,6 +1726,7 @@ impl DownstairsClient {
                         self.send(Message::ExtentVersionsPlease);
                     }
                 }
+                Ok(NegotiationResult::NotDone)
             }
             Message::LastFlushAck { last_flush_number } => {
                 if *state != NegotiationState::GetLastFlush {
@@ -1748,7 +1753,7 @@ impl DownstairsClient {
                 // Immediately set the state to Active, and return a flag
                 // indicating that jobs should be replayed.
                 self.checked_state_transition(up_state, DsState::Active);
-                out = NegotiationResult::Replay;
+                Ok(NegotiationResult::Replay)
             }
             Message::ExtentVersions {
                 gen_numbers,
@@ -1764,10 +1769,10 @@ impl DownstairsClient {
                     // TODO should we trigger set_inactive?
                     return Ok(NegotiationResult::NotDone);
                 }
-                match mode {
+                let out = match mode {
                     ConnectionMode::New => {
                         *state = NegotiationState::WaitQuorum;
-                        out = NegotiationResult::WaitQuorum;
+                        NegotiationResult::WaitQuorum
                     }
                     // Special case: if a downstairs is replaced while we're
                     // still trying to go active, then we use the WaitQuorum
@@ -1780,12 +1785,12 @@ impl DownstairsClient {
                         ) =>
                     {
                         *state = NegotiationState::WaitQuorum;
-                        out = NegotiationResult::WaitQuorum;
+                        NegotiationResult::WaitQuorum
                     }
 
                     ConnectionMode::Faulted | ConnectionMode::Replaced => {
                         *state = NegotiationState::LiveRepairReady;
-                        out = NegotiationResult::LiveRepair;
+                        NegotiationResult::LiveRepair
                     }
                     ConnectionMode::Offline => {
                         panic!(
@@ -1793,7 +1798,7 @@ impl DownstairsClient {
                             self.state
                         );
                     }
-                }
+                };
 
                 /*
                  * Record this downstairs region info for later
@@ -1809,10 +1814,10 @@ impl DownstairsClient {
                 if let Some(old_rm) = self.region_metadata.replace(dsr) {
                     warn!(self.log, "new RM replaced this: {:?}", old_rm);
                 }
+                Ok(out)
             }
             m => panic!("invalid message in continue_negotiation: {m:?}"),
         }
-        Ok(out)
     }
 
     /// Sends the next reconciliation job to all clients
