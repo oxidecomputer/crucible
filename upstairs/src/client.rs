@@ -438,7 +438,10 @@ impl DownstairsClient {
     pub(crate) fn begin_reconcile(&mut self) {
         info!(self.log, "Transition from {:?} to Reconcile", self.state);
         let DsState::Connecting { state, mode } = &mut self.state else {
-            panic!("invalid state {:?}", self.state);
+            panic!(
+                "invalid state {:?} for client {}",
+                self.state, self.client_id
+            );
         };
         assert_eq!(*state, NegotiationState::WaitQuorum);
         assert!(matches!(mode, ConnectionMode::New));
@@ -953,9 +956,9 @@ impl DownstairsClient {
     ) {
         if !Self::is_state_transition_valid(up_state, self.state, new_state) {
             panic!(
-                "invalid state transition from {:?} -> {:?} \
-                 (with up_state: {:?}",
-                self.state, new_state, up_state
+                "invalid state transition for client {} from {:?} -> {:?} \
+                 (with up_state: {:?})",
+                self.client_id, self.state, new_state, up_state
             );
         }
         self.state = new_state;
