@@ -565,14 +565,26 @@ impl DownstairsClient {
                 ConnectionMode::Faulted
             }
 
-            // Failures during negotiation or deactivation have to start from
-            // the very beginning.
-            DsState::Stopping(ClientStopReason::NegotiationFailed(..))
-            | DsState::Stopping(ClientStopReason::Disabled)
+            // Failures during deactivation restart from the very beginning
+            DsState::Stopping(ClientStopReason::Disabled)
             | DsState::Stopping(ClientStopReason::Deactivated) => {
-                // XXX NegotiationFailed could also be hit during reconnection,
-                // in which case we shouldn't use `ConnectionMode::New` (?)
                 ConnectionMode::New
+            }
+
+            // Failures during negotiation either restart from the beginning, or
+            // go through the live-repair path.
+            DsState::Stopping(ClientStopReason::NegotiationFailed(..)) => {
+                match up_state {
+                    // If we haven't activated yet, then start from New
+                    UpstairsState::GoActive(..)
+                    | UpstairsState::Initializing => ConnectionMode::New,
+
+                    // Otherwise, use live-repair
+                    UpstairsState::Active
+                    | UpstairsState::Deactivating { .. } => {
+                        ConnectionMode::Faulted
+                    }
+                }
             }
 
             DsState::Stopping(ClientStopReason::Replacing) => match up_state {
