@@ -10,7 +10,7 @@ use crate::{
     cdt,
     client::{
         ClientAction, ClientFaultReason, ClientNegotiationFailed,
-        DownstairsClient, EnqueueResult,
+        ClientStopReason, DownstairsClient, EnqueueResult,
     },
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
@@ -2556,7 +2556,7 @@ impl Downstairs {
             // We don't really know if the "old" matches what was old,
             // as that info is gone to us now, so assume it was true.
             match self.clients[new_client_id].state() {
-                DsState::Replacing
+                DsState::Stopping(ClientStopReason::Replacing)
                 | DsState::Replaced
                 | DsState::LiveRepairReady
                 | DsState::LiveRepair => {
@@ -2586,7 +2586,9 @@ impl Downstairs {
                 continue;
             }
             match self.clients[client_id].state() {
-                DsState::Replacing
+                // XXX there are a bunch of states that aren't ready for IO but
+                // aren't listed here, e.g. all of the negotiation states.
+                DsState::Stopping(..)
                 | DsState::Replaced
                 | DsState::LiveRepairReady
                 | DsState::LiveRepair => {
@@ -2706,29 +2708,36 @@ impl Downstairs {
     /// The live-repair may continue after this point to clean up reserved jobs,
     /// to avoid blocking dependencies, but jobs are replaced with no-ops.
     fn abort_repair(&mut self, up_state: &UpstairsState) {
-        assert!(self.clients.iter().any(|c| {
-            c.state() == DsState::LiveRepair ||
-                // If connection aborted, and restarted, then the re-negotiation
-                // could have won this race, and transitioned the reconnecting
-                // downstairs from LiveRepair to Faulted to LiveRepairReady.
-                c.state() == DsState::LiveRepairReady ||
-                // If just a single IO reported failure, we will fault this
-                // downstairs and it won't yet have had a chance to move back
-                // around to LiveRepairReady yet.
-                c.state() == DsState::Faulted
-        }));
+        let mut found_valid_state = false;
         for i in ClientId::iter() {
             match self.clients[i].state() {
                 DsState::LiveRepair => {
+                    found_valid_state = true;
                     self.fault_client(
                         i,
                         up_state,
                         ClientFaultReason::FailedLiveRepair,
                     );
                 }
-                DsState::LiveRepairReady => {
-                    // TODO I don't think this is necessary
-                    self.skip_all_jobs(i);
+                // If connection aborted, and restarted, then the re-negotiation
+                // could have won this race, and transitioned the reconnecting
+                // downstairs from LiveRepair to Faulted to LiveRepairReady.
+                DsState::LiveRepairReady => found_valid_state = true,
+
+                // If just a single IO reported failure, we will fault this
+                // downstairs and it won't yet have had a chance to move back
+                // around to LiveRepairReady yet.
+                DsState::Faulted => found_valid_state = true,
+
+                // It's also possible for a Downstairs to be in the process of
+                // stopping, due a fault or disconnection
+                DsState::Stopping(
+                    ClientStopReason::Replacing
+                    | ClientStopReason::Disabled
+                    | ClientStopReason::Deactivated
+                    | ClientStopReason::Fault(..),
+                ) => {
+                    found_valid_state = true;
                 }
                 _ => {}
             }
@@ -2738,6 +2747,11 @@ impl Downstairs {
             // always clear it.
             self.clients[i].clear_repair_state();
         }
+        assert!(
+            found_valid_state,
+            "abort_repair called without a valid client state: {:?}",
+            self.clients.iter().map(|c| c.state()).collect::<Vec<_>>(),
+        );
 
         if let Some(repair) = &mut self.repair {
             repair.aborting_repair = true;
@@ -3356,9 +3370,7 @@ impl Downstairs {
                     "Saw CrucibleError::UpstairsInactive on client {}!",
                     client_id
                 );
-                self.clients[client_id]
-                    .checked_state_transition(up_state, DsState::Disabled);
-                // TODO should we also restart the IO task here?
+                self.clients[client_id].disable(up_state);
             }
             Some(CrucibleError::DecryptionError) => {
                 // We should always be able to decrypt the data.  If we
@@ -4341,7 +4353,10 @@ struct DownstairsBackpressureConfig {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use super::{ClientFaultReason, Downstairs, PendingJob};
+    use super::{
+        ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
+        Downstairs, PendingJob,
+    };
     use crate::{
         downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
         live_repair::ExtentInfo,
@@ -4363,6 +4378,17 @@ pub(crate) mod test {
     };
 
     use uuid::Uuid;
+
+    // Helper constants for verbose stopping states
+    const STOP_FAULT_REQUESTED: DsState = DsState::Stopping(
+        ClientStopReason::Fault(ClientFaultReason::RequestedFault),
+    );
+    const STOP_IO_ERROR: DsState =
+        DsState::Stopping(ClientStopReason::Fault(ClientFaultReason::IOError));
+    const STOP_FAILED_RECONCILE: DsState =
+        DsState::Stopping(ClientStopReason::NegotiationFailed(
+            ClientNegotiationFailed::FailedReconcile,
+        ));
 
     /// Builds a single-block reply from the given request and response data
     pub fn build_read_response(data: &[u8]) -> RawReadResponse {
@@ -6069,9 +6095,10 @@ pub(crate) mod test {
 
         // Fault client 1, so that later event handling will kick us out of
         // repair
-        ds.clients[ClientId::new(1)].checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Faulted,
+        ds.fault_client(
+            ClientId::new(1),
+            &UpstairsState::Active,
+            ClientFaultReason::RequestedFault,
         );
 
         // Send an ack to trigger the reconciliation state check
@@ -6083,9 +6110,9 @@ pub(crate) mod test {
         assert!(!nw);
 
         // The two troublesome tasks will end up in DsState::New.
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::New);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_FAILED_RECONCILE,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_FAULT_REQUESTED);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), STOP_FAILED_RECONCILE);
 
         // Verify that reconciliation has been stopped
         assert!(ds.reconcile.is_none());
@@ -6126,9 +6153,9 @@ pub(crate) mod test {
 
         // Getting the next work to do should verify the previous is done,
         // and handle a state change for a downstairs.
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::New);
+        for c in ds.clients.iter() {
+            assert_eq!(c.state(), STOP_FAILED_RECONCILE);
+        }
 
         // Verify that reconciliation has stopped
         assert!(ds.reconcile.is_none());
@@ -6587,7 +6614,7 @@ pub(crate) mod test {
             None,
         ));
         // client 0 is failed, the others should be okay still
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
@@ -6599,8 +6626,8 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None,
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // Three failures, But since this is a write we already have marked
@@ -6613,9 +6640,9 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None,
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), STOP_IO_ERROR,);
 
         // Verify that this work should have been fast-acked
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
@@ -6646,7 +6673,7 @@ pub(crate) mod test {
             None
         ));
         // client 0 should be marked failed.
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
 
         let ok_response = || Ok(Default::default());
         // Process the good operation for client 1
@@ -6666,7 +6693,7 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
@@ -6775,7 +6802,7 @@ pub(crate) mod test {
             None,
         ));
         // client 0 is failed, the others should be okay still
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
@@ -6787,8 +6814,8 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         let ok_response = Ok(Default::default());
@@ -6800,8 +6827,8 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // Verify we should have fast-ackd this work
@@ -6880,7 +6907,7 @@ pub(crate) mod test {
 
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // A faulted write won't change skipped job count.
@@ -7022,7 +7049,7 @@ pub(crate) mod test {
 
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // Verify the read switched from InProgress to Skipped
@@ -7087,7 +7114,7 @@ pub(crate) mod test {
 
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // The write was fast-acked, and the read is still going
@@ -7197,7 +7224,7 @@ pub(crate) mod test {
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), STOP_IO_ERROR,);
 
         // Verify all IOs are done
         for cid in ClientId::iter() {
@@ -7306,7 +7333,7 @@ pub(crate) mod test {
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), STOP_IO_ERROR,);
 
         // Verify all IOs are done
         for cid in ClientId::iter() {
@@ -9628,14 +9655,14 @@ pub(crate) mod test {
             &UpstairsState::Active,
             ClientFaultReason::RequestedFault,
         );
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
+        for s in [
+            DsState::Faulted,
             DsState::LiveRepairReady,
-        );
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
             DsState::LiveRepair,
-        );
+        ] {
+            ds.clients[to_repair]
+                .checked_state_transition(&UpstairsState::Active, s);
+        }
 
         let next_id = ds.peek_next_id().0;
         ds.repair = Some(LiveRepairData {
@@ -9797,14 +9824,14 @@ pub(crate) mod test {
             &UpstairsState::Active,
             ClientFaultReason::RequestedFault,
         );
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
+        for s in [
+            DsState::Faulted,
             DsState::LiveRepairReady,
-        );
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
             DsState::LiveRepair,
-        );
+        ] {
+            ds.clients[to_repair]
+                .checked_state_transition(&UpstairsState::Active, s);
+        }
 
         let next_id = ds.peek_next_id().0;
 
@@ -9953,10 +9980,10 @@ pub(crate) mod test {
             &UpstairsState::Active,
             ClientFaultReason::RequestedFault,
         );
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
-            DsState::LiveRepairReady,
-        );
+        for s in [DsState::Faulted, DsState::LiveRepairReady] {
+            ds.clients[to_repair]
+                .checked_state_transition(&UpstairsState::Active, s);
+        }
 
         // Start the repair normally. This enqueues the close & reopen jobs, and
         // reserves Job IDs for the repair/noop

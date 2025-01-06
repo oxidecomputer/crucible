@@ -2,7 +2,7 @@
 //! Data structures specific to Crucible's `struct Upstairs`
 use crate::{
     cdt,
-    client::{ClientAction, ClientRunResult},
+    client::{ClientAction, ClientRunResult, ClientStopReason},
     control::ControlRequest,
     deferred::{
         DeferredBlockOp, DeferredMessage, DeferredQueue, DeferredRead,
@@ -616,12 +616,13 @@ impl Upstairs {
         if matches!(&self.state, UpstairsState::Deactivating(..)) {
             info!(self.log, "checking for deactivation");
             for i in ClientId::iter() {
-                // Clients become Deactivated, then New (when the IO task
+                // Clients become Stopping, then New (when the IO task
                 // completes and the client is restarted).  We don't try to
                 // deactivate them _again_ in such cases.
                 if matches!(
                     self.downstairs.clients[i].state(),
-                    DsState::Deactivated | DsState::New
+                    DsState::Stopping(ClientStopReason::Deactivated)
+                        | DsState::New
                 ) {
                     debug!(self.log, "already deactivated {i}");
                 } else if self.downstairs.try_deactivate(i, &self.state) {
@@ -2226,7 +2227,10 @@ pub(crate) mod test {
         // Make sure the correct DS have changed state.
         for client_id in ClientId::iter() {
             // The downstairs is already deactivated
-            assert_eq!(up.ds_state(client_id), DsState::Deactivated);
+            assert_eq!(
+                up.ds_state(client_id),
+                DsState::Stopping(ClientStopReason::Deactivated)
+            );
 
             // Push the event loop forward with the info that the IO task has
             // now stopped.
@@ -3591,8 +3595,14 @@ pub(crate) mod test {
         }
 
         // These downstairs should now be deactivated now
-        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Deactivated);
-        assert_eq!(up.ds_state(ClientId::new(2)), DsState::Deactivated);
+        assert_eq!(
+            up.ds_state(ClientId::new(0)),
+            DsState::Stopping(ClientStopReason::Deactivated)
+        );
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Stopping(ClientStopReason::Deactivated)
+        );
 
         // Verify the remaining DS is still running
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::Active);
@@ -3612,7 +3622,10 @@ pub(crate) mod test {
             }),
         }));
 
-        assert_eq!(up.ds_state(ClientId::new(1)), DsState::Deactivated);
+        assert_eq!(
+            up.ds_state(ClientId::new(1)),
+            DsState::Stopping(ClientStopReason::Deactivated)
+        );
 
         // Report all three DS as missing, which moves them to New and finishes
         // deactivation
