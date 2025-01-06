@@ -552,6 +552,10 @@ impl DownstairsClient {
                 ..
             } if !can_replay => ConnectionMode::Faulted,
 
+            // If the Downstairs has spontaneously stopped, we will attempt to
+            // replay jobs when reconnecting
+            DsState::Active => ConnectionMode::Offline,
+
             // Other failures during connection preserve the previous mode
             DsState::Connecting { mode, .. } => *mode,
 
@@ -560,10 +564,6 @@ impl DownstairsClient {
             | DsState::Stopping(ClientStopReason::Fault(..)) => {
                 ConnectionMode::Faulted
             }
-
-            // If the Downstairs has spontaneously stopped, we will attempt to
-            // replay jobs when reconnecting
-            DsState::Active => ConnectionMode::Offline,
 
             // Failures during negotiation or deactivation have to start from
             // the very beginning.
