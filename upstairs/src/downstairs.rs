@@ -2708,33 +2708,36 @@ impl Downstairs {
     /// The live-repair may continue after this point to clean up reserved jobs,
     /// to avoid blocking dependencies, but jobs are replaced with no-ops.
     fn abort_repair(&mut self, up_state: &UpstairsState) {
-        assert!(self.clients.iter().any(|c| matches!(
-            c.state(),
-            DsState::LiveRepair |
-                // If connection aborted, and restarted, then the re-negotiation
-                // could have won this race, and transitioned the reconnecting
-                // downstairs from LiveRepair to Faulted to LiveRepairReady.
-                DsState::LiveRepairReady |
-                // If just a single IO reported failure, we will fault this
-                // downstairs and it won't yet have had a chance to move back
-                // around to LiveRepairReady yet.
-                DsState::Faulted |
-                // It's also possible for a Downstairs to be in the process of
-                // stopping, due a fault or disconnection
-                DsState::Stopping(..) // XXX should we be more specific here?
-        )));
+        let mut found_valid_state = false;
         for i in ClientId::iter() {
             match self.clients[i].state() {
                 DsState::LiveRepair => {
+                    found_valid_state = true;
                     self.fault_client(
                         i,
                         up_state,
                         ClientFaultReason::FailedLiveRepair,
                     );
                 }
-                DsState::LiveRepairReady => {
-                    // TODO I don't think this is necessary
-                    self.skip_all_jobs(i);
+                // If connection aborted, and restarted, then the re-negotiation
+                // could have won this race, and transitioned the reconnecting
+                // downstairs from LiveRepair to Faulted to LiveRepairReady.
+                DsState::LiveRepairReady => found_valid_state = true,
+
+                // If just a single IO reported failure, we will fault this
+                // downstairs and it won't yet have had a chance to move back
+                // around to LiveRepairReady yet.
+                DsState::Faulted => found_valid_state = true,
+
+                // It's also possible for a Downstairs to be in the process of
+                // stopping, due a fault or disconnection
+                DsState::Stopping(
+                    ClientStopReason::Replacing
+                    | ClientStopReason::Disabled
+                    | ClientStopReason::Deactivated
+                    | ClientStopReason::Fault(..),
+                ) => {
+                    found_valid_state = true;
                 }
                 _ => {}
             }
@@ -2744,6 +2747,11 @@ impl Downstairs {
             // always clear it.
             self.clients[i].clear_repair_state();
         }
+        assert!(
+            found_valid_state,
+            "abort_repair called without a valid client state: {:?}",
+            self.clients.iter().map(|c| c.state()).collect::<Vec<_>>(),
+        );
 
         if let Some(repair) = &mut self.repair {
             repair.aborting_repair = true;
