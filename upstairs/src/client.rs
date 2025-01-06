@@ -982,33 +982,30 @@ impl DownstairsClient {
         prev_state: DsState,
         next_state: DsState,
     ) -> bool {
-        use ConnectionMode as C;
-        use DsState as D;
-        use NegotiationState as N;
-        use UpstairsState as U;
         match (prev_state, next_state) {
+            // Restarting negotiation is always allowed
             (
-                D::Connecting { .. },
-                D::Connecting {
-                    state: N::Start { .. },
+                DsState::Connecting { .. },
+                DsState::Connecting {
+                    state: NegotiationState::Start { .. },
                     ..
                 },
-            ) => {
-                // restarting negotiation is allowed
-                true
-            }
+            ) => true,
+
+            // Check normal negotiation path
             (
-                D::Connecting {
+                DsState::Connecting {
                     state: prev_state,
                     mode: prev_mode,
                 },
-                D::Connecting {
+                DsState::Connecting {
                     state: next_state,
                     mode: next_mode,
                 },
             ) => {
-                // Check normal negotiation path
-                if next_mode == C::New && matches!(up_state, U::Active) {
+                if next_mode == ConnectionMode::New
+                    && matches!(up_state, UpstairsState::Active)
+                {
                     return false;
                 }
                 next_mode == prev_mode
@@ -1016,27 +1013,35 @@ impl DownstairsClient {
                         prev_mode, prev_state, next_state,
                     )
             }
-            (D::Connecting { state, mode }, D::Active) => {
-                // We can go to Active either through reconciliation or replay;
-                // in other cases, we must use live-repair
+
+            // We can go to Active either through reconciliation or replay;
+            // in other cases, we must use live-repair
+            (DsState::Connecting { state, mode }, DsState::Active) => {
                 matches!(
                     (state, mode),
-                    (N::GetLastFlush, C::Offline)
-                        | (N::Reconcile, C::New)
-                        | (N::LiveRepairReady, C::Faulted | C::Replaced)
+                    (NegotiationState::GetLastFlush, ConnectionMode::Offline)
+                        | (NegotiationState::Reconcile, ConnectionMode::New)
+                        | (
+                            NegotiationState::LiveRepairReady,
+                            ConnectionMode::Faulted | ConnectionMode::Replaced
+                        )
                 )
             }
-            (D::Connecting { state, mode }, D::LiveRepair) => {
+            (DsState::Connecting { state, mode }, DsState::LiveRepair) => {
                 matches!(
                     (state, mode),
-                    (N::LiveRepairReady, C::Faulted | C::Replaced)
+                    (
+                        NegotiationState::LiveRepairReady,
+                        ConnectionMode::Faulted | ConnectionMode::Replaced
+                    )
                 )
             }
-            (D::LiveRepair, D::Active) => true,
+
             // When can we stop the IO task ourselves?
+            (DsState::LiveRepair, DsState::Active) => true,
             (
-                D::Connecting { .. },
-                D::Stopping(
+                DsState::Connecting { .. },
+                DsState::Stopping(
                     ClientStopReason::NegotiationFailed(..)
                     | ClientStopReason::Replacing
                     | ClientStopReason::Disabled
@@ -1044,36 +1049,44 @@ impl DownstairsClient {
                 ),
             ) => true,
             (
-                D::Active | D::LiveRepair,
-                D::Stopping(
+                DsState::Active | DsState::LiveRepair,
+                DsState::Stopping(
                     ClientStopReason::Fault(..)
                     | ClientStopReason::Replacing
                     | ClientStopReason::Disabled,
                 ),
             ) => true,
-            (_, D::Stopping(ClientStopReason::Deactivated)) => {
-                matches!(up_state, U::Deactivating(..))
+            (_, DsState::Stopping(ClientStopReason::Deactivated)) => {
+                matches!(up_state, UpstairsState::Deactivating(..))
             }
 
-            (D::Stopping(r), D::Connecting { mode, state }) => {
+            (DsState::Stopping(r), DsState::Connecting { mode, state }) => {
                 use ClientStopReason as R;
                 matches!(
                     (r, mode, state),
-                    (R::Fault(..), C::Faulted, N::Start { .. })
-                        | (
-                            R::Deactivated | R::Disabled,
-                            C::New,
-                            N::Start {
-                                auto_promote: false
-                            }
-                        )
-                        | (
-                            R::Replacing,
-                            C::Replaced,
-                            N::Start { auto_promote: true }
-                        )
-                        | (R::Replacing, C::New, N::Start { .. })
-                        | (R::NegotiationFailed(..), C::New, N::Start { .. })
+                    (
+                        R::Fault(..),
+                        ConnectionMode::Faulted,
+                        NegotiationState::Start { .. }
+                    ) | (
+                        R::Deactivated | R::Disabled,
+                        ConnectionMode::New,
+                        NegotiationState::Start {
+                            auto_promote: false
+                        }
+                    ) | (
+                        R::Replacing,
+                        ConnectionMode::Replaced,
+                        NegotiationState::Start { auto_promote: true }
+                    ) | (
+                        R::Replacing,
+                        ConnectionMode::New,
+                        NegotiationState::Start { .. }
+                    ) | (
+                        R::NegotiationFailed(..),
+                        ConnectionMode::New,
+                        NegotiationState::Start { .. }
+                    )
                 )
             }
 
@@ -1082,11 +1095,11 @@ impl DownstairsClient {
             // depending on whether replay is valid
             (
                 _,
-                D::Connecting {
-                    mode: C::Offline | C::Faulted,
-                    state: N::Start { auto_promote: true },
+                DsState::Connecting {
+                    mode: ConnectionMode::Offline | ConnectionMode::Faulted,
+                    state: NegotiationState::Start { auto_promote: true },
                 },
-            ) => matches!(up_state, U::Active),
+            ) => matches!(up_state, UpstairsState::Active),
 
             // Anything not allowed is prohibited
             _ => false,
@@ -2049,34 +2062,49 @@ impl NegotiationState {
         prev_state: Self,
         next_state: Self,
     ) -> bool {
-        use ConnectionMode as C;
-        use NegotiationState as N;
-
         matches!(
             (prev_state, next_state, mode),
-            (N::Start { auto_promote: true }, N::WaitForPromote, _)
-                | (
-                    N::Start {
-                        auto_promote: false,
-                    },
-                    N::WaitActive,
-                    _,
-                )
-                | (N::WaitActive, N::WaitForPromote, _)
-                | (N::WaitForPromote, N::WaitForRegionInfo, _)
-                | (N::WaitForRegionInfo, N::GetLastFlush, C::Offline)
-                | (
-                    N::WaitForRegionInfo,
-                    N::GetExtentVersions,
-                    C::New | C::Faulted | C::Replaced,
-                )
-                | (N::GetExtentVersions, N::WaitQuorum, C::New)
-                | (N::WaitQuorum, N::Reconcile, C::New)
-                | (
-                    N::GetExtentVersions,
-                    N::LiveRepairReady,
-                    C::Faulted | C::Replaced,
-                )
+            (
+                NegotiationState::Start { auto_promote: true },
+                NegotiationState::WaitForPromote,
+                _
+            ) | (
+                NegotiationState::Start {
+                    auto_promote: false,
+                },
+                NegotiationState::WaitActive,
+                _,
+            ) | (
+                NegotiationState::WaitActive,
+                NegotiationState::WaitForPromote,
+                _
+            ) | (
+                NegotiationState::WaitForPromote,
+                NegotiationState::WaitForRegionInfo,
+                _
+            ) | (
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetLastFlush,
+                ConnectionMode::Offline
+            ) | (
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetExtentVersions,
+                ConnectionMode::New
+                    | ConnectionMode::Faulted
+                    | ConnectionMode::Replaced,
+            ) | (
+                NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
+                ConnectionMode::New
+            ) | (
+                NegotiationState::WaitQuorum,
+                NegotiationState::Reconcile,
+                ConnectionMode::New
+            ) | (
+                NegotiationState::GetExtentVersions,
+                NegotiationState::LiveRepairReady,
+                ConnectionMode::Faulted | ConnectionMode::Replaced,
+            )
         )
     }
 }
