@@ -2028,6 +2028,10 @@ pub enum NegotiationState {
 }
 
 impl NegotiationState {
+    /// Checks whether a particular transition is valid
+    ///
+    /// See the docstring of [`NegotiationState`] for a drawing of the full
+    /// state transition diagram
     fn is_transition_valid(
         mode: ConnectionMode,
         prev_state: Self,
