@@ -7,7 +7,7 @@ final='/tmp/get-up-state.final'
 rm -f $final
 
 # Gather our output first.
-dtrace -s /opt/oxide/crucible_dtrace/get-up-state.d | awk 'NF' > "$filename"
+dtrace -s /opt/oxide/dtrace/crucible/get-up-state.d | awk 'NF' > "$filename"
 if [[ $? -ne 0 ]]; then
     exit 1
 fi
