@@ -3,8 +3,8 @@
 use crate::{
     cdt,
     client::{
-        ClientAction, ClientRunResult, ClientStopReason, NegotiationResult,
-        NegotiationState,
+        ClientAction, ClientNegotiationFailed, ClientRunResult,
+        ClientStopReason, NegotiationResult, NegotiationState,
     },
     control::ControlRequest,
     deferred::{
@@ -1706,9 +1706,27 @@ impl Upstairs {
                     .continue_negotiation(m, &self.state, &mut self.ddef);
 
                 match r {
-                    // continue_negotiation returns an error if the upstairs
-                    // should go inactive!
-                    Err(e) => self.set_inactive(e),
+                    Err(e) => {
+                        // If we received an error, then abort negotiation
+                        let f: ClientNegotiationFailed = e.into();
+                        self.downstairs.clients[client_id]
+                            .abort_negotiation(&self.state, f);
+
+                        match f {
+                            // Out-of-order messages and failed reconciliation
+                            // may be fixed by reconnecting and giving the
+                            // Downstairs a second chance to get in sync, so
+                            // we'll do that!
+                            ClientNegotiationFailed::BadNegotiationOrder
+                            | ClientNegotiationFailed::FailedReconcile => (),
+
+                            // Incompatibility is likely persistent, so we set
+                            // the upstairs as inactive
+                            ClientNegotiationFailed::Incompatible => {
+                                self.set_inactive(e.into())
+                            }
+                        }
+                    }
                     Ok(NegotiationResult::NotDone) => (),
                     Ok(NegotiationResult::WaitQuorum) => {
                         // Copy the region definition into the Downstairs
@@ -1899,7 +1917,7 @@ impl Upstairs {
                 // to reset that activation request.  Call
                 // `abort_reconciliation` to abort reconciliation for all
                 // clients.
-                self.set_inactive(e);
+                self.set_inactive(e.into());
                 self.downstairs.abort_reconciliation(&self.state);
                 false
             }

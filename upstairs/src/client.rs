@@ -6,7 +6,9 @@ use crate::{
     DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
     ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
 };
-use crucible_common::{x509::TLSContext, ExtentId, VerboseTimeout};
+use crucible_common::{
+    x509::TLSContext, ExtentId, NegotiationError, VerboseTimeout,
+};
 use crucible_protocol::{
     MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -1330,7 +1332,7 @@ impl DownstairsClient {
         m: Message,
         up_state: &UpstairsState,
         ddef: &mut RegionDefinitionStatus,
-    ) -> Result<NegotiationResult, CrucibleError> {
+    ) -> Result<NegotiationResult, NegotiationError> {
         /*
          * Either we get all the way through the negotiation, or we hit the
          * timeout and exit to retry.
@@ -1427,11 +1429,7 @@ impl DownstairsClient {
                 self.log,
                 "tried to continue negotiation while not connecting"
             );
-            self.abort_negotiation(
-                up_state,
-                ClientNegotiationFailed::BadNegotiationOrder,
-            );
-            return Ok(NegotiationResult::NotDone);
+            return Err(NegotiationError::OutOfOrder);
         };
         let mode = *mode; // mode is immutable here
         match m {
@@ -1441,11 +1439,7 @@ impl DownstairsClient {
             } => {
                 let NegotiationState::Start { auto_promote } = *state else {
                     error!(self.log, "got version already");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    return Ok(NegotiationResult::NotDone);
+                    return Err(NegotiationError::OutOfOrder);
                 };
                 if version != CRUCIBLE_MESSAGE_VERSION {
                     error!(
@@ -1454,11 +1448,10 @@ impl DownstairsClient {
                         CRUCIBLE_MESSAGE_VERSION,
                         version
                     );
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::Incompatible,
-                    );
-                    return Ok(NegotiationResult::NotDone);
+                    return Err(NegotiationError::IncompatibleVersion {
+                        expected: CRUCIBLE_MESSAGE_VERSION,
+                        actual: version,
+                    });
                 }
                 self.repair_addr = Some(repair_addr);
                 if auto_promote {
@@ -1484,11 +1477,10 @@ impl DownstairsClient {
                     "downstairs version is {version}, \
                      ours is {CRUCIBLE_MESSAGE_VERSION}"
                 );
-                self.abort_negotiation(
-                    up_state,
-                    ClientNegotiationFailed::Incompatible,
-                );
-                Ok(NegotiationResult::NotDone)
+                Err(NegotiationError::IncompatibleVersion {
+                    expected: CRUCIBLE_MESSAGE_VERSION,
+                    actual: version,
+                })
             }
             Message::EncryptedMismatch { expected } => {
                 error!(
@@ -1496,11 +1488,10 @@ impl DownstairsClient {
                     "downstairs encrypted is {expected}, ours is {}",
                     self.cfg.encrypted()
                 );
-                self.abort_negotiation(
-                    up_state,
-                    ClientNegotiationFailed::Incompatible,
-                );
-                Ok(NegotiationResult::NotDone)
+                Err(NegotiationError::EncryptionMismatch {
+                    expected: self.cfg.encrypted(),
+                    actual: expected,
+                })
             }
             Message::ReadOnlyMismatch { expected } => {
                 error!(
@@ -1508,11 +1499,10 @@ impl DownstairsClient {
                     "downstairs read_only is {expected}, ours is {}",
                     self.cfg.read_only,
                 );
-                self.abort_negotiation(
-                    up_state,
-                    ClientNegotiationFailed::Incompatible,
-                );
-                Ok(NegotiationResult::NotDone)
+                Err(NegotiationError::ReadOnlyMismatch {
+                    expected: self.cfg.read_only,
+                    actual: expected,
+                })
             }
             Message::YouAreNowActive {
                 upstairs_id,
@@ -1524,79 +1514,59 @@ impl DownstairsClient {
                         self.log,
                         "Received YouAreNowActive out of order! {state:?}",
                     );
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    // XXX why isn't this an error?
-                    return Ok(NegotiationResult::NotDone);
+                    return Err(NegotiationError::OutOfOrder);
                 }
 
-                let match_uuid = self.cfg.upstairs_id == upstairs_id;
-                let match_session = self.cfg.session_id == session_id;
-                let upstairs_gen = self.cfg.generation();
-                let match_gen = upstairs_gen == gen;
-                let matches_self = match_uuid && match_session && match_gen;
-
-                if !matches_self {
+                let mut err = None;
+                if self.cfg.upstairs_id != upstairs_id {
                     error!(
                         self.log,
-                        "YouAreNowActive didn't match self! {} {} {}",
-                        if !match_uuid {
-                            format!(
-                                "UUID {:?} != {:?}",
-                                self.cfg.upstairs_id, upstairs_id
-                            )
-                        } else {
-                            String::new()
-                        },
-                        if !match_session {
-                            format!(
-                                "session {:?} != {:?}",
-                                self.cfg.session_id, session_id
-                            )
-                        } else {
-                            String::new()
-                        },
-                        if !match_gen {
-                            format!("gen {:?} != {:?}", upstairs_gen, gen)
-                        } else {
-                            String::new()
-                        },
+                        "UUID mismatch in YouAreNowActive: {:?} != {:?}",
+                        self.cfg.upstairs_id,
+                        upstairs_id
                     );
-                    if !match_gen {
-                        let gen_error = format!(
-                            "Generation requested:{} found:{}",
-                            gen, upstairs_gen,
-                        );
-                        self.abort_negotiation(
-                            up_state,
-                            ClientNegotiationFailed::Incompatible,
-                        );
-                        return Err(CrucibleError::GenerationNumberTooLow(
-                            gen_error,
-                        ));
-                    } else {
-                        self.abort_negotiation(
-                            up_state,
-                            ClientNegotiationFailed::Incompatible,
-                        );
-                        return Err(CrucibleError::UuidMismatch);
-                    }
+                    err = Some(NegotiationError::UpstairsIdMismatch {
+                        expected: self.cfg.upstairs_id,
+                        actual: upstairs_id,
+                    });
                 }
-
-                *state = NegotiationState::WaitForRegionInfo;
-                self.send(Message::RegionInfoPlease);
-                Ok(NegotiationResult::NotDone)
+                if self.cfg.session_id != session_id {
+                    error!(
+                        self.log,
+                        "Session mismatch in YouAreNowActive: {:?} != {:?}",
+                        self.cfg.session_id,
+                        session_id
+                    );
+                    err = Some(NegotiationError::SessionIdMismatch {
+                        expected: self.cfg.session_id,
+                        actual: session_id,
+                    });
+                }
+                let upstairs_gen = self.cfg.generation();
+                if upstairs_gen != gen {
+                    error!(
+                        self.log,
+                        "generation mismatch in YouAreNowActive: {} != {}",
+                        upstairs_gen,
+                        gen
+                    );
+                    err = Some(NegotiationError::GenerationNumberTooLow {
+                        requested: upstairs_gen,
+                        actual: gen,
+                    });
+                }
+                if let Some(e) = err {
+                    Err(e)
+                } else {
+                    *state = NegotiationState::WaitForRegionInfo;
+                    self.send(Message::RegionInfoPlease);
+                    Ok(NegotiationResult::NotDone)
+                }
             }
             Message::RegionInfo { region_def } => {
                 if *state != NegotiationState::WaitForRegionInfo {
                     error!(self.log, "Received RegionInfo out of order!");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    return Ok(NegotiationResult::NotDone);
+                    return Err(NegotiationError::OutOfOrder);
                 }
                 info!(
                     self.log,
@@ -1609,11 +1579,10 @@ impl DownstairsClient {
                 // collection for each downstairs.
                 if region_def.get_encrypted() != self.cfg.encrypted() {
                     error!(self.log, "encryption expectation mismatch!");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::Incompatible,
-                    );
-                    return Ok(NegotiationResult::NotDone);
+                    return Err(NegotiationError::EncryptionMismatch {
+                        expected: self.cfg.encrypted(),
+                        actual: region_def.get_encrypted(),
+                    });
                 }
 
                 /*
@@ -1755,12 +1724,7 @@ impl DownstairsClient {
             Message::LastFlushAck { last_flush_number } => {
                 if *state != NegotiationState::GetLastFlush {
                     error!(self.log, "Received LastFlushAck out of order!");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    // TODO should we trigger set_inactive?
-                    return Ok(NegotiationResult::NotDone);
+                    return Err(NegotiationError::OutOfOrder);
                 }
                 assert_eq!(
                     mode,
@@ -1786,12 +1750,7 @@ impl DownstairsClient {
             } => {
                 if *state != NegotiationState::GetExtentVersions {
                     error!(self.log, "Received ExtentVersions out of order!");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    // TODO should we trigger set_inactive?
-                    return Ok(NegotiationResult::NotDone);
+                    return Err(NegotiationError::OutOfOrder);
                 }
                 let out = match mode {
                     ConnectionMode::New => {
@@ -2242,6 +2201,23 @@ pub enum ClientNegotiationFailed {
 impl From<ClientNegotiationFailed> for ClientStopReason {
     fn from(f: ClientNegotiationFailed) -> ClientStopReason {
         ClientStopReason::NegotiationFailed(f)
+    }
+}
+
+impl From<NegotiationError> for ClientNegotiationFailed {
+    fn from(value: NegotiationError) -> Self {
+        match value {
+            NegotiationError::OutOfOrder => Self::BadNegotiationOrder,
+            NegotiationError::ReadOnlyMismatch { .. }
+            | NegotiationError::GenerationZeroIsIllegal { .. }
+            | NegotiationError::GenerationNumberTooLow { .. }
+            | NegotiationError::EncryptionMismatch { .. }
+            | NegotiationError::UpstairsIdMismatch { .. }
+            | NegotiationError::SessionIdMismatch { .. }
+            | NegotiationError::IncompatibleVersion { .. } => {
+                Self::Incompatible
+            }
+        }
     }
 }
 

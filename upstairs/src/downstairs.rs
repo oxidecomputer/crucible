@@ -26,6 +26,7 @@ use crate::{
 };
 use crucible_common::{
     impacted_blocks::ImpactedAddr, BlockIndex, BlockOffset, ExtentId,
+    NegotiationError,
 };
 use crucible_protocol::WriteHeader;
 
@@ -858,7 +859,7 @@ impl Downstairs {
     /// Decide if we need repair, and if so create the repair list
     ///
     /// Returns `true` if repair is needed, `false` otherwise
-    pub(crate) fn collate(&mut self) -> Result<bool, CrucibleError> {
+    pub(crate) fn collate(&mut self) -> Result<bool, NegotiationError> {
         let r = self.collate_inner();
         if r.is_err() {
             // If we failed to begin the repair, then assert that nothing has
@@ -879,7 +880,7 @@ impl Downstairs {
         r
     }
 
-    fn collate_inner(&mut self) -> Result<bool, CrucibleError> {
+    fn collate_inner(&mut self) -> Result<bool, NegotiationError> {
         /*
          * Show some (or all if small) of the info from each region.
          *
@@ -942,9 +943,7 @@ impl Downstairs {
         let requested_gen = self.cfg.generation();
         if requested_gen == 0 {
             error!(self.log, "generation number should be at least 1");
-            return Err(CrucibleError::GenerationNumberTooLow(
-                "Generation 0 illegal".to_owned(),
-            ));
+            return Err(NegotiationError::GenerationZeroIsIllegal);
         } else if requested_gen < max_gen {
             /*
              * We refuse to connect. The provided generation number is not
@@ -956,10 +955,10 @@ impl Downstairs {
                 max_gen,
                 requested_gen,
             );
-            return Err(CrucibleError::GenerationNumberTooLow(format!(
-                "found generation number {}, larger than requested: {}",
-                max_gen, requested_gen,
-            )));
+            return Err(NegotiationError::GenerationNumberTooLow {
+                requested: requested_gen,
+                actual: max_gen,
+            });
         } else {
             info!(
                 self.log,
