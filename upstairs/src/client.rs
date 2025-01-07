@@ -575,28 +575,27 @@ impl DownstairsClient {
             // go through the live-repair path.
             DsState::Stopping(ClientStopReason::NegotiationFailed(..)) => {
                 match up_state {
-                    // If we haven't activated yet, then start from New
+                    // If we haven't activated yet (or we're deactivating) then
+                    // start from New
                     UpstairsState::GoActive(..)
-                    | UpstairsState::Initializing => ConnectionMode::New,
+                    | UpstairsState::Initializing
+                    | UpstairsState::Deactivating { .. } => ConnectionMode::New,
 
                     // Otherwise, use live-repair
-                    UpstairsState::Active
-                    | UpstairsState::Deactivating { .. } => {
-                        ConnectionMode::Faulted
-                    }
+                    UpstairsState::Active => ConnectionMode::Faulted,
                 }
             }
 
             DsState::Stopping(ClientStopReason::Replacing) => match up_state {
-                // If we haven't activated yet, then start from New
-                UpstairsState::GoActive(..) | UpstairsState::Initializing => {
-                    ConnectionMode::New
-                }
+                // If we haven't activated yet (or we're deactivating), then
+                // start from New
+                UpstairsState::GoActive(..)
+                | UpstairsState::Initializing
+                | UpstairsState::Deactivating { .. } => ConnectionMode::New,
+
                 // Otherwise, use live-repair; `ConnectionMode::Replaced`
                 // indicates that the address is allowed to change.
-                UpstairsState::Active | UpstairsState::Deactivating { .. } => {
-                    ConnectionMode::Replaced
-                }
+                UpstairsState::Active => ConnectionMode::Replaced,
             },
         };
         let new_state = DsState::Connecting {
