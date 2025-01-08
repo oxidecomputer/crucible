@@ -136,10 +136,24 @@
             ]
           },
           {
-            "description": "Negotiation says that we are incompatible",
+            "description": "Negotiation says that our message versions are incompatible",
             "type": "string",
             "enum": [
-              "incompatible"
+              "incompatible_version"
+            ]
+          },
+          {
+            "description": "Negotiation says that our session IDs are incompatible",
+            "type": "string",
+            "enum": [
+              "incompatible_session"
+            ]
+          },
+          {
+            "description": "Negotiation says that region settings are incompatible",
+            "type": "string",
+            "enum": [
+              "incompatible_settings"
             ]
           }
         ]
