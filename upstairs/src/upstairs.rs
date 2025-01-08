@@ -1718,7 +1718,7 @@ impl Upstairs {
                             // Downstairs a second chance to get in sync, so
                             // we'll do that!
                             ClientNegotiationFailed::BadNegotiationOrder
-                            | ClientNegotiationFailed::FailedReconcile 
+                            | ClientNegotiationFailed::FailedReconcile
                             // If we're doing a live update of the rack, it's
                             // possible that the Upstairs gets updated before
                             // the Downstairs, so we'll retry here as well.
