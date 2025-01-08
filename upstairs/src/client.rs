@@ -2194,8 +2194,14 @@ pub enum ClientNegotiationFailed {
     /// Negotiation message received out of order
     BadNegotiationOrder,
 
-    /// Negotiation says that we are incompatible
-    Incompatible,
+    /// Negotiation says that our message versions are incompatible
+    IncompatibleVersion,
+
+    /// Negotiation says that our session IDs are incompatible
+    IncompatibleSession,
+
+    /// Negotiation says that region settings are incompatible
+    IncompatibleSettings,
 }
 
 impl From<ClientNegotiationFailed> for ClientStopReason {
@@ -2208,14 +2214,18 @@ impl From<NegotiationError> for ClientNegotiationFailed {
     fn from(value: NegotiationError) -> Self {
         match value {
             NegotiationError::OutOfOrder => Self::BadNegotiationOrder,
+            NegotiationError::IncompatibleVersion { .. } => {
+                Self::IncompatibleVersion
+            }
             NegotiationError::ReadOnlyMismatch { .. }
-            | NegotiationError::GenerationZeroIsIllegal { .. }
+            | NegotiationError::EncryptionMismatch { .. } => {
+                Self::IncompatibleSettings
+            }
+            NegotiationError::GenerationZeroIsIllegal { .. }
             | NegotiationError::GenerationNumberTooLow { .. }
-            | NegotiationError::EncryptionMismatch { .. }
             | NegotiationError::UpstairsIdMismatch { .. }
-            | NegotiationError::SessionIdMismatch { .. }
-            | NegotiationError::IncompatibleVersion { .. } => {
-                Self::Incompatible
+            | NegotiationError::SessionIdMismatch { .. } => {
+                Self::IncompatibleSession
             }
         }
     }
