@@ -16,7 +16,7 @@ pub struct PropertyGroup<'a> {
 }
 
 impl<'a> PropertyGroup<'a> {
-    pub(crate) fn new(scf: &'a Scf) -> Result<PropertyGroup> {
+    pub(crate) fn new(scf: &'a Scf) -> Result<PropertyGroup<'a>> {
         if let Some(propertygroup) =
             NonNull::new(unsafe { scf_pg_create(scf.handle.as_ptr()) })
         {

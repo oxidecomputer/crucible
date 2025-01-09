@@ -15,7 +15,7 @@ pub struct Scope<'a> {
 }
 
 impl<'a> Scope<'a> {
-    pub(crate) fn new(scf: &'a Scf) -> Result<Scope> {
+    pub(crate) fn new(scf: &'a Scf) -> Result<Scope<'a>> {
         if let Some(scope) =
             NonNull::new(unsafe { scf_scope_create(scf.handle.as_ptr()) })
         {
@@ -102,7 +102,7 @@ pub struct Scopes<'a> {
 }
 
 impl<'a> Scopes<'a> {
-    pub(crate) fn new(scf: &'a Scf) -> Result<Scopes> {
+    pub(crate) fn new(scf: &'a Scf) -> Result<Scopes<'a>> {
         let iter = Iter::new(scf)?;
 
         if unsafe {

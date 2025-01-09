@@ -15,7 +15,7 @@ pub struct Value<'a> {
 }
 
 impl<'a> Value<'a> {
-    pub(crate) fn new(scf: &'a Scf) -> Result<Value> {
+    pub(crate) fn new(scf: &'a Scf) -> Result<Value<'a>> {
         if let Some(value) =
             NonNull::new(unsafe { scf_value_create(scf.handle.as_ptr()) })
         {

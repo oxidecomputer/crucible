@@ -46,7 +46,7 @@ impl State {
 }
 
 impl<'a> Instance<'a> {
-    pub(crate) fn new(scf: &'a Scf) -> Result<Instance> {
+    pub(crate) fn new(scf: &'a Scf) -> Result<Instance<'a>> {
         if let Some(instance) =
             NonNull::new(unsafe { scf_instance_create(scf.handle.as_ptr()) })
         {

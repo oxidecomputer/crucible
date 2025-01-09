@@ -64,7 +64,7 @@ pub fn opts() -> Result<Opt> {
 
 macro_rules! ceiling_div {
     ($a: expr, $b: expr) => {
-        ($a + ($b - 1)) / $b
+        $a.div_ceil($b)
     };
 }
 

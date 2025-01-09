@@ -258,7 +258,7 @@ pub struct Iter<'a> {
 }
 
 impl<'a> Iter<'a> {
-    fn new(scf: &'a Scf) -> Result<Iter> {
+    fn new(scf: &'a Scf) -> Result<Iter<'a>> {
         if let Some(iter) =
             NonNull::new(unsafe { scf_iter_create(scf.handle.as_ptr()) })
         {

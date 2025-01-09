@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Interfaces for an implementation to interface with SMF objects.
-
 pub trait SmfInterface {
     fn instances(
         &self,
@@ -36,7 +35,7 @@ impl<'a> RealSmf<'a> {
     }
 }
 
-impl<'a> SmfInterface for RealSmf<'a> {
+impl SmfInterface for RealSmf<'_> {
     fn instances(
         &self,
     ) -> Result<Vec<Box<dyn SmfInstance + '_>>, crucible_smf::ScfError> {
@@ -116,12 +115,12 @@ pub struct RealSmfInstance<'a> {
 }
 
 impl<'a> RealSmfInstance<'a> {
-    pub fn new(inst: crucible_smf::Instance<'a>) -> RealSmfInstance {
+    pub fn new(inst: crucible_smf::Instance<'a>) -> RealSmfInstance<'a> {
         RealSmfInstance { inst }
     }
 }
 
-impl<'a> SmfInstance for RealSmfInstance<'a> {
+impl SmfInstance for RealSmfInstance<'_> {
     fn name(&self) -> Result<String, crucible_smf::ScfError> {
         self.inst.name()
     }
@@ -198,12 +197,12 @@ pub struct RealSmfSnapshot<'a> {
 }
 
 impl<'a> RealSmfSnapshot<'a> {
-    pub fn new(snap: crucible_smf::Snapshot<'a>) -> RealSmfSnapshot {
+    pub fn new(snap: crucible_smf::Snapshot<'a>) -> RealSmfSnapshot<'a> {
         RealSmfSnapshot { snap }
     }
 }
 
-impl<'a> SmfSnapshot for RealSmfSnapshot<'a> {
+impl SmfSnapshot for RealSmfSnapshot<'_> {
     fn get_pg(
         &self,
         name: &str,
@@ -233,12 +232,12 @@ pub struct RealSmfPropertyGroup<'a> {
 }
 
 impl<'a> RealSmfPropertyGroup<'a> {
-    pub fn new(pg: crucible_smf::PropertyGroup<'a>) -> RealSmfPropertyGroup {
+    pub fn new(pg: crucible_smf::PropertyGroup<'a>) -> RealSmfPropertyGroup<'a> {
         RealSmfPropertyGroup { pg }
     }
 }
 
-impl<'a> SmfPropertyGroup for RealSmfPropertyGroup<'a> {
+impl SmfPropertyGroup for RealSmfPropertyGroup<'_> {
     fn get_property(
         &self,
         name: &str,
@@ -271,7 +270,7 @@ impl<'a> RealSmfProperty<'a> {
     }
 }
 
-impl<'a> SmfProperty for RealSmfProperty<'a> {
+impl SmfProperty for RealSmfProperty<'_> {
     fn value(
         &self,
     ) -> Result<Option<Box<dyn SmfValue + '_>>, crucible_smf::ScfError> {
@@ -304,7 +303,7 @@ impl<'a> RealSmfValue<'a> {
     }
 }
 
-impl<'a> SmfValue for RealSmfValue<'a> {
+impl SmfValue for RealSmfValue<'_> {
     fn as_string(&self) -> Result<String, crucible_smf::ScfError> {
         self.v.as_string()
     }
@@ -335,7 +334,7 @@ impl<'a> RealSmfTransaction<'a> {
     }
 }
 
-impl<'a> SmfTransaction for RealSmfTransaction<'a> {
+impl SmfTransaction for RealSmfTransaction<'_> {
     fn start(&self) -> Result<(), crucible_smf::ScfError> {
         self.t.start()
     }
