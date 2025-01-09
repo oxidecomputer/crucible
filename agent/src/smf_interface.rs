@@ -232,7 +232,9 @@ pub struct RealSmfPropertyGroup<'a> {
 }
 
 impl<'a> RealSmfPropertyGroup<'a> {
-    pub fn new(pg: crucible_smf::PropertyGroup<'a>) -> RealSmfPropertyGroup<'a> {
+    pub fn new(
+        pg: crucible_smf::PropertyGroup<'a>,
+    ) -> RealSmfPropertyGroup<'a> {
         RealSmfPropertyGroup { pg }
     }
 }
