@@ -1472,8 +1472,12 @@ impl Volume {
                             }
                             VCRDelta::Generation | VCRDelta::Target { .. } => {}
                         },
-                        _ => {
-                            panic!("Unsupported multi level CompareResult");
+                        r => {
+                            crucible_bail!(
+                                ReplaceRequestInvalid,
+                                "Unsupported multi level CompareResult {:?}",
+                                r
+                            );
                         }
                     }
                 }
