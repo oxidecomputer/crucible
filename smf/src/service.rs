@@ -16,7 +16,7 @@ pub struct Service<'a> {
 }
 
 impl<'a> Service<'a> {
-    pub(crate) fn new(scf: &'a Scf) -> Result<Service> {
+    pub(crate) fn new(scf: &'a Scf) -> Result<Service<'a>> {
         if let Some(service) =
             NonNull::new(unsafe { scf_service_create(scf.handle.as_ptr()) })
         {

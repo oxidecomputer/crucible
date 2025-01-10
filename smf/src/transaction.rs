@@ -25,7 +25,7 @@ pub enum CommitResult {
 }
 
 impl<'a> Transaction<'a> {
-    pub(crate) fn new(pg: &'a PropertyGroup<'a>) -> Result<Transaction> {
+    pub(crate) fn new(pg: &'a PropertyGroup<'a>) -> Result<Transaction<'a>> {
         let scf = pg.scf;
 
         if let Some(transaction) =
@@ -181,7 +181,7 @@ struct TransactionEntry<'a> {
 }
 
 impl<'a> TransactionEntry<'a> {
-    pub(crate) fn new(scf: &'a Scf) -> Result<TransactionEntry> {
+    pub(crate) fn new(scf: &'a Scf) -> Result<TransactionEntry<'a>> {
         if let Some(entry) =
             NonNull::new(unsafe { scf_entry_create(scf.handle.as_ptr()) })
         {
