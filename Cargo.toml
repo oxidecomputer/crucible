@@ -71,6 +71,8 @@ openapiv3 = "2.0.0"
 opentelemetry = "0.24.0"
 opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
+progenitor = "0.9.1"
+progenitor-client = "0.9.1"
 proptest = "1.5.0"
 rayon = "1.10.0"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
@@ -120,8 +122,6 @@ omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", branch 
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-progenitor = "0.8.0"
-progenitor-client = "0.8.0"
 
 # local path
 crucible = { path = "./upstairs" }
