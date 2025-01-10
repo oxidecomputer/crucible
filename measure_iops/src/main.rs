@@ -62,12 +62,6 @@ pub fn opts() -> Result<Opt> {
     Ok(opt)
 }
 
-macro_rules! ceiling_div {
-    ($a: expr, $b: expr) => {
-        $a.div_ceil($b)
-    };
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = opts()?;
@@ -176,8 +170,7 @@ async fn main() -> Result<()> {
         }
 
         total_io_time += io_operation_time.elapsed();
-        io_operations_sent +=
-            ceiling_div!(io_size * io_depth, 16 * 1024 * 1024);
+        io_operations_sent += (io_size * io_depth).div_ceil(16 * 1024 * 1024);
         bw_consumed += io_size * io_depth;
 
         if measurement_time.elapsed() > Duration::from_secs(1) {
