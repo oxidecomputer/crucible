@@ -2963,15 +2963,8 @@ impl Downstairs {
 
                 info!(self.log, "Set last flush {}", last_flush_number);
 
-                let state = &self.connection_state[&conn_id]; // reborrow
-                if let Err(e) =
-                    state.reply(Message::LastFlushAck { last_flush_number })
-                {
-                    bail!("Failed sending LastFlushAck: {}", e);
-                }
-
                 /*
-                 * Once this command is sent, we are ready to exit
+                 * Once this command is received, we are ready to exit
                  * the loop and move forward with receiving IOs
                  */
                 info!(self.log, "Downstairs has completed Negotiation");

@@ -215,14 +215,12 @@ impl DownstairsHandle {
 
     pub async fn negotiate_step_last_flush(
         &mut self,
-        last_flush_number: JobId,
+        expected_last_flush: JobId,
     ) {
         let packet = self.recv().await.unwrap();
-        if let Message::LastFlush { .. } = &packet {
+        if let Message::LastFlush { last_flush_number } = &packet {
+            assert_eq!(*last_flush_number, expected_last_flush);
             info!(self.log, "negotiate packet {:?}", packet);
-
-            self.send(Message::LastFlushAck { last_flush_number })
-                .unwrap();
         } else {
             panic!("wrong packet: {packet:?}, expected LastFlush");
         }
@@ -2845,7 +2843,7 @@ async fn test_no_send_offline() {
     // Start negotiation
     harness.ds1().negotiate_start().await;
 
-    // Check that a write doesn't make it to DS1
+    // Check that a write doesn't make it to DS1 before replay
     let write_handle = harness.spawn(|guest| async move {
         let mut data = BytesMut::new();
         data.resize(512, 1u8);
@@ -2854,27 +2852,15 @@ async fn test_no_send_offline() {
     harness.ds2.ack_write().await;
     harness.ds3.ack_write().await;
 
-    // We expect to receive the next negotiation packet, not the Write
+    // We expect to receive the final negotiation packet, followed by the Write
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let last_flush_number = match harness.ds1().try_recv() {
+    match harness.ds1().try_recv() {
         Ok(Message::LastFlush { last_flush_number }) => last_flush_number,
         m => panic!("unexpected message {m:?}"),
     };
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(harness.ds1().try_recv(), Err(TryRecvError::Empty));
-
     // The write should be done
     write_handle.await.unwrap();
-
-    // Now, bring the Downstairs up, which should trigger replay
-    harness
-        .ds1()
-        .send(Message::LastFlushAck { last_flush_number })
-        .unwrap();
-
-    // Give the replay a moment to happen
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // We should see that write sent as a replay
     match harness.ds1().try_recv() {

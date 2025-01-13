@@ -989,8 +989,10 @@ impl DownstairsClient {
             (DsState::Connecting { state, mode }, DsState::Active) => {
                 matches!(
                     (state, mode),
-                    (NegotiationState::GetLastFlush, ConnectionMode::Offline)
-                        | (NegotiationState::Reconcile, ConnectionMode::New)
+                    (
+                        NegotiationState::WaitForRegionInfo,
+                        ConnectionMode::Offline
+                    ) | (NegotiationState::Reconcile, ConnectionMode::New)
                         | (
                             NegotiationState::LiveRepairReady,
                             ConnectionMode::Faulted | ConnectionMode::Replaced
@@ -1349,9 +1351,8 @@ impl DownstairsClient {
          * At this point the upstairs looks to see what state the downstairs is
          * currently in.  It will be WaitActive, Faulted, or Offline.
          *
-         * Depending on which state, we will either choose
-         * NegotiationState::GetLastFlush or NegotiationState::GetExtentVersions
-         * next.
+         * Depending on which state, we will either exit negotiation to replay
+         * or continue with NegotiationState::GetExtentVersions next.
          *
          * For the Offline state, the downstairs was connected and verified
          * and some point after that, the connection was lost.  To handle this
@@ -1368,14 +1369,19 @@ impl DownstairsClient {
          * also request extent versions and will have to repair this
          * downstairs, skipping over NegotiationState::GetLastFlush as well.
          *
-         * NegotiationState::GetLastFlush (offline only)
+         * Replay (offline only)
          * ------------------------------
          *          Upstairs             Downstairs
          *          LastFlush(lf)) --->
-         *                         <---  LastFlushAck(lf)
+         *            [negotiation finishes]
+         *          Replayed jobs  --->
          *
-         * After receiving our last flush, we now replay all saved jobs for this
-         * Downstairs and skip ahead to NegotiationState::Done
+         * After sending our last flush, we now replay all saved jobs for this
+         * Downstairs and skip ahead to NegotiationState::Done.  Note that the
+         * Downstairs does not reply to `LastFlush`; it simply sets the internal
+         * `last_flush` state in the Downstairs.  Not having the Downstairs
+         * reply means that there's no window in which we could become
+         * ineligible for replay.
          *
          * NegotiationState::GetExtentVersions
          * (WaitActive and LiveRepairReady come here from WaitForRegionInfo)
@@ -1674,11 +1680,11 @@ impl DownstairsClient {
                             self.log,
                             "send last flush ID to this DS: {}", lf
                         );
-                        *state = NegotiationState::GetLastFlush;
-
                         self.send(Message::LastFlush {
                             last_flush_number: lf,
                         });
+                        self.set_active();
+                        Ok(NegotiationResult::Replay)
                     }
                     ConnectionMode::New
                     | ConnectionMode::Faulted
@@ -1688,31 +1694,9 @@ impl DownstairsClient {
                          */
                         *state = NegotiationState::GetExtentVersions;
                         self.send(Message::ExtentVersionsPlease);
+                        Ok(NegotiationResult::NotDone)
                     }
                 }
-                Ok(NegotiationResult::NotDone)
-            }
-            Message::LastFlushAck { last_flush_number } => {
-                if *state != NegotiationState::GetLastFlush {
-                    error!(self.log, "Received LastFlushAck out of order!");
-                    return Err(NegotiationError::OutOfOrder);
-                }
-                assert_eq!(
-                    mode,
-                    ConnectionMode::Offline,
-                    "got LastFlushAck in bad state {:?}",
-                    self.state
-                );
-                info!(
-                    self.log,
-                    "Replied this last flush ID: {last_flush_number}"
-                );
-                assert_eq!(self.last_flush, last_flush_number);
-
-                // Immediately set the state to Active, and return a flag
-                // indicating that jobs should be replayed.
-                self.checked_state_transition(up_state, DsState::Active);
-                Ok(NegotiationResult::Replay)
             }
             Message::ExtentVersions {
                 gen_numbers,
@@ -1925,9 +1909,9 @@ impl DownstairsClient {
 ///         │ WaitForRegionInfo │
 ///         └──┬──────────────┬─┘
 ///    Offline │              │ New / Faulted / Replaced
-///     ┌──────▼─────┐   ┌────▼────────────┐
-///     │GetLastFlush│   │GetExtentVersions│
-///     └──────┬─────┘   └─┬─────────────┬─┘
+///   (replay) │         ┌────▼────────────┐
+///            │         │GetExtentVersions│
+///            │         └─┬─────────────┬─┘
 ///            │           │ New         │ Faulted / Replaced
 ///            │    ┌──────▼───┐    ┌────▼──────────┐
 ///            │    │WaitQuorum│    │LiveRepairReady│
@@ -1964,9 +1948,6 @@ pub enum NegotiationState {
 
     /// Waiting to hear `RegionInfo` from the client
     WaitForRegionInfo,
-
-    /// Waiting to hear `LastFlushAck` from the client
-    GetLastFlush,
 
     /// Waiting to hear `ExtentVersions` from the client
     GetExtentVersions,
@@ -2011,10 +1992,6 @@ impl NegotiationState {
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 _
-            ) | (
-                NegotiationState::WaitForRegionInfo,
-                NegotiationState::GetLastFlush,
-                ConnectionMode::Offline
             ) | (
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
