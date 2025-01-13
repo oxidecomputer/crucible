@@ -1597,13 +1597,16 @@ impl ActiveConnection {
             // The job completed successfully, so update our stats
             dss.on_complete(&m);
 
-            // Notify the upstairs before completing work, which
-            // consumes the message (so we'll check whether it's
-            // a FlushAck beforehand)
-            let is_flush = matches!(m, Message::FlushAck { .. });
+            // Reply to the upstairs before completing work.  Replying consumes
+            // the message, so we'll check whether it's a FlushAck / BarrierAck
+            // beforehand.
+            let reset_work = matches!(
+                m,
+                Message::FlushAck { .. } | Message::BarrierAck { .. }
+            );
             self.reply(m)?;
 
-            if is_flush {
+            if reset_work {
                 self.work.completed.reset(new_id);
             } else {
                 self.work.completed.push(new_id);
