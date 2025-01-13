@@ -1243,6 +1243,12 @@ impl Upstairs {
             UpstairsState::Initializing => {
                 self.state = UpstairsState::GoActive(res);
                 info!(self.log, "{} active request set", self.cfg.upstairs_id);
+
+                // Notify all clients that they should go active when they hit
+                // an appropriate state in their negotiation.
+                for c in self.downstairs.clients.iter_mut() {
+                    c.set_active_request();
+                }
             }
             UpstairsState::GoActive(..) => {
                 // We have already been sent a request to go active, but we
@@ -1254,7 +1260,6 @@ impl Upstairs {
                     self.cfg.upstairs_id
                 );
                 res.send_err(CrucibleError::UpstairsActivateInProgress);
-                return;
             }
             UpstairsState::Deactivating(..) => {
                 warn!(
@@ -1262,7 +1267,6 @@ impl Upstairs {
                     "{} active denied while Deactivating", self.cfg.upstairs_id
                 );
                 res.send_err(CrucibleError::UpstairsDeactivating);
-                return;
             }
             UpstairsState::Active => {
                 // We are already active, so go ahead and respond again.
@@ -1272,13 +1276,7 @@ impl Upstairs {
                     self.cfg.upstairs_id
                 );
                 res.send_ok(());
-                return;
             }
-        }
-        // Notify all clients that they should go active when they hit an
-        // appropriate state in their negotiation.
-        for c in self.downstairs.clients.iter_mut() {
-            c.set_active_request();
         }
     }
 

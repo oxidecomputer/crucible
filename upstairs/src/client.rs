@@ -803,13 +803,9 @@ impl DownstairsClient {
                     session_id: self.cfg.session_id,
                     gen: self.cfg.generation(),
                 });
-
-                let DsState::Connecting { mode, .. } = self.state else {
-                    unreachable!()
-                };
                 self.state = DsState::Connecting {
                     state: NegotiationState::WaitForPromote,
-                    mode,
+                    mode: ConnectionMode::New,
                 };
             }
             s => panic!("invalid state for set_active_request: {s:?}"),
