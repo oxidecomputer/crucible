@@ -2,11 +2,13 @@
 use crate::{
     cdt, integrity_hash, io_limits::ClientIOLimits, live_repair::ExtentInfo,
     upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
-    ClientId, CrucibleDecoder, CrucibleError, DownstairsIO, DsState,
-    EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
+    ClientId, ConnectionMode, CrucibleDecoder, CrucibleError, DownstairsIO,
+    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
     ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
 };
-use crucible_common::{x509::TLSContext, ExtentId, VerboseTimeout};
+use crucible_common::{
+    x509::TLSContext, ExtentId, NegotiationError, VerboseTimeout,
+};
 use crucible_protocol::{
     MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -26,7 +28,10 @@ use serde::{Deserialize, Serialize};
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     net::{TcpSocket, TcpStream},
-    sync::{mpsc, oneshot},
+    sync::{
+        mpsc,
+        oneshot::{self, error::RecvError},
+    },
     time::{sleep, sleep_until, Duration, Instant},
 };
 use tokio_util::codec::FramedRead;
@@ -142,9 +147,6 @@ pub(crate) struct DownstairsClient {
     /// This is set to `None` during initialization
     pub(crate) repair_addr: Option<SocketAddr>,
 
-    /// Flag indicating that the Upstairs should replay jobs to this client
-    needs_replay: bool,
-
     /// TLS context (if present)
     ///
     /// This is passed as a pointer to minimize copies
@@ -181,12 +183,6 @@ pub(crate) struct DownstairsClient {
     /// Accumulated statistics
     pub(crate) stats: DownstairsStats,
 
-    /// State for the "promote to active" action
-    promote_state: Option<PromoteState>,
-
-    /// State for startup negotiation
-    negotiation_state: NegotiationState,
-
     /// Session ID for a clients connection to a downstairs.
     connection_id: ConnectionId,
 
@@ -218,57 +214,16 @@ impl DownstairsClient {
             client_id,
             io_limits,
             region_uuid: None,
-            needs_replay: false,
-            negotiation_state: NegotiationState::Start,
             tls_context,
-            promote_state: None,
             log,
             target_addr,
             repair_addr: None,
-            state: DsState::New,
-            last_flush: JobId(0),
-            stats: DownstairsStats::default(),
-            skipped_jobs: BTreeSet::new(),
-            region_metadata: None,
-            repair_info: None,
-            io_state_job_count: ClientIOStateCount::default(),
-            io_state_byte_count: ClientIOStateCount::default(),
-            connection_id: ConnectionId(0),
-            client_delay_us,
-        }
-    }
-
-    /// Builds a minimal `DownstairsClient` for testing
-    ///
-    /// The resulting client has no target address; any packets sent by the
-    /// client will disappear into the void.
-    #[cfg(test)]
-    fn test_default() -> Self {
-        let client_delay_us = Arc::new(AtomicU64::new(0));
-        let cfg = Arc::new(UpstairsConfig {
-            encryption_context: None,
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            generation: std::sync::atomic::AtomicU64::new(1),
-            read_only: false,
-        });
-        Self {
-            cfg,
-            client_task: Self::new_dummy_task(false),
-            client_id: ClientId::new(0),
-            io_limits: ClientIOLimits::new(
-                crate::IO_OUTSTANDING_MAX_JOBS * 3 / 2,
-                crate::IO_OUTSTANDING_MAX_BYTES as usize * 3 / 2,
-            ),
-            region_uuid: None,
-            needs_replay: false,
-            negotiation_state: NegotiationState::Start,
-            tls_context: None,
-            promote_state: None,
-            log: crucible_common::build_logger(),
-            target_addr: None,
-            repair_addr: None,
-            state: DsState::New,
+            state: DsState::Connecting {
+                mode: ConnectionMode::New,
+                state: NegotiationState::Start {
+                    auto_promote: false,
+                },
+            },
             last_flush: JobId(0),
             stats: DownstairsStats::default(),
             skipped_jobs: BTreeSet::new(),
@@ -481,11 +436,18 @@ impl DownstairsClient {
     /// Sets our state to `DsState::Reconcile`
     ///
     /// # Panics
-    /// If the previous state is not `DsState::WaitQuorum`
+    /// If the current state is invalid
     pub(crate) fn begin_reconcile(&mut self) {
-        info!(self.log, "Transition from {} to Reconcile", self.state);
-        assert_eq!(self.state, DsState::WaitQuorum);
-        self.state = DsState::Reconcile;
+        info!(self.log, "Transition from {:?} to Reconcile", self.state);
+        let DsState::Connecting { state, mode } = &mut self.state else {
+            panic!(
+                "invalid state {:?} for client {}",
+                self.state, self.client_id
+            );
+        };
+        assert_eq!(*state, NegotiationState::WaitQuorum);
+        assert!(matches!(mode, ConnectionMode::New));
+        *state = NegotiationState::Reconcile;
     }
 
     /// Go through the list of dependencies and remove any jobs that this
@@ -528,12 +490,13 @@ impl DownstairsClient {
     }
 
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
-    ///
-    /// # Panics
-    /// If the downstairs is offline
     pub(crate) fn ready_to_deactivate(&self) -> bool {
         match &self.state {
-            DsState::New | DsState::WaitActive => {
+            DsState::Connecting {
+                mode: ConnectionMode::New,
+                state:
+                    NegotiationState::Start { .. } | NegotiationState::WaitActive,
+            } => {
                 info!(
                     self.log,
                     "ready to deactivate from state {:?}", self.state
@@ -566,75 +529,88 @@ impl DownstairsClient {
         // entirely; the repair address could have changed in any of these
         // cases.
         self.repair_addr = None;
-        self.needs_replay = false;
 
         // If the upstairs is already active (or trying to go active), then the
         // downstairs should automatically call PromoteToActive when it reaches
         // the relevant state.
-        self.promote_state = match up_state {
-            UpstairsState::Active | UpstairsState::GoActive(..) => {
-                Some(PromoteState::Waiting)
-            }
+        let auto_promote = match up_state {
+            UpstairsState::Active | UpstairsState::GoActive(..) => !matches!(
+                self.state,
+                DsState::Stopping(ClientStopReason::Disabled)
+            ),
             UpstairsState::Initializing
-            | UpstairsState::Deactivating { .. } => None,
+            | UpstairsState::Deactivating { .. } => false,
         };
-
-        self.negotiation_state = NegotiationState::Start;
 
         let current = &self.state;
-        let new_state = match current {
-            DsState::Active | DsState::Offline if !can_replay => {
-                Some(DsState::Faulted)
-            }
+        let new_mode = match current {
+            // If we can't replay jobs, then reconnection must happen through
+            // live-repair (rather than replay).
+            DsState::Active
+            | DsState::Connecting {
+                mode: ConnectionMode::Offline,
+                ..
+            } if !can_replay => ConnectionMode::Faulted,
+
+            // If the Downstairs has spontaneously stopped, we will attempt to
+            // replay jobs when reconnecting
+            DsState::Active => ConnectionMode::Offline,
+
+            // Other failures during connection preserve the previous mode
+            DsState::Connecting { mode, .. } => *mode,
+
+            // Faults or failures during live-repair must go through live-repair
             DsState::LiveRepair
-            | DsState::LiveRepairReady
             | DsState::Stopping(ClientStopReason::Fault(..)) => {
-                Some(DsState::Faulted)
+                ConnectionMode::Faulted
             }
 
-            DsState::Active => Some(DsState::Offline),
-
-            DsState::Reconcile
-            | DsState::WaitQuorum
-            | DsState::WaitActive
-            | DsState::Stopping(ClientStopReason::NegotiationFailed(..))
-            | DsState::Stopping(ClientStopReason::Disabled)
+            // Failures during deactivation restart from the very beginning
+            DsState::Stopping(ClientStopReason::Disabled)
             | DsState::Stopping(ClientStopReason::Deactivated) => {
-                Some(DsState::New)
+                ConnectionMode::New
             }
 
-            // If we have replaced a downstairs, don't forget that.
-            DsState::Stopping(ClientStopReason::Replacing) => {
-                Some(DsState::Replaced)
+            // Failures during negotiation either restart from the beginning, or
+            // go through the live-repair path.
+            DsState::Stopping(ClientStopReason::NegotiationFailed(..)) => {
+                match up_state {
+                    // If we haven't activated yet (or we're deactivating) then
+                    // start from New
+                    UpstairsState::GoActive(..)
+                    | UpstairsState::Initializing
+                    | UpstairsState::Deactivating { .. } => ConnectionMode::New,
+
+                    // Otherwise, use live-repair
+                    UpstairsState::Active => ConnectionMode::Faulted,
+                }
             }
 
-            // We stay in these states through the task restart
-            DsState::Offline
-            | DsState::Faulted
-            | DsState::New
-            | DsState::Replaced => None,
+            DsState::Stopping(ClientStopReason::Replacing) => match up_state {
+                // If we haven't activated yet (or we're deactivating), then
+                // start from New
+                UpstairsState::GoActive(..)
+                | UpstairsState::Initializing
+                | UpstairsState::Deactivating { .. } => ConnectionMode::New,
+
+                // Otherwise, use live-repair; `ConnectionMode::Replaced`
+                // indicates that the address is allowed to change.
+                UpstairsState::Active => ConnectionMode::Replaced,
+            },
+        };
+        let new_state = DsState::Connecting {
+            mode: new_mode,
+            state: NegotiationState::Start { auto_promote },
         };
 
-        // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
-        // (probably) the caller of this function.
-        if let Some(new_state) = new_state {
-            self.checked_state_transition(up_state, new_state);
-        }
+        // Note that jobs are skipped / replayed in `Downstairs::reinitialize`,
+        // which is (probably) the caller of this function!
 
+        self.checked_state_transition(up_state, new_state);
         self.connection_id.update();
 
         // Restart with a short delay, connecting if we're auto-promoting
-        self.start_task(true, self.promote_state.is_some());
-    }
-
-    /// Sets the `needs_replay` flag
-    pub(crate) fn needs_replay(&mut self) {
-        self.needs_replay = true;
-    }
-
-    /// Returns and clears the `needs_replay` flag
-    pub(crate) fn check_replay(&mut self) -> bool {
-        std::mem::take(&mut self.needs_replay)
+        self.start_task(true, auto_promote);
     }
 
     /// Returns the last flush ID handled by this client
@@ -796,58 +772,41 @@ impl DownstairsClient {
                 );
             }
         }
-        match self.promote_state {
-            Some(PromoteState::Waiting) => {
-                panic!("called set_active_request while already waiting")
-            }
-            Some(PromoteState::Sent) => {
-                panic!("called set_active_request after it was sent")
-            }
-            None => (),
-        }
         // If we're already in the point of negotiation where we're waiting to
         // go active, then immediately go active!
-        match self.state {
-            DsState::New => {
+        match &mut self.state {
+            DsState::Connecting {
+                state: NegotiationState::Start { auto_promote },
+                mode: ConnectionMode::New,
+            } => {
+                if *auto_promote {
+                    panic!("called set_active_request while already waiting")
+                }
+                *auto_promote = true;
                 info!(
                     self.log,
                     "client set_active_request while in {:?}; waiting...",
                     self.state,
                 );
-                self.promote_state = Some(PromoteState::Waiting);
             }
-            DsState::Replaced => {
+            DsState::Connecting {
+                state: NegotiationState::WaitActive,
+                mode: ConnectionMode::New,
+            } => {
                 info!(
                     self.log,
-                    "client set_active_request while Replaced; waiting..."
+                    "client set_active_request while in {:?} -> WaitForPromote",
+                    self.state,
                 );
-                self.promote_state = Some(PromoteState::Waiting);
-            }
-            DsState::WaitActive => {
-                info!(
-                    self.log,
-                    "client set_active_request while in WaitActive \
-                 -> WaitForPromote"
-                );
-                // If the client task has stopped, then print a warning but
-                // otherwise continue (because we'll be cleaned up by the
-                // JoinHandle watcher).
                 self.send(Message::PromoteToActive {
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
                     gen: self.cfg.generation(),
                 });
-
-                self.promote_state = Some(PromoteState::Sent);
-                // TODO: negotiation / promotion state is spread across
-                // DsState, PromoteState, and NegotiationState.  We should
-                // consolidate into a single place
-                assert!(
-                    self.negotiation_state == NegotiationState::Start
-                        || self.negotiation_state
-                            == NegotiationState::WaitForPromote
-                );
-                self.negotiation_state = NegotiationState::WaitForPromote;
+                self.state = DsState::Connecting {
+                    state: NegotiationState::WaitForPromote,
+                    mode: ConnectionMode::New,
+                };
             }
             s => panic!("invalid state for set_active_request: {s:?}"),
         }
@@ -920,9 +879,10 @@ impl DownstairsClient {
     ) -> EnqueueResult {
         match self.state {
             // We never send jobs if we're in certain inactive states
-            DsState::Faulted
-            | DsState::Replaced
-            | DsState::LiveRepairReady
+            DsState::Connecting {
+                mode: ConnectionMode::Faulted | ConnectionMode::Replaced,
+                ..
+            }
             | DsState::Stopping(
                 ClientStopReason::Fault(..)
                 | ClientStopReason::Disabled
@@ -952,13 +912,16 @@ impl DownstairsClient {
             // cleared out by a subsequent flush (so we'll be able to bring that
             // client back into compliance by replaying jobs).
             DsState::Active => EnqueueResult::Send,
-            DsState::Offline => EnqueueResult::Hold,
+            DsState::Connecting {
+                mode: ConnectionMode::Offline,
+                ..
+            } => EnqueueResult::Hold,
 
-            DsState::New
-            | DsState::WaitActive
-            | DsState::WaitQuorum
-            | DsState::Reconcile
-            | DsState::Stopping(ClientStopReason::Deactivated) => panic!(
+            DsState::Stopping(ClientStopReason::Deactivated)
+            | DsState::Connecting {
+                mode: ConnectionMode::New,
+                ..
+            } => panic!(
                 "enqueue should not be called from state {:?}",
                 self.state
             ),
@@ -986,12 +949,6 @@ impl DownstairsClient {
     /// will panic if there is not a valid state transition edge between the
     /// current `self.state` and the requested `new_state`.
     ///
-    /// For example, transitioning to a `new_state` of [DsState::Replacing] is
-    /// *always* possible, so this will never panic for that state transition.
-    /// On the other hand, [DsState::Replaced] can *only* follow
-    /// [DsState::Replacing], so if the current state is *anything else*, that
-    /// indicates a logic error happened in some other part of the code.
-    ///
     /// If the state transition is valid, this function simply sets `self.state`
     /// to the newly requested state. There's no magic here beyond that; this
     /// function does not change anything about the state or any other internal
@@ -1004,190 +961,143 @@ impl DownstairsClient {
         up_state: &UpstairsState,
         new_state: DsState,
     ) {
-        // TODO this should probably be private!
-        info!(self.log, "ds_transition from {} to {new_state}", self.state);
-
-        let old_state = self.state;
-
-        /*
-         * Check that this is a valid transition
-         */
-        let panic_invalid = || {
+        if !Self::is_state_transition_valid(up_state, self.state, new_state) {
             panic!(
-                "[{}] {} Invalid transition: {:?} -> {:?}",
-                self.client_id, self.cfg.upstairs_id, old_state, new_state
-            )
-        };
-        match new_state {
-            DsState::Replaced => {
-                assert_eq!(
-                    old_state,
-                    DsState::Stopping(ClientStopReason::Replacing)
-                );
-            }
-            DsState::WaitActive => {
-                if old_state == DsState::Offline {
-                    if matches!(up_state, UpstairsState::Active) {
-                        panic!(
-                            "[{}] {} Bad up active state change {} -> {}",
-                            self.client_id,
-                            self.cfg.upstairs_id,
-                            old_state,
-                            new_state,
-                        );
-                    }
-                } else if old_state != DsState::New
-                    && old_state != DsState::Faulted
-                    && old_state != DsState::Replaced
-                {
-                    panic!(
-                        "[{}] {} Negotiation failed, {:?} -> {:?}",
-                        self.client_id,
-                        self.cfg.upstairs_id,
-                        old_state,
-                        new_state,
-                    );
-                }
-            }
-            DsState::WaitQuorum => {
-                assert_eq!(old_state, DsState::WaitActive);
-            }
-            DsState::Faulted => {
-                match old_state {
-                    DsState::Active
-                    | DsState::Faulted
-                    | DsState::Reconcile
-                    | DsState::LiveRepair
-                    | DsState::LiveRepairReady
-                    | DsState::Offline
-                    | DsState::Stopping(ClientStopReason::Fault(..)) => {} // Okay
-                    _ => {
-                        panic_invalid();
-                    }
-                }
-            }
-            DsState::Reconcile => {
-                assert!(!matches!(up_state, UpstairsState::Active));
-                assert_eq!(old_state, DsState::WaitQuorum);
-            }
-            DsState::Active => {
-                match old_state {
-                    DsState::WaitQuorum
-                    | DsState::Reconcile
-                    | DsState::LiveRepair
-                    | DsState::Offline => {} // Okay
-
-                    DsState::LiveRepairReady if self.cfg.read_only => {} // Okay
-
-                    _ => {
-                        panic_invalid();
-                    }
-                }
-                /*
-                 * Make sure reconcile happened when the upstairs is inactive.
-                 */
-                if old_state == DsState::Reconcile {
-                    assert!(!matches!(up_state, UpstairsState::Active));
-                }
-            }
-            DsState::LiveRepair => {
-                assert_eq!(old_state, DsState::LiveRepairReady);
-            }
-            DsState::LiveRepairReady => {
-                match old_state {
-                    DsState::Faulted | DsState::Replaced => {} // Okay
-                    _ => {
-                        panic_invalid();
-                    }
-                }
-            }
-            DsState::New => {
-                // Before new, we must have been in
-                // on of these states.
-                match old_state {
-                    DsState::Active
-                    | DsState::Faulted
-                    | DsState::Reconcile
-                    | DsState::Stopping(
-                        ClientStopReason::Deactivated
-                        | ClientStopReason::Disabled
-                        | ClientStopReason::Replacing
-                        | ClientStopReason::NegotiationFailed(..),
-                    ) => {} // Okay
-                    _ => {
-                        panic_invalid();
-                    }
-                }
-            }
-            DsState::Offline => {
-                match old_state {
-                    DsState::Active => {} // Okay
-                    _ => {
-                        panic_invalid();
-                    }
-                }
-            }
-
-            // We only go deactivated if we were actually active, or
-            // somewhere past active.
-            // if deactivate is requested before active, the downstairs
-            // state should just go back to NEW and re-require an
-            // activation.
-            DsState::Stopping(ClientStopReason::Deactivated) => {
-                match old_state {
-                    DsState::Active
-                    | DsState::LiveRepair
-                    | DsState::LiveRepairReady
-                    | DsState::Offline
-                    | DsState::Reconcile => {} // Okay
-                    DsState::Faulted => {
-                        if matches!(up_state, UpstairsState::Active) {
-                            // Can't transition like this when active
-                            panic_invalid();
-                        }
-                    }
-                    _ => {
-                        panic_invalid();
-                    }
-                }
-            }
-
-            // Some stop reasons may occur at any time
-            DsState::Stopping(
-                ClientStopReason::Fault(..)
-                | ClientStopReason::Replacing
-                | ClientStopReason::Disabled,
-            ) => {}
-
-            // The client may undergo negotiation for many reasons
-            DsState::Stopping(ClientStopReason::NegotiationFailed(..)) => {
-                match old_state {
-                    DsState::New
-                    | DsState::WaitActive
-                    | DsState::WaitQuorum
-                    | DsState::Reconcile
-                    | DsState::Offline
-                    | DsState::Faulted
-                    | DsState::LiveRepairReady => {}
-                    _ => panic_invalid(),
-                }
-            }
+                "invalid state transition for client {} from {:?} -> {:?} \
+                 (with up_state: {:?})",
+                self.client_id, self.state, new_state, up_state
+            );
         }
+        self.state = new_state;
+    }
 
-        if old_state != new_state {
-            info!(
-                self.log,
-                "[{}] Transition from {} to {}",
-                self.client_id,
-                old_state,
-                new_state,
-            );
-            self.state = new_state;
-        } else {
-            warn!(
-                self.log,
-                "[{}] transition to same state: {}", self.client_id, new_state
-            );
+    /// Check if a state transition is valid, returning `true` or `false`
+    fn is_state_transition_valid(
+        up_state: &UpstairsState,
+        prev_state: DsState,
+        next_state: DsState,
+    ) -> bool {
+        match (prev_state, next_state) {
+            // Restarting negotiation is always allowed
+            (
+                DsState::Connecting { .. },
+                DsState::Connecting {
+                    state: NegotiationState::Start { .. },
+                    ..
+                },
+            ) => true,
+
+            // Check normal negotiation path
+            (
+                DsState::Connecting {
+                    state: prev_state,
+                    mode: prev_mode,
+                },
+                DsState::Connecting {
+                    state: next_state,
+                    mode: next_mode,
+                },
+            ) => {
+                if next_mode == ConnectionMode::New
+                    && matches!(up_state, UpstairsState::Active)
+                {
+                    return false;
+                }
+                next_mode == prev_mode
+                    && NegotiationState::is_transition_valid(
+                        prev_mode, prev_state, next_state,
+                    )
+            }
+
+            // We can go to Active either through reconciliation or replay;
+            // in other cases, we must use live-repair
+            (DsState::Connecting { state, mode }, DsState::Active) => {
+                matches!(
+                    (state, mode),
+                    (NegotiationState::GetLastFlush, ConnectionMode::Offline)
+                        | (NegotiationState::Reconcile, ConnectionMode::New)
+                        | (
+                            NegotiationState::LiveRepairReady,
+                            ConnectionMode::Faulted | ConnectionMode::Replaced
+                        )
+                )
+            }
+            (DsState::Connecting { state, mode }, DsState::LiveRepair) => {
+                matches!(
+                    (state, mode),
+                    (
+                        NegotiationState::LiveRepairReady,
+                        ConnectionMode::Faulted | ConnectionMode::Replaced
+                    )
+                )
+            }
+
+            // When can we stop the IO task ourselves?
+            (DsState::LiveRepair, DsState::Active) => true,
+            (
+                DsState::Connecting { .. },
+                DsState::Stopping(
+                    ClientStopReason::NegotiationFailed(..)
+                    | ClientStopReason::Replacing
+                    | ClientStopReason::Disabled
+                    | ClientStopReason::Fault(..),
+                ),
+            ) => true,
+            (
+                DsState::Active | DsState::LiveRepair,
+                DsState::Stopping(
+                    ClientStopReason::Fault(..)
+                    | ClientStopReason::Replacing
+                    | ClientStopReason::Disabled,
+                ),
+            ) => true,
+            (_, DsState::Stopping(ClientStopReason::Deactivated)) => {
+                matches!(up_state, UpstairsState::Deactivating(..))
+            }
+
+            (DsState::Stopping(r), DsState::Connecting { mode, state }) => {
+                use ClientStopReason as R;
+                matches!(
+                    (r, mode, state),
+                    (
+                        R::Fault(..),
+                        ConnectionMode::Faulted,
+                        NegotiationState::Start { .. }
+                    ) | (
+                        R::Deactivated | R::Disabled,
+                        ConnectionMode::New,
+                        NegotiationState::Start {
+                            auto_promote: false
+                        }
+                    ) | (
+                        R::Replacing,
+                        ConnectionMode::Replaced,
+                        NegotiationState::Start { auto_promote: true }
+                    ) | (
+                        R::Replacing,
+                        ConnectionMode::New,
+                        NegotiationState::Start { .. }
+                    ) | (
+                        R::NegotiationFailed(..),
+                        ConnectionMode::New,
+                        NegotiationState::Start { .. }
+                    )
+                )
+            }
+
+            // When the upstairs is active, we can always spontaneously
+            // disconnect, which brings us to either Offline or Faulted
+            // depending on whether replay is valid
+            (
+                _,
+                DsState::Connecting {
+                    mode: ConnectionMode::Offline | ConnectionMode::Faulted,
+                    state: NegotiationState::Start { auto_promote: true },
+                },
+            ) => matches!(up_state, UpstairsState::Active),
+
+            // Anything not allowed is prohibited
+            _ => false,
         }
     }
 
@@ -1382,8 +1292,12 @@ impl DownstairsClient {
     /// # Panics
     /// If this downstairs is not read-only
     pub(crate) fn skip_live_repair(&mut self, up_state: &UpstairsState) {
-        if self.state == DsState::LiveRepairReady {
+        let DsState::Connecting { state, .. } = self.state else {
+            return;
+        };
+        if state == NegotiationState::LiveRepairReady {
             assert!(self.cfg.read_only);
+
             // TODO: could we do this transition early, by automatically
             // skipping LiveRepairReady if read-only?
             self.checked_state_transition(up_state, DsState::Active);
@@ -1391,9 +1305,12 @@ impl DownstairsClient {
         }
     }
 
-    /// Moves from `LiveRepairReady` to `LiveRepair`; a no-op otherwise
+    /// Moves from `LiveRepairReady` to `LiveRepair`, a no-op otherwise
     pub(crate) fn start_live_repair(&mut self, up_state: &UpstairsState) {
-        if self.state == DsState::LiveRepairReady {
+        let DsState::Connecting { state, .. } = self.state else {
+            return;
+        };
+        if state == NegotiationState::LiveRepairReady {
             self.checked_state_transition(up_state, DsState::LiveRepair);
         }
     }
@@ -1403,13 +1320,13 @@ impl DownstairsClient {
     /// Returns an error if the upstairs should go inactive, which occurs if the
     /// error is at or after `Message::YouAreNowActive`.
     ///
-    /// Returns `true` if negotiation for this downstairs is complete
+    /// Returns a flag indicating how to proceed
     pub(crate) fn continue_negotiation(
         &mut self,
         m: Message,
         up_state: &UpstairsState,
         ddef: &mut RegionDefinitionStatus,
-    ) -> Result<bool, CrucibleError> {
+    ) -> Result<NegotiationResult, NegotiationError> {
         /*
          * Either we get all the way through the negotiation, or we hit the
          * timeout and exit to retry.
@@ -1501,19 +1418,23 @@ impl DownstairsClient {
          *    upstairs. We set the downstairs to DsState::Active and the while
          *    loop is exited.
          */
+        let DsState::Connecting { state, mode } = &mut self.state else {
+            error!(
+                self.log,
+                "tried to continue negotiation while not connecting"
+            );
+            return Err(NegotiationError::OutOfOrder);
+        };
+        let mode = *mode; // mode is immutable here
         match m {
             Message::YesItsMe {
                 version,
                 repair_addr,
             } => {
-                if self.negotiation_state != NegotiationState::Start {
+                let NegotiationState::Start { auto_promote } = *state else {
                     error!(self.log, "got version already");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    return Ok(false);
-                }
+                    return Err(NegotiationError::OutOfOrder);
+                };
                 if version != CRUCIBLE_MESSAGE_VERSION {
                     error!(
                         self.log,
@@ -1521,57 +1442,28 @@ impl DownstairsClient {
                         CRUCIBLE_MESSAGE_VERSION,
                         version
                     );
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::Incompatible,
-                    );
-                    return Ok(false);
+                    return Err(NegotiationError::IncompatibleVersion {
+                        expected: CRUCIBLE_MESSAGE_VERSION,
+                        actual: version,
+                    });
                 }
-                self.negotiation_state = NegotiationState::WaitForPromote;
                 self.repair_addr = Some(repair_addr);
-                match self.promote_state {
-                    Some(PromoteState::Waiting) => {
-                        self.send(Message::PromoteToActive {
-                            upstairs_id: self.cfg.upstairs_id,
-                            session_id: self.cfg.session_id,
-                            gen: self.cfg.generation(),
-                        });
-                        self.promote_state = Some(PromoteState::Sent);
-                        self.negotiation_state =
-                            NegotiationState::WaitForPromote;
-                        // TODO This is an unfortunate corner of the state
-                        // machine, where we have to be in WaitActive despite
-                        // _already_ having gone active.
-                        // If we are Replaced and we have not yet gone active
-                        // then it is valid for us to transition to WA.
-                        if self.state == DsState::New
-                            || (self.state == DsState::Replaced
-                                && !matches!(up_state, UpstairsState::Active))
-                        {
-                            self.checked_state_transition(
-                                up_state,
-                                DsState::WaitActive,
-                            );
-                        } else {
-                            warn!(
-                                self.log,
-                                "version negotiation from state {:?}",
-                                self.state
-                            );
-                        }
-                    }
-                    Some(PromoteState::Sent) => {
-                        // We shouldn't be able to get here.
-                        panic!("got YesItsMe with promote_state == Sent");
-                    }
-                    None => {
-                        // Nothing to do here, wait for set_active_request
-                        self.checked_state_transition(
-                            up_state,
-                            DsState::WaitActive,
-                        );
-                    }
+                if auto_promote {
+                    *state = NegotiationState::WaitForPromote;
+                    self.send(Message::PromoteToActive {
+                        upstairs_id: self.cfg.upstairs_id,
+                        session_id: self.cfg.session_id,
+                        gen: self.cfg.generation(),
+                    });
+                    info!(
+                        self.log,
+                        "version negotiation from state {:?}", self.state
+                    );
+                } else {
+                    // Nothing to do here, wait for set_active_request
+                    *state = NegotiationState::WaitActive;
                 }
+                Ok(NegotiationResult::NotDone)
             }
             Message::VersionMismatch { version } => {
                 error!(
@@ -1579,10 +1471,10 @@ impl DownstairsClient {
                     "downstairs version is {version}, \
                      ours is {CRUCIBLE_MESSAGE_VERSION}"
                 );
-                self.abort_negotiation(
-                    up_state,
-                    ClientNegotiationFailed::Incompatible,
-                );
+                Err(NegotiationError::IncompatibleVersion {
+                    expected: CRUCIBLE_MESSAGE_VERSION,
+                    actual: version,
+                })
             }
             Message::EncryptedMismatch { expected } => {
                 error!(
@@ -1590,10 +1482,10 @@ impl DownstairsClient {
                     "downstairs encrypted is {expected}, ours is {}",
                     self.cfg.encrypted()
                 );
-                self.abort_negotiation(
-                    up_state,
-                    ClientNegotiationFailed::Incompatible,
-                );
+                Err(NegotiationError::EncryptionMismatch {
+                    expected: self.cfg.encrypted(),
+                    actual: expected,
+                })
             }
             Message::ReadOnlyMismatch { expected } => {
                 error!(
@@ -1601,94 +1493,74 @@ impl DownstairsClient {
                     "downstairs read_only is {expected}, ours is {}",
                     self.cfg.read_only,
                 );
-                self.abort_negotiation(
-                    up_state,
-                    ClientNegotiationFailed::Incompatible,
-                );
+                Err(NegotiationError::ReadOnlyMismatch {
+                    expected: self.cfg.read_only,
+                    actual: expected,
+                })
             }
             Message::YouAreNowActive {
                 upstairs_id,
                 session_id,
                 gen,
             } => {
-                if self.negotiation_state != NegotiationState::WaitForPromote {
+                if *state != NegotiationState::WaitForPromote {
                     error!(
                         self.log,
-                        "Received YouAreNowActive out of order! {:?}",
-                        self.negotiation_state
+                        "Received YouAreNowActive out of order! {state:?}",
                     );
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    return Ok(false);
+                    return Err(NegotiationError::OutOfOrder);
                 }
 
-                let match_uuid = self.cfg.upstairs_id == upstairs_id;
-                let match_session = self.cfg.session_id == session_id;
+                let mut err = None;
+                if self.cfg.upstairs_id != upstairs_id {
+                    error!(
+                        self.log,
+                        "UUID mismatch in YouAreNowActive: {:?} != {:?}",
+                        self.cfg.upstairs_id,
+                        upstairs_id
+                    );
+                    err = Some(NegotiationError::UpstairsIdMismatch {
+                        expected: self.cfg.upstairs_id,
+                        actual: upstairs_id,
+                    });
+                }
+                if self.cfg.session_id != session_id {
+                    error!(
+                        self.log,
+                        "Session mismatch in YouAreNowActive: {:?} != {:?}",
+                        self.cfg.session_id,
+                        session_id
+                    );
+                    err = Some(NegotiationError::SessionIdMismatch {
+                        expected: self.cfg.session_id,
+                        actual: session_id,
+                    });
+                }
                 let upstairs_gen = self.cfg.generation();
-                let match_gen = upstairs_gen == gen;
-                let matches_self = match_uuid && match_session && match_gen;
-
-                if !matches_self {
+                if upstairs_gen != gen {
                     error!(
                         self.log,
-                        "YouAreNowActive didn't match self! {} {} {}",
-                        if !match_uuid {
-                            format!(
-                                "UUID {:?} != {:?}",
-                                self.cfg.upstairs_id, upstairs_id
-                            )
-                        } else {
-                            String::new()
-                        },
-                        if !match_session {
-                            format!(
-                                "session {:?} != {:?}",
-                                self.cfg.session_id, session_id
-                            )
-                        } else {
-                            String::new()
-                        },
-                        if !match_gen {
-                            format!("gen {:?} != {:?}", upstairs_gen, gen)
-                        } else {
-                            String::new()
-                        },
+                        "generation mismatch in YouAreNowActive: {} != {}",
+                        upstairs_gen,
+                        gen
                     );
-                    if !match_gen {
-                        let gen_error = format!(
-                            "Generation requested:{} found:{}",
-                            gen, upstairs_gen,
-                        );
-                        self.abort_negotiation(
-                            up_state,
-                            ClientNegotiationFailed::Incompatible,
-                        );
-                        return Err(CrucibleError::GenerationNumberTooLow(
-                            gen_error,
-                        ));
-                    } else {
-                        self.abort_negotiation(
-                            up_state,
-                            ClientNegotiationFailed::Incompatible,
-                        );
-                        return Err(CrucibleError::UuidMismatch);
-                    }
+                    err = Some(NegotiationError::GenerationNumberTooLow {
+                        requested: upstairs_gen,
+                        actual: gen,
+                    });
                 }
-
-                self.negotiation_state = NegotiationState::WaitForRegionInfo;
-                self.send(Message::RegionInfoPlease);
+                if let Some(e) = err {
+                    Err(e)
+                } else {
+                    *state = NegotiationState::WaitForRegionInfo;
+                    self.send(Message::RegionInfoPlease);
+                    Ok(NegotiationResult::NotDone)
+                }
             }
             Message::RegionInfo { region_def } => {
-                if self.negotiation_state != NegotiationState::WaitForRegionInfo
-                {
+                if *state != NegotiationState::WaitForRegionInfo {
                     error!(self.log, "Received RegionInfo out of order!");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    return Ok(false);
+                    return Err(NegotiationError::OutOfOrder);
                 }
                 info!(
                     self.log,
@@ -1701,11 +1573,10 @@ impl DownstairsClient {
                 // collection for each downstairs.
                 if region_def.get_encrypted() != self.cfg.encrypted() {
                     error!(self.log, "encryption expectation mismatch!");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::Incompatible,
-                    );
-                    return Ok(false);
+                    return Err(NegotiationError::EncryptionMismatch {
+                        expected: self.cfg.encrypted(),
+                        actual: region_def.get_encrypted(),
+                    });
                 }
 
                 /*
@@ -1729,7 +1600,7 @@ impl DownstairsClient {
                     if uuid != region_def.uuid() {
                         // If we are replacing the downstairs, then a new UUID
                         // is okay.
-                        if self.state == DsState::Replaced {
+                        if mode == ConnectionMode::Replaced {
                             warn!(
                                 self.log,
                                 "Replace downstairs uuid:{} with {}",
@@ -1809,8 +1680,8 @@ impl DownstairsClient {
                 *ddef = RegionDefinitionStatus::Received(region_def);
 
                 // Match on the current state of this downstairs
-                match self.state {
-                    DsState::Offline => {
+                match mode {
+                    ConnectionMode::Offline => {
                         /*
                          * If we are coming from state Offline, then it means
                          * the downstairs has departed then came back in short
@@ -1826,87 +1697,85 @@ impl DownstairsClient {
                             self.log,
                             "send last flush ID to this DS: {}", lf
                         );
-                        self.negotiation_state = NegotiationState::GetLastFlush;
+                        *state = NegotiationState::GetLastFlush;
 
                         self.send(Message::LastFlush {
                             last_flush_number: lf,
                         });
                     }
-                    DsState::WaitActive
-                    | DsState::Faulted
-                    | DsState::Replaced => {
+                    ConnectionMode::New
+                    | ConnectionMode::Faulted
+                    | ConnectionMode::Replaced => {
                         /*
                          * Ask for the current version of all extents.
                          */
-                        self.negotiation_state =
-                            NegotiationState::GetExtentVersions;
+                        *state = NegotiationState::GetExtentVersions;
                         self.send(Message::ExtentVersionsPlease);
                     }
-                    bad_state => {
-                        panic!(
-                            "[{}] join from invalid state {} {} {:?}",
-                            self.client_id,
-                            bad_state,
-                            self.cfg.upstairs_id,
-                            self.negotiation_state,
-                        );
-                    }
                 }
+                Ok(NegotiationResult::NotDone)
             }
             Message::LastFlushAck { last_flush_number } => {
-                if self.negotiation_state != NegotiationState::GetLastFlush {
+                if *state != NegotiationState::GetLastFlush {
                     error!(self.log, "Received LastFlushAck out of order!");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    return Ok(false); // TODO should we trigger set_inactive?
+                    return Err(NegotiationError::OutOfOrder);
                 }
-                match self.state {
-                    DsState::Offline => (),
-                    s => panic!("got LastFlushAck in bad state {s:?}"),
-                }
+                assert_eq!(
+                    mode,
+                    ConnectionMode::Offline,
+                    "got LastFlushAck in bad state {:?}",
+                    self.state
+                );
                 info!(
                     self.log,
                     "Replied this last flush ID: {last_flush_number}"
                 );
                 assert_eq!(self.last_flush, last_flush_number);
 
-                // Immediately set the state to Active, since we've already
-                // copied over the jobs.
+                // Immediately set the state to Active, and return a flag
+                // indicating that jobs should be replayed.
                 self.checked_state_transition(up_state, DsState::Active);
-
-                self.negotiation_state = NegotiationState::Done;
+                Ok(NegotiationResult::Replay)
             }
             Message::ExtentVersions {
                 gen_numbers,
                 flush_numbers,
                 dirty_bits,
             } => {
-                if self.negotiation_state != NegotiationState::GetExtentVersions
-                {
+                if *state != NegotiationState::GetExtentVersions {
                     error!(self.log, "Received ExtentVersions out of order!");
-                    self.abort_negotiation(
-                        up_state,
-                        ClientNegotiationFailed::BadNegotiationOrder,
-                    );
-                    return Ok(false); // TODO should we trigger set_inactive?
+                    return Err(NegotiationError::OutOfOrder);
                 }
-                match self.state {
-                    DsState::WaitActive => {
-                        self.checked_state_transition(
+                let out = match mode {
+                    ConnectionMode::New => {
+                        *state = NegotiationState::WaitQuorum;
+                        NegotiationResult::WaitQuorum
+                    }
+                    // Special case: if a downstairs is replaced while we're
+                    // still trying to go active, then we use the WaitQuorum
+                    // path instead of LiveRepair.
+                    ConnectionMode::Replaced
+                        if matches!(
                             up_state,
-                            DsState::WaitQuorum,
+                            UpstairsState::Initializing
+                                | UpstairsState::GoActive(..)
+                        ) =>
+                    {
+                        *state = NegotiationState::WaitQuorum;
+                        NegotiationResult::WaitQuorum
+                    }
+
+                    ConnectionMode::Faulted | ConnectionMode::Replaced => {
+                        *state = NegotiationState::LiveRepairReady;
+                        NegotiationResult::LiveRepair
+                    }
+                    ConnectionMode::Offline => {
+                        panic!(
+                            "got ExtentVersions from invalid state {:?}",
+                            self.state
                         );
                     }
-                    DsState::Faulted | DsState::Replaced => {
-                        self.checked_state_transition(
-                            up_state,
-                            DsState::LiveRepairReady,
-                        );
-                    }
-                    s => panic!("downstairs in invalid state {s}"),
-                }
+                };
 
                 /*
                  * Record this downstairs region info for later
@@ -1922,11 +1791,10 @@ impl DownstairsClient {
                 if let Some(old_rm) = self.region_metadata.replace(dsr) {
                     warn!(self.log, "new RM replaced this: {:?}", old_rm);
                 }
-                self.negotiation_state = NegotiationState::Done;
+                Ok(out)
             }
             m => panic!("invalid message in continue_negotiation: {m:?}"),
         }
-        Ok(self.negotiation_state == NegotiationState::Done)
     }
 
     /// Sends the next reconciliation job to all clients
@@ -1938,8 +1806,17 @@ impl DownstairsClient {
         job: &mut ReconcileIO,
     ) {
         // If someone has moved us out of reconcile, this is a logic error
-        if self.state != DsState::Reconcile {
-            panic!("[{}] should still be in reconcile", self.client_id);
+        if !matches!(
+            self.state,
+            DsState::Connecting {
+                state: NegotiationState::Reconcile,
+                mode: ConnectionMode::New | ConnectionMode::Replaced
+            }
+        ) {
+            panic!(
+                "[{}] should still be in reconcile, not {:?}",
+                self.client_id, self.state
+            );
         }
         let prev_state = job
             .state
@@ -2048,24 +1925,147 @@ impl DownstairsClient {
     }
 }
 
-/// How to handle "promote to active" requests
-#[derive(Debug)]
-enum PromoteState {
-    /// Send `PromoteToActive` when the state machine reaches `WaitForPromote`
-    Waiting,
-    /// We have already sent `PromoteToActive`
-    Sent,
+/// Tracks client negotiation progress
+///
+/// The exact path through negotiation depends on the [`ConnectionMode`].
+///
+/// There are three main paths, shown below:
+///
+/// ```text
+///              ┌───────┐
+///              │ Start ├────────┐
+///              └───┬───┘        │
+///                  │            │
+///            ┌─────▼──────┐     │
+///            │ WaitActive │     │ auto-promote
+///            └─────┬──────┘     │
+///                  │            │
+///          ┌───────▼────────┐   │
+///          │ WaitForPromote ◄───┘
+///          └───────┬────────┘
+///                  │
+///         ┌────────▼──────────┐
+///         │ WaitForRegionInfo │
+///         └──┬──────────────┬─┘
+///    Offline │              │ New / Faulted / Replaced
+///     ┌──────▼─────┐   ┌────▼────────────┐
+///     │GetLastFlush│   │GetExtentVersions│
+///     └──────┬─────┘   └─┬─────────────┬─┘
+///            │           │ New         │ Faulted / Replaced
+///            │    ┌──────▼───┐    ┌────▼──────────┐
+///            │    │WaitQuorum│    │LiveRepairReady│
+///            │    └────┬─────┘    └────┬──────────┘
+///            │         │               │
+///            │    ┌────▼────┐          │
+///            │    │Reconcile│          │
+///            │    └────┬────┘          │
+///            │         │               │
+///            │     ┌───▼──┐            │
+///            └─────► Done ◄────────────┘
+///                  └──────┘
+/// ```
+///
+/// `Done` isn't actually present in the state machine; it's indicated by
+/// returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].
+#[derive(
+    Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", content = "value")]
+pub enum NegotiationState {
+    /// Initial state, waiting to hear `YesItsMe` from the client
+    ///
+    /// Once this message is heard, transitions to either `WaitActive` (if
+    /// `auto_promote` is `false`) or `WaitQuorum` (if `auto_promote` is `true`)
+    Start { auto_promote: bool },
+
+    /// Waiting for activation by the guest
+    WaitActive,
+
+    /// Waiting to hear `YouAreNowActive` from the client
+    WaitForPromote,
+
+    /// Waiting to hear `RegionInfo` from the client
+    WaitForRegionInfo,
+
+    /// Waiting to hear `LastFlushAck` from the client
+    GetLastFlush,
+
+    /// Waiting to hear `ExtentVersions` from the client
+    GetExtentVersions,
+
+    /// Waiting for the minimum number of downstairs to be present.
+    WaitQuorum,
+
+    /// Initial startup, downstairs are repairing from each other.
+    Reconcile,
+
+    /// Waiting for live-repair to begin
+    LiveRepairReady,
 }
 
-/// Tracks client negotiation progress
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum NegotiationState {
-    Start,
-    WaitForPromote,
-    WaitForRegionInfo,
-    GetLastFlush,
-    GetExtentVersions,
-    Done,
+impl NegotiationState {
+    /// Checks whether a particular transition is valid
+    ///
+    /// See the docstring of [`NegotiationState`] for a drawing of the full
+    /// state transition diagram
+    fn is_transition_valid(
+        mode: ConnectionMode,
+        prev_state: Self,
+        next_state: Self,
+    ) -> bool {
+        matches!(
+            (prev_state, next_state, mode),
+            (
+                NegotiationState::Start { auto_promote: true },
+                NegotiationState::WaitForPromote,
+                _
+            ) | (
+                NegotiationState::Start {
+                    auto_promote: false,
+                },
+                NegotiationState::WaitActive,
+                _,
+            ) | (
+                NegotiationState::WaitActive,
+                NegotiationState::WaitForPromote,
+                _
+            ) | (
+                NegotiationState::WaitForPromote,
+                NegotiationState::WaitForRegionInfo,
+                _
+            ) | (
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetLastFlush,
+                ConnectionMode::Offline
+            ) | (
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetExtentVersions,
+                ConnectionMode::New
+                    | ConnectionMode::Faulted
+                    | ConnectionMode::Replaced,
+            ) | (
+                NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
+                ConnectionMode::New
+            ) | (
+                NegotiationState::WaitQuorum,
+                NegotiationState::Reconcile,
+                ConnectionMode::New
+            ) | (
+                NegotiationState::GetExtentVersions,
+                NegotiationState::LiveRepairReady,
+                ConnectionMode::Faulted | ConnectionMode::Replaced,
+            )
+        )
+    }
+}
+/// Result value returned when negotiation is complete
+pub(crate) enum NegotiationResult {
+    NotDone,
+    WaitQuorum,
+    Replay,
+    LiveRepair,
 }
 
 /// Result value from [`DownstairsClient::enqueue`]
@@ -2188,13 +2188,40 @@ pub enum ClientNegotiationFailed {
     /// Negotiation message received out of order
     BadNegotiationOrder,
 
-    /// Negotiation says that we are incompatible
-    Incompatible,
+    /// Negotiation says that our message versions are incompatible
+    IncompatibleVersion,
+
+    /// Negotiation says that our session IDs are incompatible
+    IncompatibleSession,
+
+    /// Negotiation says that region settings are incompatible
+    IncompatibleSettings,
 }
 
 impl From<ClientNegotiationFailed> for ClientStopReason {
     fn from(f: ClientNegotiationFailed) -> ClientStopReason {
         ClientStopReason::NegotiationFailed(f)
+    }
+}
+
+impl From<NegotiationError> for ClientNegotiationFailed {
+    fn from(value: NegotiationError) -> Self {
+        match value {
+            NegotiationError::OutOfOrder => Self::BadNegotiationOrder,
+            NegotiationError::IncompatibleVersion { .. } => {
+                Self::IncompatibleVersion
+            }
+            NegotiationError::ReadOnlyMismatch { .. }
+            | NegotiationError::EncryptionMismatch { .. } => {
+                Self::IncompatibleSettings
+            }
+            NegotiationError::GenerationZeroIsIllegal { .. }
+            | NegotiationError::GenerationNumberTooLow { .. }
+            | NegotiationError::UpstairsIdMismatch { .. }
+            | NegotiationError::SessionIdMismatch { .. } => {
+                Self::IncompatibleSession
+            }
+        }
     }
 }
 
@@ -2270,8 +2297,9 @@ pub(crate) enum ClientRunResult {
     #[allow(dead_code)]
     ReadFailed(anyhow::Error),
     /// The `DownstairsClient` requested that the task stop, so it did
-    #[allow(dead_code)]
-    RequestedStop(ClientStopReason),
+    ///
+    /// The reason for the stop will be in the `DsState::Stopping(..)` member
+    RequestedStop,
     /// The socket closed cleanly and the task exited
     Finished,
     /// One of the queues used to communicate with the main task closed
@@ -2285,6 +2313,16 @@ pub(crate) enum ClientRunResult {
     /// arbitrary order (so the main client task may be awaiting the rx task
     /// when the latter is cancelled)
     ReceiveTaskCancelled,
+}
+
+/// Convert a oneshot result into a `ClientStopReason`
+impl From<Result<ClientStopReason, RecvError>> for ClientRunResult {
+    fn from(value: Result<ClientStopReason, RecvError>) -> Self {
+        match value {
+            Ok(..) => ClientRunResult::RequestedStop,
+            Err(..) => ClientRunResult::QueueClosed,
+        }
+    }
 }
 
 /// Data structure to hold context for the client IO task
@@ -2404,18 +2442,11 @@ impl ClientIoTask {
         if self.delay {
             tokio::select! {
                 s = &mut self.stop => {
-                    warn!(self.log, "client IO task stopped during sleep");
-                    return match s {
-                        Ok(s) =>
-                            ClientRunResult::RequestedStop(s),
-                        Err(e) => {
-                            warn!(
-                                self.log,
-                               "client_stop_rx closed unexpectedly: {e:?}"
-                            );
-                            ClientRunResult::QueueClosed
-                        }
-                    }
+                    warn!(
+                        self.log,
+                        "client IO task stopped during sleep: {s:?}"
+                    );
+                    return s.into();
                 }
                 _ = tokio::time::sleep(CLIENT_RECONNECT_DELAY) => {
                     // this is fine
@@ -2436,18 +2467,11 @@ impl ClientIoTask {
                 // Otherwise, continue as usual
             }
             s = &mut self.stop => {
-                warn!(self.log, "client IO task stopped before connecting");
-                return match s {
-                    Ok(s) =>
-                        ClientRunResult::RequestedStop(s),
-                    Err(e) => {
-                        warn!(
-                            self.log,
-                           "client_stop_rx closed unexpectedly: {e:?}"
-                        );
-                        ClientRunResult::QueueClosed
-                    }
-                }
+                warn!(
+                    self.log,
+                    "client IO task stopped before connecting: {s:?}"
+                );
+                return s.into();
             }
         }
 
@@ -2486,18 +2510,11 @@ impl ClientIoTask {
                 }
             }
             s = &mut self.stop => {
-                warn!(self.log, "client IO task stopped during connection");
-                return match s {
-                    Ok(s) =>
-                        ClientRunResult::RequestedStop(s),
-                    Err(e) => {
-                        warn!(
-                            self.log,
-                           "client_stop_rx closed unexpectedly: {e:?}"
-                        );
-                        ClientRunResult::QueueClosed
-                    }
-                }
+                warn!(
+                    self.log,
+                    "client IO task stopped during connection: {s:?}"
+                );
+                return s.into();
             }
         };
 
@@ -2592,19 +2609,8 @@ impl ClientIoTask {
                 }
 
                 s = &mut self.stop => {
-                    match s {
-                        Ok(s) => {
-                            break ClientRunResult::RequestedStop(s);
-                        }
-
-                        Err(e) => {
-                            warn!(
-                                self.log,
-                                "client_stop_rx closed unexpectedly: {e:?}"
-                            );
-                            break ClientRunResult::QueueClosed;
-                        }
-                    }
+                    info!(self.log, "client stopping due to {s:?}");
+                    break s.into();
                 }
             }
         }
@@ -2662,19 +2668,8 @@ impl ClientIoTask {
                 }
             }
             s = &mut self.stop => {
-                match s {
-                    Ok(s) => {
-                        Err(ClientRunResult::RequestedStop(s))
-                    }
-
-                    Err(e) => {
-                        warn!(
-                            self.log,
-                            "client_stop_rx closed unexpectedly: {e:?}"
-                        );
-                        Err(ClientRunResult::QueueClosed)
-                    }
-                }
+                info!(self.log, "client stopped in write due to {s:?}");
+                Err(s.into())
             }
             join_result = self.recv_task.join() => {
                 Err(join_result)
@@ -2868,341 +2863,5 @@ pub(crate) fn validate_unencrypted_read_response(
             error!(log, "got empty block context with non-blank block");
             Err(CrucibleError::MissingBlockContext)
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn downstairs_transition_normal() {
-        // Verify the correct downstairs progression
-        // New -> WA -> WQ -> Active
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-    }
-
-    #[test]
-    fn downstairs_transition_deactivate_new() {
-        // Verify deactivate goes to new
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        // Upstairs goes active!
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Active,
-            DsState::Stopping(ClientStopReason::Deactivated),
-        );
-        client.checked_state_transition(&UpstairsState::Active, DsState::New);
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_deactivate_not_new() {
-        // Verify deactivate goes to new
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Stopping(ClientStopReason::Deactivated),
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_deactivate_not_wa() {
-        // Verify no deactivate from wa
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Stopping(ClientStopReason::Deactivated),
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_deactivate_not_wq() {
-        // Verify no deactivate from wq
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Stopping(ClientStopReason::Deactivated),
-        );
-    }
-
-    #[test]
-    fn downstairs_transition_active_to_faulted() {
-        // Verify active upstairs can go to faulted
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Faulted,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_disconnect_no_active() {
-        // Verify no activation from disconnected
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Stopping(ClientStopReason::Deactivated),
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_same_wa() {
-        // Verify we can't go to the same state we are in
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_same_wq() {
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_same_active() {
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_no_new_to_offline() {
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Offline,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Offline,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_same_offline() {
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Offline,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Offline,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_backwards() {
-        // Verify state can't go backwards
-        // New -> WA -> WQ -> WA
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_bad_transition_wq() {
-        // Verify error when going straight to WQ
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_bad_offline() {
-        // Verify offline cannot go to WQ
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Offline,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_bad_active() {
-        // Verify active can't go back to WQ
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-    }
-
-    #[test]
-    fn downstairs_transition_active_faulted() {
-        // Verify
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Faulted,
-        );
     }
 }

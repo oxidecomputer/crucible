@@ -136,10 +136,24 @@
             ]
           },
           {
-            "description": "Negotiation says that we are incompatible",
+            "description": "Negotiation says that our message versions are incompatible",
             "type": "string",
             "enum": [
-              "incompatible"
+              "incompatible_version"
+            ]
+          },
+          {
+            "description": "Negotiation says that our session IDs are incompatible",
+            "type": "string",
+            "enum": [
+              "incompatible_session"
+            ]
+          },
+          {
+            "description": "Negotiation says that region settings are incompatible",
+            "type": "string",
+            "enum": [
+              "incompatible_settings"
             ]
           }
         ]
@@ -232,6 +246,38 @@
           }
         ]
       },
+      "ConnectionMode": {
+        "oneOf": [
+          {
+            "description": "Connect through reconciliation once a quorum has come online",
+            "type": "string",
+            "enum": [
+              "new"
+            ]
+          },
+          {
+            "description": "Replay cached jobs when reconnecting",
+            "type": "string",
+            "enum": [
+              "offline"
+            ]
+          },
+          {
+            "description": "Reconnect through live-repair",
+            "type": "string",
+            "enum": [
+              "faulted"
+            ]
+          },
+          {
+            "description": "Reconnect through live-repair; the address is allowed to change",
+            "type": "string",
+            "enum": [
+              "replaced"
+            ]
+          }
+        ]
+      },
       "DownstairsWork": {
         "description": "`DownstairsWork` holds the information gathered from the downstairs",
         "type": "object",
@@ -255,64 +301,41 @@
         ]
       },
       "DsState": {
+        "description": "High-level states for a Downstairs\n\nThe state machine for a Downstairs is relatively simple:\n\n```text ┌────────────┐ ┌────► LiveRepair ├─────┐ start ┌─────────┴┐   └─────┬──────┘   ┌─▼──────┐ ────►│Connecting│         │          │Stopping│ └─▲───────┬┘   ┌─────▼──────┐   └─▲────┬─┘ │       └────►   Active   ├─────┘    │ │            └─────┬──────┘          │ │                  │                 │ └─────────────────◄┴─────────────────┘ ```\n\nComplexity is hidden in the `Connecting` state, which wraps a [`NegotiationState`] implementing the negotiation state machine.",
         "oneOf": [
           {
+            "description": "New connection",
             "type": "object",
             "properties": {
               "type": {
                 "type": "string",
                 "enum": [
-                  "new"
+                  "connecting"
+                ]
+              },
+              "value": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "$ref": "#/components/schemas/ConnectionMode"
+                  },
+                  "state": {
+                    "$ref": "#/components/schemas/NegotiationState"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "state"
                 ]
               }
             },
             "required": [
-              "type"
+              "type",
+              "value"
             ]
           },
           {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "wait_active"
-                ]
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "wait_quorum"
-                ]
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "reconcile"
-                ]
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          {
+            "description": "Ready for and/or currently receiving IO",
             "type": "object",
             "properties": {
               "type": {
@@ -327,68 +350,13 @@
             ]
           },
           {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "faulted"
-                ]
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "live_repair_ready"
-                ]
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          {
+            "description": "This downstairs is undergoing LiveRepair",
             "type": "object",
             "properties": {
               "type": {
                 "type": "string",
                 "enum": [
                   "live_repair"
-                ]
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "offline"
-                ]
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "replaced"
                 ]
               }
             },
@@ -434,6 +402,158 @@
         "required": [
           "message",
           "request_id"
+        ]
+      },
+      "NegotiationState": {
+        "description": "Tracks client negotiation progress\n\nThe exact path through negotiation depends on the [`ConnectionMode`].\n\nThere are three main paths, shown below:\n\n```text ┌───────┐ │ Start ├────────┐ └───┬───┘        │ │            │ ┌─────▼──────┐     │ │ WaitActive │     │ auto-promote └─────┬──────┘     │ │            │ ┌───────▼────────┐   │ │ WaitForPromote ◄───┘ └───────┬────────┘ │ ┌────────▼──────────┐ │ WaitForRegionInfo │ └──┬──────────────┬─┘ Offline │              │ New / Faulted / Replaced ┌──────▼─────┐   ┌────▼────────────┐ │GetLastFlush│   │GetExtentVersions│ └──────┬─────┘   └─┬─────────────┬─┘ │           │ New         │ Faulted / Replaced │    ┌──────▼───┐    ┌────▼──────────┐ │    │WaitQuorum│    │LiveRepairReady│ │    └────┬─────┘    └────┬──────────┘ │         │               │ │    ┌────▼────┐          │ │    │Reconcile│          │ │    └────┬────┘          │ │         │               │ │     ┌───▼──┐            │ └─────► Done ◄────────────┘ └──────┘ ```\n\n`Done` isn't actually present in the state machine; it's indicated by returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].",
+        "oneOf": [
+          {
+            "description": "Initial state, waiting to hear `YesItsMe` from the client\n\nOnce this message is heard, transitions to either `WaitActive` (if `auto_promote` is `false`) or `WaitQuorum` (if `auto_promote` is `true`)",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "start"
+                ]
+              },
+              "value": {
+                "type": "object",
+                "properties": {
+                  "auto_promote": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "auto_promote"
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ]
+          },
+          {
+            "description": "Waiting for activation by the guest",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_active"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Waiting to hear `YouAreNowActive` from the client",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_for_promote"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Waiting to hear `RegionInfo` from the client",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_for_region_info"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Waiting to hear `LastFlushAck` from the client",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "get_last_flush"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Waiting to hear `ExtentVersions` from the client",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "get_extent_versions"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Waiting for the minimum number of downstairs to be present.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_quorum"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Initial startup, downstairs are repairing from each other.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reconcile"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Waiting for live-repair to begin",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "live_repair_ready"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
         ]
       },
       "UpState": {

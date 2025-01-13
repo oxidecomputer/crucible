@@ -41,6 +41,7 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+export RUST_BACKTRACE=1
 
 # Give this test two hours to finish
 jobpid=$$; (sleep $(( 120 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
