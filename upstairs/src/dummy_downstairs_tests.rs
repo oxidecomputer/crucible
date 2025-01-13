@@ -12,6 +12,8 @@ use crate::guest::Guest;
 use crate::up_main;
 use crate::BlockIO;
 use crate::Buffer;
+use crate::ClientFaultReason;
+use crate::ClientStopReason;
 use crate::ConnectionMode;
 use crate::CrucibleError;
 use crate::DsState;
@@ -3103,6 +3105,19 @@ async fn test_bytes_based_barrier() {
     harness.ds3.ack_flush().await;
 }
 
+fn assert_faulted(s: &DsState) {
+    match s {
+        DsState::Stopping(ClientStopReason::Fault(
+            ClientFaultReason::RequestedFault,
+        ))
+        | DsState::Connecting {
+            mode: ConnectionMode::Faulted,
+            ..
+        } => (),
+        _ => panic!("invalid state: expected faulted, got {s:?}"),
+    }
+}
+
 /// Test for early rejection of writes if > 1 Downstairs is unavailable
 #[tokio::test]
 async fn fast_write_rejection() {
@@ -3120,7 +3135,7 @@ async fn fast_write_rejection() {
     harness.ds3.ack_write().await;
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+    assert_faulted(&ds[ClientId::new(0)]);
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -3134,8 +3149,8 @@ async fn fast_write_rejection() {
     harness.ds3.ack_write().await;
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
-    assert_eq!(ds[ClientId::new(1)], DsState::Faulted);
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_faulted(&ds[ClientId::new(1)]);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
     // Subsequent writes should be rejected immediately
@@ -3163,7 +3178,7 @@ async fn read_with_one_fault() {
     harness.ds3.ack_write().await;
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+    assert_faulted(&ds[ClientId::new(0)]);
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -3186,8 +3201,8 @@ async fn read_with_one_fault() {
     harness.ds3.ack_write().await;
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
-    assert_eq!(ds[ClientId::new(1)], DsState::Faulted);
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_faulted(&ds[ClientId::new(1)]);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
     // Reads still work with 1x Downstairs
@@ -3216,9 +3231,9 @@ async fn fast_read_rejection() {
     harness.ds3.err_write().await;
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
-    assert_eq!(ds[ClientId::new(1)], DsState::Faulted);
-    assert_eq!(ds[ClientId::new(2)], DsState::Faulted);
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_faulted(&ds[ClientId::new(1)]);
+    assert_faulted(&ds[ClientId::new(2)]);
 
     // Reads should return errors immediately
     let mut buffer = Buffer::new(1, 512);
@@ -3244,7 +3259,7 @@ async fn fast_flush_rejection() {
     h.await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+    assert_faulted(&ds[ClientId::new(0)]);
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -3278,9 +3293,9 @@ async fn fast_flush_rejection() {
     assert!(r.is_err());
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+    assert_faulted(&ds[ClientId::new(0)]);
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Faulted);
+    assert_faulted(&ds[ClientId::new(2)]);
 
     // Subsequent flushes should fail immediately
     match harness.guest.flush(None).await {
