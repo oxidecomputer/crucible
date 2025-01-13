@@ -490,9 +490,6 @@ impl DownstairsClient {
     }
 
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
-    ///
-    /// # Panics
-    /// If the downstairs is offline
     pub(crate) fn ready_to_deactivate(&self) -> bool {
         match &self.state {
             DsState::Connecting {
