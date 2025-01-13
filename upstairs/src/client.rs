@@ -1896,7 +1896,6 @@ impl DownstairsClient {
         )
     }
 
-    #[cfg(feature = "notify-nexus")]
     pub(crate) fn id(&self) -> Option<Uuid> {
         self.region_uuid
     }
