@@ -494,7 +494,8 @@ impl DownstairsClient {
         match &self.state {
             DsState::Connecting {
                 mode: ConnectionMode::New,
-                state: NegotiationState::Start { .. },
+                state:
+                    NegotiationState::Start { .. } | NegotiationState::WaitActive,
             } => {
                 info!(
                     self.log,
