@@ -15,12 +15,12 @@ dtrace:::BEGIN
  * Every second, check and see if we have printed enough that it is
  * time to print the header again
  */
-tick-1s
+dtrace:::BEGIN, tick-1s
 /show > 20/
 {
     printf("%6s ", "PID");
-    printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
-    printf("  %5s %5s %9s", "UPW", "DSW", "JOBID");
+    printf("%3s %3s %3s", "DS0", "DS1", "DS2");
+    printf(" %5s %5s %10s", "UPW", "DSW", "JOBID");
     printf(" %10s", "WRITE_BO");
     printf("  %5s %5s %5s", "IP0", "IP1", "IP2");
     printf("  %5s %5s %5s", "D0", "D1", "D2");
@@ -29,28 +29,52 @@ tick-1s
     show = 0;
 }
 
+/*
+ * Translate the longer state string into a shorter version
+ */
+inline string short_state[string ss] =
+    ss == "active" ? "ACT" :
+    ss == "new" ? "NEW" :
+    ss == "live_repair_ready" ? "LRR" :
+    ss == "live_repair" ? "LR" :
+    ss == "faulted" ? "FLT" :
+    ss == "offline" ? "OFL" :
+    ss == "reconcile" ? "REC" :
+    ss == "wait_quorum" ? "WQ" :
+    ss == "wait_active" ? "WA" :
+    ss == "replaced" ? "RPL" :
+    ss;
+
 crucible_upstairs*:::up-status
 {
     show = show + 1;
-    printf("%6d ", pid);
+    this->ds0state = json(copyinstr(arg1), "ok.ds_state[0].type");
+    this->d0 = short_state[this->ds0state];
+
+    this->ds1state = json(copyinstr(arg1), "ok.ds_state[1].type");
+    this->d1 = short_state[this->ds1state];
+
+    this->ds2state = json(copyinstr(arg1), "ok.ds_state[2].type");
+    this->d2 = short_state[this->ds2state];
+
+    printf("%6d", pid);
     /*
      * State for the three downstairs
      */
-    printf("%17s", json(copyinstr(arg1), "ok.ds_state[0]"));
-    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[1]"));
-    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[2]"));
+    printf(" %3s", this->d0);
+    printf(" %3s", this->d1);
+    printf(" %3s", this->d2);
 
     /*
      * Work queue counts for Upstairs and Downstairs
      */
-    printf(" ");
     printf(" %5s", json(copyinstr(arg1), "ok.up_count"));
     printf(" %5s", json(copyinstr(arg1), "ok.ds_count"));
 
     /*
      * Job ID and outstanding bytes
      */
-    printf(" %9s", json(copyinstr(arg1), "ok.next_job_id"));
+    printf(" %10s", json(copyinstr(arg1), "ok.next_job_id"));
     printf(" %10s", json(copyinstr(arg1), "ok.write_bytes_out"));
 
     /*

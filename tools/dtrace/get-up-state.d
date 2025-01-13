@@ -43,6 +43,8 @@ inline string short_state[string ss] =
     ss == "offline" ? "OFL" :
     ss == "reconcile" ? "REC" :
     ss == "wait_quorum" ? "WQ" :
+    ss == "wait_active" ? "WA" :
+    ss == "replaced" ? "RPL" :
     ss;
 
 /*
@@ -52,13 +54,13 @@ inline string short_state[string ss] =
  */
 crucible_upstairs*:::up-status
 {
-    this->ds0state = json(copyinstr(arg1), "ok.ds_state[0]");
+    this->ds0state = json(copyinstr(arg1), "ok.ds_state[0].type");
     this->d0 = short_state[this->ds0state];
 
-    this->ds1state = json(copyinstr(arg1), "ok.ds_state[1]");
+    this->ds1state = json(copyinstr(arg1), "ok.ds_state[1].type");
     this->d1 = short_state[this->ds1state];
 
-    this->ds2state = json(copyinstr(arg1), "ok.ds_state[2]");
+    this->ds2state = json(copyinstr(arg1), "ok.ds_state[2].type");
     this->d2 = short_state[this->ds2state];
 
     this->full_session_id = json(copyinstr(arg1), "ok.session_id");
