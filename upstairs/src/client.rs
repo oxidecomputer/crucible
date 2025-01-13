@@ -1891,7 +1891,20 @@ impl DownstairsClient {
         self.client_delay_us.load(Ordering::Relaxed)
     }
 
-    /// Looks up the region UUID
+    /// Checks whether the client is in a state where it can accept IO
+    pub(crate) fn is_accepting_io(&self) -> bool {
+        matches!(
+            self.state,
+            DsState::Active
+                | DsState::LiveRepair
+                | DsState::Connecting {
+                    mode: ConnectionMode::Offline,
+                    ..
+                }
+        )
+    }
+
+    #[cfg(feature = "notify-nexus")]
     pub(crate) fn id(&self) -> Option<Uuid> {
         self.region_uuid
     }
