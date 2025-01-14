@@ -82,6 +82,8 @@ use active_jobs::ActiveJobs;
 
 use async_trait::async_trait;
 
+pub(crate) mod notify;
+
 mod client;
 mod downstairs;
 mod upstairs;
@@ -1621,64 +1623,4 @@ pub fn up_main(
     let join_handle = tokio::spawn(async move { up.run().await });
 
     Ok(join_handle)
-}
-
-/// Gets a Nexus client based on any IPv6 address
-#[cfg(feature = "notify-nexus")]
-pub(crate) async fn get_nexus_client(
-    log: &Logger,
-    client: reqwest::Client,
-    target_addrs: &[SocketAddr],
-) -> Option<nexus_client::Client> {
-    use internal_dns::resolver::Resolver;
-    use internal_dns::ServiceName;
-    use std::net::Ipv6Addr;
-
-    // Use any rack internal address for `Resolver::new_from_ip`, as that will
-    // use the AZ_PREFIX to find internal DNS servers.
-    let mut addr: Option<Ipv6Addr> = None;
-
-    for target_addr in target_addrs {
-        match &target_addr {
-            SocketAddr::V6(target_addr) => {
-                addr = Some(*target_addr.ip());
-                break;
-            }
-
-            SocketAddr::V4(_) => {
-                // This branch is seen if compiling with the `notify-nexus`
-                // feature but deploying in an ipv4 environment, usually during
-                // development. `Resolver::new_from_ip` only accepts IPv6
-                // addresses, so we can't use it to look up an address for the
-                // Nexus client.
-            }
-        }
-    }
-
-    let Some(addr) = addr else {
-        return None;
-    };
-
-    let resolver = match Resolver::new_from_ip(log.clone(), addr) {
-        Ok(resolver) => resolver,
-        Err(e) => {
-            error!(log, "could not make resolver: {e}");
-            return None;
-        }
-    };
-
-    let nexus_address =
-        match resolver.lookup_socket_v6(ServiceName::Nexus).await {
-            Ok(addr) => addr,
-            Err(e) => {
-                error!(log, "lookup Nexus address failed: {e}");
-                return None;
-            }
-        };
-
-    Some(nexus_client::Client::new_with_client(
-        &format!("http://{}", nexus_address),
-        client,
-        log.clone(),
-    ))
 }

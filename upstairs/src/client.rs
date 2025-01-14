@@ -1919,7 +1919,7 @@ impl DownstairsClient {
         self.client_delay_us.load(Ordering::Relaxed)
     }
 
-    #[cfg(feature = "notify-nexus")]
+    /// Looks up the region UUID
     pub(crate) fn id(&self) -> Option<Uuid> {
         self.region_uuid
     }
