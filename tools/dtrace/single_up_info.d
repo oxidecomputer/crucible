@@ -20,12 +20,12 @@ dtrace:::BEGIN
  * Every second, check and see if we have printed enough that it is
  * time to print the header again
  */
-tick-1s
+dtrace:::BEGIN, tick-1s
 /show > 20/
 {
     printf("%8s ", "SESSION");
-    printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
-    printf(" %5s %5s %8s %5s", "UPW", "DSW", "NEXT_JOB", "DELTA");
+    printf("%3s %3s %3s", "DS0", "DS1", "DS2");
+    printf(" %5s %5s %10s %6s", "UPW", "DSW", "NEXT_JOB", "DELTA");
     printf(" %10s", "WRITE_BO");
     printf("  %5s %5s %5s", "IP0", "IP1", "IP2");
     printf("  %5s %5s %5s", "D0", "D1", "D2");
@@ -36,6 +36,22 @@ tick-1s
     show = 0;
 }
 
+/*
+ * Translate the longer state string into a shorter version
+ */
+inline string short_state[string ss] =
+    ss == "active" ? "ACT" :
+    ss == "new" ? "NEW" :
+    ss == "live_repair_ready" ? "LRR" :
+    ss == "live_repair" ? "LR" :
+    ss == "faulted" ? "FLT" :
+    ss == "offline" ? "OFL" :
+    ss == "reconcile" ? "REC" :
+    ss == "wait_quorum" ? "WQ" :
+    ss == "wait_active" ? "WA" :
+    ss == "replaced" ? "RPL" :
+    ss;
+
 crucible_upstairs*:::up-status
 /pid==$1/
 {
@@ -44,6 +60,15 @@ crucible_upstairs*:::up-status
      * All these local variables require the "this->" so the probe firing
      * from different sessions don't collide with each other.
      */
+    this->ds0state = json(copyinstr(arg1), "ok.ds_state[0].type");
+    this->d0 = short_state[this->ds0state];
+
+    this->ds1state = json(copyinstr(arg1), "ok.ds_state[1].type");
+    this->d1 = short_state[this->ds1state];
+
+    this->ds2state = json(copyinstr(arg1), "ok.ds_state[2].type");
+    this->d2 = short_state[this->ds2state];
+
     this->full_session_id = json(copyinstr(arg1), "ok.session_id");
     this->session_id = substr(this->full_session_id, 0, 8);
 
@@ -58,15 +83,13 @@ crucible_upstairs*:::up-status
      * I'm not very happy about this, but if we don't print it all on one
      * line, then multiple sessions will clobber each others output.
      */
-    printf("%8s %17s %17s %17s %5s %5s %8s %5d %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
+    printf("%8s %3s %3s %3s %5s %5s %10s %6d %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
 
     this->session_id,
     /*
      * State for the three downstairs
      */
-    json(copyinstr(arg1), "ok.ds_state[0]"),
-    json(copyinstr(arg1), "ok.ds_state[1]"),
-    json(copyinstr(arg1), "ok.ds_state[2]"),
+    this->d0, this->d1, this->d2,
 
     /*
      * Work queue counts for Upstairs and Downstairs

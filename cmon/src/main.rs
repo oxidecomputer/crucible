@@ -92,12 +92,12 @@ fn short_state(dss: DsState) -> String {
         DsState::Connecting {
             state: NegotiationState::WaitActive,
             ..
-        } => "WAC".to_string(),
+        } => "WA".to_string(),
 
         DsState::Connecting {
             state: NegotiationState::WaitQuorum,
             ..
-        } => "WAQ".to_string(),
+        } => "WQ".to_string(),
         DsState::Connecting {
             state: NegotiationState::Reconcile,
             ..
@@ -121,14 +121,14 @@ fn short_state(dss: DsState) -> String {
         DsState::Connecting {
             mode: ConnectionMode::Offline,
             ..
-        } => "OFF".to_string(),
+        } => "OFL".to_string(),
         DsState::Stopping(ClientStopReason::Deactivated) => "DAV".to_string(),
         DsState::Stopping(ClientStopReason::Disabled) => "DIS".to_string(),
         DsState::Stopping(ClientStopReason::Replacing)
         | DsState::Connecting {
             mode: ConnectionMode::Replaced,
             ..
-        } => "RPD".to_string(),
+        } => "RPL".to_string(),
     }
 }
 

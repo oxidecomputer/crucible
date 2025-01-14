@@ -15,10 +15,10 @@ dtrace:::BEGIN
  * Every second, check and see if we have printed enough that it is
  * time to print the header again
  */
-tick-1s
+dtrace:::BEGIN, tick-1s
 /show > 20/
 {
-    printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
+    printf("%3s %3s %3s", "DS0", "DS1", "DS2");
     printf(" ");
 
     /* Header width, three downstairs, space between: 5+1+5+1+5 = 17 */
@@ -32,15 +32,41 @@ tick-1s
     show = 0;
 }
 
+/*
+ * Translate the longer state string into a shorter version
+ */
+inline string short_state[string ss] =
+    ss == "active" ? "ACT" :
+    ss == "new" ? "NEW" :
+    ss == "live_repair_ready" ? "LRR" :
+    ss == "live_repair" ? "LR" :
+    ss == "faulted" ? "FLT" :
+    ss == "offline" ? "OFL" :
+    ss == "reconcile" ? "REC" :
+    ss == "wait_quorum" ? "WQ" :
+    ss == "wait_active" ? "WA" :
+    ss == "replaced" ? "RPL" :
+    ss;
+
 crucible_upstairs*:::up-status
 {
     show = show + 1;
     /*
      * State for the three downstairs
      */
-    printf("%17s", json(copyinstr(arg1), "ok.ds_state[0]"));
-    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[1]"));
-    printf(" %17s", json(copyinstr(arg1), "ok.ds_state[2]"));
+
+    this->ds0state = json(copyinstr(arg1), "ok.ds_state[0].type");
+    this->d0 = short_state[this->ds0state];
+
+    this->ds1state = json(copyinstr(arg1), "ok.ds_state[1].type");
+    this->d1 = short_state[this->ds1state];
+
+    this->ds2state = json(copyinstr(arg1), "ok.ds_state[2].type");
+    this->d2 = short_state[this->ds2state];
+
+    printf("%3s", this->d0);
+    printf(" %3s", this->d1);
+    printf(" %3s", this->d2);
 
     printf(" ");
     printf(" %5s", json(copyinstr(arg1), "ok.ds_live_repair_completed[0]"));
