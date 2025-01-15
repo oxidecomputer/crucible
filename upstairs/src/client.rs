@@ -373,17 +373,26 @@ impl DownstairsClient {
         mut job: IOop,
         repair_min_id: Option<JobId>,
     ) -> IOop {
-        if self.dependencies_need_cleanup() {
-            match &mut job {
-                IOop::Write { dependencies, .. }
-                | IOop::WriteUnwritten { dependencies, .. }
-                | IOop::Flush { dependencies, .. }
-                | IOop::Barrier { dependencies, .. }
-                | IOop::Read { dependencies, .. }
-                | IOop::ExtentFlushClose { dependencies, .. }
-                | IOop::ExtentLiveRepair { dependencies, .. }
-                | IOop::ExtentLiveReopen { dependencies, .. }
-                | IOop::ExtentLiveNoOp { dependencies } => {
+        match &mut job {
+            IOop::Write { dependencies, .. }
+            | IOop::WriteUnwritten { dependencies, .. }
+            | IOop::Flush { dependencies, .. }
+            | IOop::Barrier { dependencies, .. }
+            | IOop::Read { dependencies, .. }
+            | IOop::ExtentFlushClose { dependencies, .. }
+            | IOop::ExtentLiveRepair { dependencies, .. }
+            | IOop::ExtentLiveReopen { dependencies, .. }
+            | IOop::ExtentLiveNoOp { dependencies } => {
+                debug!(
+                    self.log,
+                    "{} Check/remove skipped:{:?} from deps:{:?}",
+                    ds_id,
+                    self.skipped_jobs,
+                    deps
+                );
+                deps.retain(|x| !self.skipped_jobs.contains(x));
+
+                if self.dependencies_need_cleanup() {
                     self.remove_dep_if_live_repair(
                         dependencies,
                         ds_id,
@@ -465,17 +474,7 @@ impl DownstairsClient {
         ds_id: JobId,
         repair_min_id: JobId,
     ) {
-        debug!(
-            self.log,
-            "{} Remove check skipped:{:?} from deps:{:?}",
-            ds_id,
-            self.skipped_jobs,
-            deps
-        );
         assert!(matches!(self.state, DsState::LiveRepair));
-
-        deps.retain(|x| !self.skipped_jobs.contains(x));
-
         // If we are repairing, then there must be a repair_min_id set so we
         // know where to stop with dependency inclusion.
         debug!(
