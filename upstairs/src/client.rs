@@ -388,9 +388,9 @@ impl DownstairsClient {
                     "{} Check/remove skipped:{:?} from deps:{:?}",
                     ds_id,
                     self.skipped_jobs,
-                    deps
+                    dependencies,
                 );
-                deps.retain(|x| !self.skipped_jobs.contains(x));
+                dependencies.retain(|x| !self.skipped_jobs.contains(x));
 
                 if self.dependencies_need_cleanup() {
                     self.remove_dep_if_live_repair(
