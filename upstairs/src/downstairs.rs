@@ -7922,10 +7922,37 @@ pub(crate) mod test {
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
     }
 
+    // Test function that will return a LiveRepairData struct populated with
+    // data you provide for it.
+    fn create_live_repair_data(
+        extent_count: u32,
+        repair_ids: ExtentRepairIDs,
+        eid: ExtentId,
+    ) -> Option<LiveRepairData> {
+        let state = LiveRepairState::Closing {
+            close_job: PendingJob::new(repair_ids.close_id),
+            repair_job: PendingJob::new(repair_ids.repair_id),
+            reopen_job: PendingJob::new(repair_ids.reopen_id),
+            noop_job: PendingJob::new(repair_ids.noop_id),
+        };
+        Some(LiveRepairData {
+            id: Uuid::new_v4(),
+            extent_count: extent_count,
+            repair_downstairs: vec![ClientId::new(1)],
+            source_downstairs: ClientId::new(0),
+            aborting_repair: false,
+            active_extent: eid,
+            min_id: repair_ids.close_id,
+            repair_job_ids: BTreeMap::new(),
+            state,
+        })
+    }
+
     #[test]
     fn test_live_repair_enqueue_reopen() {
         // Make sure the create_and_enqueue_reopen_io() function does
         // what we expect it to do
+
         let mut ds = Downstairs::repair_test_one_repair();
 
         let eid = ExtentId(0);
@@ -7933,6 +7960,12 @@ pub(crate) mod test {
         // Upstairs "guest" work IDs.
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
+
+        ds.repair = create_live_repair_data(
+            ds.ddef.unwrap().extent_count(),
+            repair_ids,
+            eid,
+        );
 
         // deps for our reopen job
         deps.push(repair_ids.close_id);
@@ -7980,6 +8013,12 @@ pub(crate) mod test {
         // Upstairs "guest" work IDs.
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
+
+        ds.repair = create_live_repair_data(
+            ds.ddef.unwrap().extent_count(),
+            repair_ids,
+            eid,
+        );
 
         deps.push(repair_ids.close_id);
         deps.push(repair_ids.repair_id);
@@ -8045,6 +8084,12 @@ pub(crate) mod test {
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 
+        ds.repair = create_live_repair_data(
+            ds.ddef.unwrap().extent_count(),
+            repair_ids,
+            eid,
+        );
+
         deps.push(repair_ids.repair_id);
         deps.push(repair_ids.noop_id);
 
@@ -8106,6 +8151,12 @@ pub(crate) mod test {
         // Reserved work IDs.
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
+
+        ds.repair = create_live_repair_data(
+            ds.ddef.unwrap().extent_count(),
+            repair_ids,
+            eid,
+        );
 
         deps.push(repair_ids.repair_id);
         deps.push(repair_ids.noop_id);
@@ -9370,23 +9421,19 @@ pub(crate) mod test {
         // New jobs will go -> Skipped for the downstairs in repair.
         submit_three_ios(&mut ds);
 
-        // Good downstairs don't need changes
-        assert!(!ds.clients[ClientId::new(0)].dependencies_need_cleanup());
-        assert!(!ds.clients[ClientId::new(2)].dependencies_need_cleanup());
+        // Submit a flush as well.
+        let flush_id = ds.submit_flush(None, None, None);
 
-        // LiveRepair downstairs might need a change
-        assert!(ds.clients[ClientId::new(1)].dependencies_need_cleanup());
-
-        // For the three latest jobs, they should be New as they are IOs that
+        // For the four latest jobs, they should be New as they are IOs that
         // are on an extent we "already repaired".
-        for job_id in (1006..1009).map(JobId) {
+        for job_id in (1006..1010).map(JobId) {
             let job = ds.ds_active.get(&job_id).unwrap();
             assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
             assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
             assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
         }
 
-        // Walk the three final jobs, verify that the dependencies will be
+        // Walk the four final jobs, verify that the dependencies will be
         // updated for our downstairs under repair, but will still include
         // the jobs that came after the repair.
         let job = ds.ds_active.get(&JobId(1006)).unwrap();
@@ -9412,6 +9459,48 @@ pub(crate) mod test {
             ds.get_pruned_deps(JobId(1008), ClientId::new(1)),
             [JobId(1007)]
         );
+
+        // For the flush, verify that the extent limit is cleared on clients
+        // that are not under repair, and that it is present for clients
+        // that are being repaired.
+        let job = ds.ds_active.get(&flush_id).unwrap();
+        let ioop = ds.clients[ClientId::new(0)].prune_deps(
+            flush_id,
+            job.work.clone(),
+            ds.repair.as_ref().map(|r| r.min_id),
+        );
+        match ioop {
+            IOop::Flush {
+                dependencies,
+                extent_limit,
+                ..
+            } => {
+                assert_eq!(dependencies, &[JobId(1008)]);
+                assert!(extent_limit.is_none());
+            }
+            _ => {
+                panic!("Wrong job type");
+            }
+        }
+
+        let ioop = ds.clients[ClientId::new(1)].prune_deps(
+            flush_id,
+            job.work.clone(),
+            ds.repair.as_ref().map(|r| r.min_id),
+        );
+        match ioop {
+            IOop::Flush {
+                dependencies,
+                extent_limit,
+                ..
+            } => {
+                assert_eq!(dependencies, &[JobId(1008)]);
+                assert!(extent_limit.is_some());
+            }
+            _ => {
+                panic!("Wrong job type");
+            }
+        }
     }
 
     #[test]
