@@ -371,9 +371,23 @@ impl DownstairsClient {
         &self,
         ds_id: JobId,
         mut job: IOop,
-        repair_min_id: Option<JobId>,
+        mut repair_min_id: Option<JobId>,
     ) -> IOop {
-        if self.dependencies_need_cleanup() {
+        if matches!(self.state, DsState::LiveRepair) {
+            assert!(repair_min_id.is_some());
+        } else {
+            // If this specific downstairs is not under repair, then clear
+            // out any extent limit.
+            if let IOop::Flush { extent_limit, .. } = &mut job {
+                *extent_limit = None;
+            }
+            // Since we are not under repair, then we can also clear the
+            // repair_min_id.  This prevents jobs at/below min_id from
+            // being pruned below.
+            repair_min_id = None;
+        }
+
+        if !self.skipped_jobs.is_empty() || repair_min_id.is_some() {
             match &mut job {
                 IOop::Write { dependencies, .. }
                 | IOop::WriteUnwritten { dependencies, .. }
@@ -384,19 +398,25 @@ impl DownstairsClient {
                 | IOop::ExtentLiveRepair { dependencies, .. }
                 | IOop::ExtentLiveReopen { dependencies, .. }
                 | IOop::ExtentLiveNoOp { dependencies } => {
-                    self.remove_dep_if_live_repair(
-                        dependencies,
+                    debug!(
+                        self.log,
+                        "{} Check/remove skipped:{:?}, repair min id {:?} \
+                         from deps:{:?}",
                         ds_id,
-                        repair_min_id.expect("must have repair_min_id"),
+                        self.skipped_jobs,
+                        repair_min_id,
+                        dependencies,
+                    );
+
+                    dependencies.retain(|x| {
+                        !self.skipped_jobs.contains(x)
+                            && repair_min_id.map(|r| *x >= r).unwrap_or(true)
+                    });
+                    info!(
+                        self.log,
+                        " {} final dependency list {:?}", ds_id, dependencies
                     );
                 }
-            }
-        }
-        // If our downstairs is under repair, then include any extent limit sent
-        // in the IOop; otherwise, clear it out
-        if let IOop::Flush { extent_limit, .. } = &mut job {
-            if !matches!(self.state, DsState::LiveRepair) {
-                *extent_limit = None;
             }
         }
         job
@@ -427,12 +447,6 @@ impl DownstairsClient {
         self.skipped_jobs.insert(ds_id);
     }
 
-    /// Returns true if it's possible that we need to clean job dependencies
-    pub(crate) fn dependencies_need_cleanup(&self) -> bool {
-        matches!(self.state, DsState::LiveRepair)
-            && !self.skipped_jobs.is_empty()
-    }
-
     /// Sets our state to `DsState::Reconcile`
     ///
     /// # Panics
@@ -448,45 +462,6 @@ impl DownstairsClient {
         assert_eq!(*state, NegotiationState::WaitQuorum);
         assert!(matches!(mode, ConnectionMode::New));
         *state = NegotiationState::Reconcile;
-    }
-
-    /// Go through the list of dependencies and remove any jobs that this
-    /// downstairs has already skipped, as the downstairs on the other side will
-    /// not have received these IOs.
-    ///
-    /// First off, any job that was "skipped" should not be a dependency for
-    /// this specific downstairs.  In addition, any job that happened before
-    /// the skipped jobs that was marked as "Done" should also be removed, as
-    /// there will be no replay here and we are basically rebuilding this
-    /// downstairs from other downstairs.
-    fn remove_dep_if_live_repair(
-        &self,
-        deps: &mut Vec<JobId>,
-        ds_id: JobId,
-        repair_min_id: JobId,
-    ) {
-        debug!(
-            self.log,
-            "{} Remove check skipped:{:?} from deps:{:?}",
-            ds_id,
-            self.skipped_jobs,
-            deps
-        );
-        assert!(matches!(self.state, DsState::LiveRepair));
-
-        deps.retain(|x| !self.skipped_jobs.contains(x));
-
-        // If we are repairing, then there must be a repair_min_id set so we
-        // know where to stop with dependency inclusion.
-        debug!(
-            self.log,
-            "{} Remove check < min repaired:{} from deps:{:?}",
-            ds_id,
-            repair_min_id,
-            deps
-        );
-        deps.retain(|x| x >= &repair_min_id);
-        info!(self.log, " {} final dependency list {:?}", ds_id, deps);
     }
 
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
