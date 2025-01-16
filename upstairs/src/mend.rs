@@ -18,6 +18,26 @@ pub struct RegionMetadata {
     pub dirty: Vec<bool>,
 }
 
+impl RegionMetadata {
+    fn get(&self, i: usize) -> Option<ExtentMetadata> {
+        let gen = *self.generation.get(i)?;
+        let flush = *self.flush_numbers.get(i)?;
+        let dirty = *self.dirty.get(i)?;
+        Some(ExtentMetadata { gen, flush, dirty })
+    }
+}
+
+/// Extent metadata for a single extent
+///
+/// Note that fields are ordered in reconciliation priority order, so sorting
+/// works to pick the highest-priority extent.
+#[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct ExtentMetadata {
+    gen: u64,
+    flush: u64,
+    dirty: bool,
+}
+
 /**
  * The source client ID of valid data in an extent with a mis-compare, and
  * at least one destination client ID where that data should go.
@@ -177,21 +197,15 @@ fn make_repair_list(
     ExtentFix { source, dest }
 }
 
-/*
- * Given the index of an extent that has a mismatch, return the client ID
- * (0, 1, or 2) for the extent that should be the source of the repair
- * This requires that you have a mismatch at the provided extent, or the
- * dirty bit is set somewhere.
- *
- * Source selection is done by filtering the extent info in this order, until
- * we have a single extent remaining:
- *
- * Highest generation number.
- * Highest flush number.
- * Dirty bit set.
- *
- * If there is still a tie at the end, then just pick one.
- */
+/// Find the client ID which should be the source for reconciliation
+///
+/// This function chooses the source with the
+///
+/// - Highest generation number
+/// - Highest flush number (if generation numbers are equal)
+/// - Dirty bit set (if generation and flush numbers are equal)
+///
+/// If there is still a tie at the end, then the earliest source is chosen
 fn find_source(
     i: usize,
     c0: &RegionMetadata,
@@ -199,126 +213,22 @@ fn find_source(
     c2: &RegionMetadata,
     log: &Logger,
 ) -> ClientId {
-    /*
-     * All three client IDs are candidates for the max generation number,
-     * remove a client ID as we find it has a lower value than the others.
-     */
-    let mut max_gen =
-        vec![ClientId::new(0), ClientId::new(1), ClientId::new(2)];
+    let vs = [c0, c1, c2].map(|c| c.get(i).unwrap());
 
-    info!(log, "First source client ID for extent {}", i);
+    let (i, _v) = vs
+        .iter()
+        .enumerate()
+        .rev() // pick the lowest ClientId
+        .max_by_key(|(_i, v)| **v) // ExtentMetadata has priority-sorted fields
+        .unwrap();
+    let out = ClientId::new(i as u8);
 
-    let gen0 = c0.generation[i];
-    let gen1 = c1.generation[i];
-    let gen2 = c2.generation[i];
-
-    info!(log, "extent:{}  gens: {} {} {}", i, gen0, gen1, gen2);
-
-    if gen0 != gen1 || gen1 != gen2 {
-        /*
-         * We know at least one of the generation numbers is greater,
-         * so this first check will see if one is the largest.
-         */
-        if gen0 > gen1 && gen0 > gen2 {
-            return ClientId::new(0);
-        } else if gen1 > gen0 && gen1 > gen2 {
-            return ClientId::new(1);
-        } else if gen2 > gen0 && gen2 > gen1 {
-            return ClientId::new(2);
-        }
-
-        /*
-         * If we are here, then two gen numbers match, and we need to take
-         * the third lower generation number off the list for comparison
-         * before we move on to try to break the tie with flush numbers.
-         */
-        if gen0 == gen1 {
-            max_gen.remove(2);
-        } else if gen0 == gen2 {
-            max_gen.remove(1);
-        } else {
-            assert_eq!(gen1, gen2);
-            max_gen.remove(0);
-        }
-    }
-
-    /*
-     * Our generation numbers did not break the tie, either they are all
-     * the same, or we have just two that are the same and have removed
-     * the lower one.  Now look for a flush number that is greater.
-     *
-     * Put the three downstairs RegionMetadata structs into an array with the
-     * index being the client ID.  We use the max_gen vec to see if any
-     * of the remaining client IDs have a higher flush number.
-     */
-    let rec = ClientData([c0, c1, c2]);
-
-    info!(
-        log,
-        "extent:{}  flush: {} {} {} scs: {:?}",
-        i,
-        c0.flush_numbers[i],
-        c1.flush_numbers[i],
-        c2.flush_numbers[i],
-        max_gen,
-    );
-
-    let mut max = 0;
-    let mut max_flush = Vec::new();
-
-    for sc in max_gen.iter() {
-        if rec[*sc].flush_numbers[i] > max {
-            max = rec[*sc].flush_numbers[i];
-        }
-    }
-    for sc in max_gen.iter() {
-        if rec[*sc].flush_numbers[i] == max {
-            max_flush.push(*sc);
-        }
-    }
-
-    info!(log, "max_flush now has: {:?}", max_flush);
-    if max_flush.len() == 1 {
-        return max_flush[0];
-    }
-
-    /*
-     * To get here we have at least two (and possibly three) extents where
-     * the gen and flush are the same.  All that remains to break the tie is
-     * an extent with the dirty bit set.
-     */
-    info!(
-        log,
-        "extent:{}  dirty: {} {} {}", i, c0.dirty[i], c1.dirty[i], c2.dirty[i],
-    );
-    for sc in max_flush.iter() {
-        if rec[*sc].dirty[i] {
-            return *sc;
-        }
-    }
-
-    /*
-     * To get here, the mismatch has to be a dirty bit set on an extent
-     * that had lower gen or flush numbers and is no longer under
-     * consideration, with the remaining two client extents having
-     * matching gen and flush numbers.
-     */
-    info!(log, "No maxes found, left with: {:?}", max_flush);
-    assert_eq!(max_flush.len(), 2);
-
-    /*
-     * Note that by always returning the lowest element in the vec, we
-     * are biasing the repair to select it.  It is also expected in the
-     * tests, so if you change it here, you will have to change it
-     * there as well.
-     */
-    max_flush[0]
+    info!(log, "extent:{i} {vs:?} => {out}",);
+    out
 }
 
-/*
- * Given the source for data from an extent mismatch, figure out which
- * of the remaining extents need updating.
- */
+/// Given the source for data from an extent mismatch, figure out which
+/// of the remaining extents need updating.
 fn find_dest(
     i: usize,
     source: ClientId,
@@ -327,49 +237,20 @@ fn find_dest(
     c2: &RegionMetadata,
     log: &Logger,
 ) -> Vec<ClientId> {
-    let mut dest: Vec<ClientId> = Vec::new();
+    let c = ClientData::from_fn(|cid| {
+        [c0, c1, c2][cid.get() as usize].get(i).unwrap()
+    });
+    let s = c[source];
 
-    /*
-     * Put the three downstairs RegionMetadata structs into an array with the
-     * index being the client ID.
-     */
-    let rec = ClientData([c0, c1, c2]);
+    let out = ClientId::iter()
+        .filter(|&i| i != source && (s.dirty || c[i] != s))
+        .collect::<Vec<_>>();
 
     info!(
         log,
-        "find dest for source {} for extent at index {}", source, i
+        "find dest for source {source} for extent at index {i} => {out:?}"
     );
-
-    let to_check = match source.get() {
-        0 => vec![ClientId::new(1), ClientId::new(2)],
-        1 => vec![ClientId::new(0), ClientId::new(2)],
-        2 => vec![ClientId::new(0), ClientId::new(1)],
-        _ => panic!("invalid client ID"),
-    };
-
-    for dc in to_check.iter() {
-        if rec[source].generation[i] != rec[*dc].generation[i] {
-            dest.push(*dc);
-            info!(log, "source {}, add dest {} gen", source, dc);
-            continue;
-        }
-        if rec[source].flush_numbers[i] != rec[*dc].flush_numbers[i] {
-            dest.push(*dc);
-            info!(log, "source {}, add dest {} flush", source, dc);
-            continue;
-        }
-        if rec[source].dirty[i] {
-            dest.push(*dc);
-            info!(log, "source {}, add dest {} source flush", source, dc);
-            continue;
-        }
-        if rec[*dc].dirty[i] {
-            dest.push(*dc);
-            info!(log, "source {}, add dest {} dc flush", source, dc);
-            continue;
-        }
-    }
-    dest
+    out
 }
 
 #[cfg(test)]
