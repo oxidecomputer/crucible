@@ -2972,7 +2972,6 @@ async fn test_ro_activate_with_two() {
     // Ack the read on the two downstairs that are active.
     harness.ds1().ack_read().await;
     harness.ds2.ack_read().await;
-    // let j3 = harness.ds3.ack_read().await;
 
     h.await.unwrap(); // after > 1x response, the read finishes
 }
