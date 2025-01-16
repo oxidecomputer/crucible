@@ -2885,6 +2885,98 @@ async fn test_no_send_offline() {
     }
 }
 
+#[tokio::test]
+async fn test_ro_activate_with_two() {
+    let log = csl();
+
+    let cfg = DownstairsConfig {
+        read_only: true,
+        reply_to_ping: true,
+        extent_count: DEFAULT_EXTENT_COUNT,
+        extent_size: Block::new_512(DEFAULT_BLOCK_COUNT),
+        gen_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
+        flush_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
+        dirty_bits: vec![false; DEFAULT_EXTENT_COUNT as usize],
+    };
+
+    let ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
+    let ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
+    let ds3 = cfg.clone().start(log.new(o!("downstairs" => 3))).await;
+
+    let (g, io) = Guest::new(Some(log.clone()));
+    let guest = Arc::new(g);
+
+    let crucible_opts = CrucibleOpts {
+        id: Uuid::new_v4(),
+        target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
+        flush_timeout: Some(1.0),
+        read_only: true,
+
+        ..Default::default()
+    };
+
+    let join_handle = up_main(crucible_opts, 1, None, io, None).unwrap();
+
+    let mut handles: Vec<JoinHandle<()>> = vec![];
+    {
+        let guest = guest.clone();
+        handles.push(tokio::spawn(async move {
+            guest.activate().await.unwrap();
+        }));
+    }
+
+    // Connect two Downstairs
+    //
+    // We're using a VecDeque instead of FuturesOrdered so that if a future
+    // panics, we get a meaningful backtrace with a correct line number.
+    let mut fut = VecDeque::new();
+
+    for mut ds in [ds1, ds2] {
+        fut.push_back(tokio::spawn(async move {
+            ds.negotiate_start().await;
+            ds.negotiate_step_extent_versions_please().await;
+            ds
+        }));
+    }
+
+    let ds1 = fut.pop_front().unwrap().await.unwrap();
+    let ds2 = fut.pop_front().unwrap().await.unwrap();
+
+    for _ in 0..10 {
+        if guest.query_is_active().await.unwrap() {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    assert!(guest.query_is_active().await.unwrap());
+
+    // Create our test harness so we can send IO.
+    let mut harness = TestHarness {
+        log: log.clone(),
+        ds1: Some(ds1),
+        ds2,
+        ds3,
+        _join_handle: join_handle,
+        guest,
+    };
+
+    // We must `spawn` here because `read` will wait for the response to
+    // come back before returning
+    let h = harness.spawn(|guest| async move {
+        let mut buffer = Buffer::new(1, 512);
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
+    });
+
+    // Ack the read on the two downstairs that are active.
+    harness.ds1().ack_read().await;
+    harness.ds2.ack_read().await;
+    // let j3 = harness.ds3.ack_read().await;
+
+    h.await.unwrap(); // after > 1x response, the read finishes
+}
+
 /// Test that barrier operations are sent periodically
 #[tokio::test]
 async fn test_jobs_based_barrier() {

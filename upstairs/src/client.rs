@@ -854,8 +854,13 @@ impl DownstairsClient {
     ) -> EnqueueResult {
         match self.state {
             // We never send jobs if we're in certain inactive states
+            // XXX ConnectioMode::New only valid for read only upstairs, can
+            // we check this here?
             DsState::Connecting {
-                mode: ConnectionMode::Faulted | ConnectionMode::Replaced,
+                mode:
+                    ConnectionMode::Faulted
+                    | ConnectionMode::Replaced
+                    | ConnectionMode::New,
                 ..
             }
             | DsState::Stopping(
@@ -892,11 +897,7 @@ impl DownstairsClient {
                 ..
             } => EnqueueResult::Hold,
 
-            DsState::Stopping(ClientStopReason::Deactivated)
-            | DsState::Connecting {
-                mode: ConnectionMode::New,
-                ..
-            } => panic!(
+            DsState::Stopping(ClientStopReason::Deactivated) => panic!(
                 "enqueue should not be called from state {:?}",
                 self.state
             ),

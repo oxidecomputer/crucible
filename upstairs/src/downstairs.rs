@@ -1936,6 +1936,33 @@ impl Downstairs {
         self.reconcile_repair_aborted += 1;
     }
 
+    /// Initial reconciliation was skipped, sets all WQ clients as Active
+    pub(crate) fn on_reconciliation_skipped(&mut self, go_active: bool) {
+        assert!(self.reconcile.is_none());
+        if go_active {
+            assert!(self.ds_active.is_empty());
+        }
+
+        for (i, c) in self.clients.iter_mut().enumerate() {
+            if matches!(
+                c.state(),
+                DsState::Connecting {
+                    state: NegotiationState::WaitQuorum,
+                    ..
+                }
+            ) {
+                c.set_active();
+            } else {
+                warn!(
+                    self.log,
+                    "client {} is in state {:?} not ready for activation",
+                    i,
+                    c.state(),
+                );
+            }
+        }
+    }
+
     /// Asserts that initial reconciliation is done, and sets clients as Active
     ///
     /// # Panics
@@ -7937,7 +7964,7 @@ pub(crate) mod test {
         };
         Some(LiveRepairData {
             id: Uuid::new_v4(),
-            extent_count: extent_count,
+            extent_count,
             repair_downstairs: vec![ClientId::new(1)],
             source_downstairs: ClientId::new(0),
             aborting_repair: false,

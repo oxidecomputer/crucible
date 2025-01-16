@@ -449,7 +449,10 @@ impl Upstairs {
 
     /// Build an Upstairs for simple tests
     #[cfg(test)]
-    pub fn test_default(ddef: Option<RegionDefinition>) -> Self {
+    pub fn test_default(
+        ddef: Option<RegionDefinition>,
+        read_only: bool,
+    ) -> Self {
         let opts = CrucibleOpts {
             id: Uuid::new_v4(),
             target: vec![],
@@ -460,7 +463,7 @@ impl Upstairs {
             key_pem: None,
             root_cert_pem: None,
             control: None,
-            read_only: false,
+            read_only,
         };
 
         let log = crucible_common::build_logger();
@@ -1756,11 +1759,38 @@ impl Upstairs {
                     Ok(NegotiationResult::WaitQuorum) => {
                         // Copy the region definition into the Downstairs
                         self.downstairs.set_ddef(self.ddef.get_def().unwrap());
-                        // See if we have a quorum
-                        if self.connect_region_set() {
-                            // We connected normally, so there's no need
-                            // to check for live-repair.
-                            self.repair_check_deadline = None;
+                        // If we are RO, then we have a different path than
+                        // if we are RW
+                        if self.cfg.read_only {
+                            if self.connect_ro_region_set() {
+                                // We are the first one to arrive, so we
+                                // can't be needing any live repair yet.
+                                self.repair_check_deadline = None;
+
+                                // XXX If we are trying to replace a region that
+                                // had never joined, do we need to do anything
+                                // different here with the repair_check_deadline?
+                                //
+                                // Let's say we have:
+                                // Activated with 1 downstairs.
+                                // A 2nd downstairs showed up, we added it.
+                                // We then "replaced" the 2nd downstairs,
+                                // but that downstairs had not re-connected yet.
+                                // The 3rd downstairs showed up (for the first
+                                // time).  Could that 3rd downstairs come through
+                                // here and remove the repair check which the
+                                // replacement downstairs was expecting?
+                            }
+                        } else {
+                            // See if we have a quorum
+                            if self.connect_region_set() {
+                                // We connected normally, so there's no need
+                                // to check for live-repair.
+                                self.repair_check_deadline = None;
+                            } else {
+                                self.repair_check_deadline =
+                                    Some(Instant::now());
+                            }
                         }
                     }
                     Ok(NegotiationResult::Replay) => {
@@ -1830,6 +1860,33 @@ impl Upstairs {
                 panic!("invalid response {m:?}")
             }
         }
+    }
+
+    /// Activate a read only upstairs, or add an additional downstairs to
+    /// an already active upstairs.
+    ///
+    /// A single downstairs completing negotiation can activate a read only
+    /// upstairs.  When additional read only downstairs complete negotiation,
+    /// then can join the already active upstairs region set.
+    ///
+    /// # Panics
+    /// If there is not at least one downstairs in WaitQuorum.
+    /// If the upstairs is not read only.
+    fn connect_ro_region_set(&mut self) -> bool {
+        assert!(self.cfg.read_only);
+        let one_ready = self.downstairs.clients.iter().any(|c| {
+            matches!(
+                c.state(),
+                DsState::Connecting {
+                    state: NegotiationState::WaitQuorum,
+                    ..
+                }
+            )
+        });
+        // We only call this when some downstairs has entered WaitQuorum
+        assert!(one_ready);
+
+        self.on_reconciliation_skipped()
     }
 
     /// Checks whether we can connect all three regions
@@ -1958,6 +2015,60 @@ impl Upstairs {
                 self.on_reconciliation_done(false);
                 info!(self.log, "Set Active after no reconciliation");
                 true
+            }
+        }
+    }
+
+    /// Called when reconciliation is skipped for a read only upstairs.
+    ///
+    /// Read only upstairs don't have any reconciliation to do.  Return true
+    /// if this downstairs is the first to arrive and causes the upstairs
+    /// to become active, false otherwise.
+    ///
+    /// # Panics
+    /// If this upstairs is not read only.
+    fn on_reconciliation_skipped(&mut self) -> bool {
+        assert!(self.cfg.read_only);
+
+        info!(self.log, "Reconciliation skipped");
+        match &self.state {
+            UpstairsState::GoActive(..) => {
+                // If we are not active yet (this is the first downstairs) then
+                // go ahead and set ourselves active.
+                info!(self.log, "Set Downstairs and Upstairs active");
+                self.downstairs.on_reconciliation_skipped(true);
+
+                // Swap out the state for UpstairsState::Active
+                let UpstairsState::GoActive(res) =
+                    std::mem::replace(&mut self.state, UpstairsState::Active)
+                else {
+                    unreachable!(); // We just matcheed!
+                };
+
+                res.send_ok(());
+                info!(
+                    self.log,
+                    "{} is now active with session: {}",
+                    self.cfg.upstairs_id,
+                    self.cfg.session_id
+                );
+                self.stats.add_activation();
+                true
+            }
+            UpstairsState::Active => {
+                // The upstairs is already active. Bring this downstairs into
+                // the active region set.
+                info!(self.log, "Added downstairs to the active Upstairs");
+                self.downstairs.on_reconciliation_skipped(false);
+                false
+            }
+            _ => {
+                warn!(
+                    self.log,
+                    "Invalid upstairs state {:?} for connecting when read only",
+                    self.state
+                );
+                false
             }
         }
     }
@@ -2166,7 +2277,7 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
         for c in up.downstairs.clients.iter_mut() {
             // Give all downstairs a repair address
             c.repair_addr = Some("0.0.0.0:1".parse().unwrap());
@@ -2234,7 +2345,7 @@ pub(crate) mod test {
     #[test]
     fn reconcile_not_ready() {
         // Verify reconcile returns false when a downstairs is not ready
-        let mut up = Upstairs::test_default(None);
+        let mut up = Upstairs::test_default(None, false);
         for cid in [ClientId::new(0), ClientId::new(1)] {
             for state in [
                 NegotiationState::WaitActive,
@@ -2252,10 +2363,72 @@ pub(crate) mod test {
                 );
             }
         }
+        let (_rx, done) = BlockOpWaiter::pair();
+        up.state = UpstairsState::GoActive(done);
 
         let res = up.connect_region_set();
         assert!(!res);
         assert!(!matches!(&up.state, &UpstairsState::Active))
+    }
+
+    #[test]
+    fn reconcile_ro_ready_with_one() {
+        // Verify we can activate with just one downstairs ready on a read only
+        // upstairs.
+        for cid in ClientId::iter() {
+            let mut up = Upstairs::test_default(None, true);
+            for state in [
+                NegotiationState::WaitActive,
+                NegotiationState::WaitForPromote,
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
+            ] {
+                up.ds_transition(
+                    cid,
+                    DsState::Connecting {
+                        mode: ConnectionMode::New,
+                        state,
+                    },
+                );
+            }
+            let (_rx, done) = BlockOpWaiter::pair();
+            up.state = UpstairsState::GoActive(done);
+
+            let res = up.connect_ro_region_set();
+            assert!(res);
+            assert!(matches!(&up.state, &UpstairsState::Active));
+        }
+    }
+
+    #[test]
+    fn reconcile_ro_ready_with_two() {
+        // Verify we can activate when 2/3 downstairs are ready in a read
+        // only upstairs.
+        let mut up = Upstairs::test_default(None, true);
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            for state in [
+                NegotiationState::WaitActive,
+                NegotiationState::WaitForPromote,
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
+            ] {
+                up.ds_transition(
+                    cid,
+                    DsState::Connecting {
+                        mode: ConnectionMode::New,
+                        state,
+                    },
+                );
+            }
+        }
+        let (_rx, done) = BlockOpWaiter::pair();
+        up.state = UpstairsState::GoActive(done);
+
+        let res = up.connect_ro_region_set();
+        assert!(res);
+        assert!(matches!(&up.state, &UpstairsState::Active));
     }
 
     #[tokio::test]
@@ -2266,7 +2439,7 @@ pub(crate) mod test {
         // we are deactivating.
         // TODO: This test should change when we support this behavior.
 
-        let mut up = Upstairs::test_default(None);
+        let mut up = Upstairs::test_default(None, false);
 
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
@@ -2303,7 +2476,7 @@ pub(crate) mod test {
         // Verify after all three downstairs are deactivated, we can
         // transition the upstairs back to init.
 
-        let mut up = Upstairs::test_default(None);
+        let mut up = Upstairs::test_default(None, false);
         up.force_active().unwrap();
 
         // The deactivate message should happen immediately
@@ -3474,7 +3647,7 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
 
         // Before we are active, we have no need to repair or check for future
         // repairs.
@@ -3504,7 +3677,7 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
         up.force_active().unwrap();
 
         // Force client 1 into LiveRepairReady
@@ -3524,7 +3697,7 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
         up.force_active().unwrap();
 
         // Force clients 1 and 2 into LiveRepairReady
@@ -3549,7 +3722,7 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
         up.force_active().unwrap();
         to_live_repair_ready(&mut up, ClientId::new(1));
         up.ds_transition(ClientId::new(1), DsState::LiveRepair);
@@ -3576,7 +3749,7 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
         up.force_active().unwrap();
         to_live_repair_ready(&mut up, ClientId::new(1));
 
