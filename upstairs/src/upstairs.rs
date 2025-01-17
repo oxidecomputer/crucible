@@ -1726,6 +1726,10 @@ impl Upstairs {
                     Ok(NegotiationResult::LiveRepair) => {
                         // We will immediately check for live-repair as part of
                         // invariant maintenance.
+                        info!(
+                            self.log,
+                            "client {client_id} is ready for live-repair"
+                        );
                     }
                 }
             }
