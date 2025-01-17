@@ -21,7 +21,7 @@ impl RegionMetadata {
         assert_eq!(generation.len(), dirty.len());
         Self(
             generation
-                .into_iter()
+                .iter()
                 .enumerate()
                 .map(|(i, g)| ExtentMetadata {
                     gen: *g,
@@ -311,7 +311,7 @@ mod test {
         let d1 = RegionMetadata::new(
             &generation,
             &flush_numbers,
-            &vec![false, false, false, false],
+            &[false, false, false, false],
         );
 
         let d2 = RegionMetadata::new(
