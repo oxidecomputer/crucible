@@ -901,33 +901,11 @@ impl Upstairs {
             return;
         }
 
-        // If we're already doing live-repair, then we can't start live-repair
-        if self.downstairs.live_repair_in_progress() {
-            return;
-        }
-
-        // If no one is LiveRepairReady, then we can't start live-repair
-        if !self.downstairs.clients.iter().any(|c| {
-            matches!(
-                c.state(),
-                DsState::Connecting {
-                    state: NegotiationState::LiveRepairReady,
-                    ..
-                }
-            )
-        }) {
-            return;
-        }
-
-        // Try to start live-repair, logging if it fails
-        if !self.downstairs.start_live_repair(
+        // Try to start live-repair
+        self.downstairs.check_live_repair_start(
             &self.state,
             self.ddef.get_def().unwrap().extent_count(),
-        ) {
-            // It's hard to hit this condition; we need a Downstairs to be in
-            // LiveRepairReady, but for no other downstairs to be in Active.
-            warn!(self.log, "Could not start live repair, trying again later");
-        }
+        );
     }
 
     /// Returns `true` if we're ready to accept guest IO
