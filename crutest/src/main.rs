@@ -84,7 +84,7 @@ enum Workload {
         skip_verify: bool,
     },
     Generic,
-    /// Do random read IOs
+    /// Do random read and flush IOs
     GenericRead,
     Nothing,
     One,
