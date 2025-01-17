@@ -84,6 +84,8 @@ enum Workload {
         skip_verify: bool,
     },
     Generic,
+    /// Do random read and flush IOs
+    GenericRead,
     Nothing,
     One,
     /// Measure performance with a random read workload
@@ -1156,8 +1158,35 @@ async fn main() -> Result<()> {
                 }
             };
 
-            generic_workload(&volume, &mut wtq, &mut disk_info, opt.quiet)
-                .await?;
+            generic_workload(
+                &volume,
+                &mut wtq,
+                &mut disk_info,
+                opt.quiet,
+                false,
+            )
+            .await?;
+        }
+
+        Workload::GenericRead => {
+            // Either we have a count, or we run until we get a signal.
+            let mut wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else {
+                    let count = opt.count.unwrap_or(500);
+                    WhenToQuit::Count { count }
+                }
+            };
+
+            generic_workload(
+                &volume,
+                &mut wtq,
+                &mut disk_info,
+                opt.quiet,
+                true,
+            )
+            .await?;
         }
 
         Workload::One => {
@@ -2021,6 +2050,7 @@ async fn generic_workload(
     wtq: &mut WhenToQuit,
     di: &mut DiskInfo,
     quiet: bool,
+    read_only: bool,
 ) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
@@ -2071,7 +2101,7 @@ async fn generic_workload(
             // Convert offset and length to their byte values.
             let offset = BlockIndex(block_index as u64);
 
-            if op <= 4 {
+            if !read_only && op <= 4 {
                 // Write
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
@@ -2218,7 +2248,7 @@ async fn replay_workload(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        generic_workload(volume, &mut generic_wtq, di, false).await?;
+        generic_workload(volume, &mut generic_wtq, di, false, false).await?;
 
         let res = dsc_client.dsc_start(stopped_ds).await;
         println!("Replay: started {stopped_ds}, returned:{:?}", res);
@@ -2728,7 +2758,7 @@ async fn replace_workload(
     // in a loop, checking to see if it is time to stop.
     loop {
         let mut workload_wtq = WhenToQuit::Count { count: 100 };
-        generic_workload(volume, &mut workload_wtq, di, false)
+        generic_workload(volume, &mut workload_wtq, di, false, false)
             .await
             .unwrap();
 
@@ -3243,7 +3273,7 @@ async fn deactivate_workload(
             width = count_width
         );
         let mut wtq = WhenToQuit::Count { count: 20 };
-        generic_workload(volume, &mut wtq, di, false).await?;
+        generic_workload(volume, &mut wtq, di, false, false).await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect",
             c,
@@ -3292,7 +3322,7 @@ async fn deactivate_workload(
     }
     println!("One final");
     let mut wtq = WhenToQuit::Count { count: 20 };
-    generic_workload(volume, &mut wtq, di, false).await?;
+    generic_workload(volume, &mut wtq, di, false, false).await?;
 
     Ok(())
 }
