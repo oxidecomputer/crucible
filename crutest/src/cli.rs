@@ -140,6 +140,9 @@ enum CliCommand {
         /// Print out IOs as we send them
         #[clap(long, short, default_value = "false", action)]
         quiet: bool,
+        /// Only do reads (and flushes)
+        #[clap(long, short, default_value = "false", action)]
+        read_only: bool,
     },
     /// Request region information
     Info,
@@ -495,8 +498,13 @@ async fn cmd_to_msg(
         CliCommand::Flush => {
             fw.send(CliMessage::Flush).await?;
         }
-        CliCommand::Generic { count, quiet } => {
-            fw.send(CliMessage::Generic(count, quiet)).await?;
+        CliCommand::Generic {
+            count,
+            quiet,
+            read_only,
+        } => {
+            fw.send(CliMessage::Generic(count, quiet, read_only))
+                .await?;
         }
         CliCommand::IsActive => {
             fw.send(CliMessage::IsActive).await?;
@@ -817,10 +825,12 @@ async fn process_cli_command(
                 .await
             }
         }
-        CliMessage::Generic(count, quiet) => {
+        CliMessage::Generic(count, quiet, read_only) => {
             if let Some(di) = di_option {
                 let mut wtq = WhenToQuit::Count { count };
-                match generic_workload(volume, &mut wtq, di, quiet).await {
+                match generic_workload(volume, &mut wtq, di, quiet, read_only)
+                    .await
+                {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         let msg = format!("{}", e);
