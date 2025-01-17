@@ -1762,25 +1762,7 @@ impl Upstairs {
                         // If we are RO, then we have a different path than
                         // if we are RW
                         if self.cfg.read_only {
-                            if self.connect_ro_region_set() {
-                                // We are the first one to arrive, so we
-                                // can't be needing any live repair yet.
-                                self.repair_check_deadline = None;
-
-                                // XXX If we are trying to replace a region that
-                                // had never joined, do we need to do anything
-                                // different here with the repair_check_deadline?
-                                //
-                                // Let's say we have:
-                                // Activated with 1 downstairs.
-                                // A 2nd downstairs showed up, we added it.
-                                // We then "replaced" the 2nd downstairs,
-                                // but that downstairs had not re-connected yet.
-                                // The 3rd downstairs showed up (for the first
-                                // time).  Could that 3rd downstairs come through
-                                // here and remove the repair check which the
-                                // replacement downstairs was expecting?
-                            }
+                            self.connect_ro_region_set();
                         } else {
                             // See if we have a quorum
                             if self.connect_region_set() {
@@ -1870,9 +1852,9 @@ impl Upstairs {
     /// then can join the already active upstairs region set.
     ///
     /// # Panics
-    /// If there is not at least one downstairs in WaitQuorum.
     /// If the upstairs is not read only.
-    fn connect_ro_region_set(&mut self) -> bool {
+    /// If there is not at least one downstairs in WaitQuorum.
+    fn connect_ro_region_set(&mut self) {
         assert!(self.cfg.read_only);
         let one_ready = self.downstairs.clients.iter().any(|c| {
             matches!(
@@ -2021,13 +2003,13 @@ impl Upstairs {
 
     /// Called when reconciliation is skipped for a read only upstairs.
     ///
-    /// Read only upstairs don't have any reconciliation to do.  Return true
-    /// if this downstairs is the first to arrive and causes the upstairs
-    /// to become active, false otherwise.
+    /// Read only upstairs don't have any reconciliation to do. If we are the
+    /// first downstairs to join, then activate the upstairs.  Otherwise just
+    /// move downstairs in WaitQuorum to Active.
     ///
     /// # Panics
     /// If this upstairs is not read only.
-    fn on_reconciliation_skipped(&mut self) -> bool {
+    fn on_reconciliation_skipped(&mut self) {
         assert!(self.cfg.read_only);
 
         info!(self.log, "Reconciliation skipped");
@@ -2042,7 +2024,7 @@ impl Upstairs {
                 let UpstairsState::GoActive(res) =
                     std::mem::replace(&mut self.state, UpstairsState::Active)
                 else {
-                    unreachable!(); // We just matcheed!
+                    unreachable!(); // We just matched!
                 };
 
                 res.send_ok(());
@@ -2053,14 +2035,12 @@ impl Upstairs {
                     self.cfg.session_id
                 );
                 self.stats.add_activation();
-                true
             }
             UpstairsState::Active => {
                 // The upstairs is already active. Bring this downstairs into
                 // the active region set.
                 info!(self.log, "Added downstairs to the active Upstairs");
                 self.downstairs.on_reconciliation_skipped(false);
-                false
             }
             _ => {
                 warn!(
@@ -2068,7 +2048,6 @@ impl Upstairs {
                     "Invalid upstairs state {:?} for connecting when read only",
                     self.state
                 );
-                false
             }
         }
     }
@@ -2395,8 +2374,7 @@ pub(crate) mod test {
             let (_rx, done) = BlockOpWaiter::pair();
             up.state = UpstairsState::GoActive(done);
 
-            let res = up.connect_ro_region_set();
-            assert!(res);
+            up.connect_ro_region_set();
             assert!(matches!(&up.state, &UpstairsState::Active));
         }
     }
@@ -2426,8 +2404,7 @@ pub(crate) mod test {
         let (_rx, done) = BlockOpWaiter::pair();
         up.state = UpstairsState::GoActive(done);
 
-        let res = up.connect_ro_region_set();
-        assert!(res);
+        up.connect_ro_region_set();
         assert!(matches!(&up.state, &UpstairsState::Active));
     }
 

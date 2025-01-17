@@ -37,7 +37,7 @@ if [[ -d "$testdir" ]]; then
     rm -rf "$testdir"
 fi
 
-# Store log files we want to keep in /tmp/test_read_only/.txt as this is what
+# Store log files we want to keep in /tmp/test_read_only-$user/.txt as this is what
 # buildomat will look for and archive
 test_output_dir="/tmp/test_read_only-$user"
 rm -rf "$test_output_dir" 2> /dev/null
@@ -121,7 +121,7 @@ while [[ "$loop" -lt 10 ]]; do
     "$dsc" cmd start-all | tee -a "$test_log"
 
     # In this First loop, we just turn off one downstairs and then verify our
-    # volume # with two downstairs running.
+    # volume with two downstairs running.
     for cid in {0..2}; do
 
         while "$dsc" cmd all-running | grep false > /dev/null ; do

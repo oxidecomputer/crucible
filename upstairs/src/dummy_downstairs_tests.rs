@@ -2899,8 +2899,8 @@ async fn test_ro_activate_with_two() {
         dirty_bits: vec![false; DEFAULT_EXTENT_COUNT as usize],
     };
 
-    let ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
-    let ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
+    let mut ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
+    let mut ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
     let ds3 = cfg.clone().start(log.new(o!("downstairs" => 3))).await;
 
     let (g, io) = Guest::new(Some(log.clone()));
@@ -2925,22 +2925,10 @@ async fn test_ro_activate_with_two() {
         }));
     }
 
-    // Connect two Downstairs
-    //
-    // We're using a VecDeque instead of FuturesOrdered so that if a future
-    // panics, we get a meaningful backtrace with a correct line number.
-    let mut fut = VecDeque::new();
-
-    for mut ds in [ds1, ds2] {
-        fut.push_back(tokio::spawn(async move {
-            ds.negotiate_start().await;
-            ds.negotiate_step_extent_versions_please().await;
-            ds
-        }));
+    for ds in [&mut ds1, &mut ds2] {
+        ds.negotiate_start().await;
+        ds.negotiate_step_extent_versions_please().await;
     }
-
-    let ds1 = fut.pop_front().unwrap().await.unwrap();
-    let ds2 = fut.pop_front().unwrap().await.unwrap();
 
     for _ in 0..10 {
         if guest.query_is_active().await.unwrap() {
