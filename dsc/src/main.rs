@@ -232,6 +232,7 @@ struct DownstairsInfo {
     uuid: Uuid,
     _create_output: String,
     output_file: PathBuf,
+    error_file: PathBuf,
     client_id: usize,
     read_only: bool,
 }
@@ -245,6 +246,7 @@ impl DownstairsInfo {
         uuid: Uuid,
         _create_output: String,
         output_file: PathBuf,
+        error_file: PathBuf,
         client_id: usize,
         read_only: bool,
     ) -> DownstairsInfo {
@@ -255,16 +257,25 @@ impl DownstairsInfo {
             uuid,
             _create_output,
             output_file,
+            error_file,
             client_id,
             read_only,
         }
     }
 
-    fn start(&self) -> Result<Child> {
-        println!("Make output file at {:?}", self.output_file);
+    fn start(&self, starter: &Arc<std::sync::Mutex<usize>>) -> Result<Child> {
+        println!(
+            "[{}][{}] Make output file at {:?}",
+            self.port, self.client_id, self.output_file
+        );
         let outputs = File::create(&self.output_file)
             .context("Failed to create output file")?;
-        let errors = outputs.try_clone()?;
+        println!(
+            "[{}][{}] Make error file at {:?}",
+            self.port, self.client_id, self.error_file
+        );
+        let errors = File::create(&self.error_file)
+            .context("Failed to create error file")?;
 
         let port_value = format!("{}", self.port);
 
@@ -275,7 +286,12 @@ impl DownstairsInfo {
         };
 
         let region_dir = self.region_dir.clone();
-        println!("Run run command for {}", self.port);
+        println!(
+            "[{}][{}] Running downstairs command now",
+            self.port, self.client_id
+        );
+        let mut c = starter.lock().unwrap();
+        *c += 1;
         let cmd = Command::new(self.ds_bin.clone())
             .args([
                 "run",
@@ -293,8 +309,12 @@ impl DownstairsInfo {
             .spawn()
             .context("Failed trying to run downstairs")?;
 
+        // release lock
+        drop(c);
         println!(
-            "Downstairs {} port {} PID:{:?} was started",
+            "[{}][{}] Downstairs {} port {} PID:{:?} was started",
+            self.port,
+            self.client_id,
             region_dir,
             self.port,
             cmd.id()
@@ -327,6 +347,10 @@ pub struct DscInfo {
     work: Mutex<DscWork>,
     /// If the downstairs are started read only
     read_only: bool,
+    /// We can only start one downstairs at a time, tokio tasks can step on
+    /// each other during fork/exec.  This mutex prevents the dsc process
+    /// from that situation.
+    starter: Arc<std::sync::Mutex<usize>>,
 }
 
 impl DscInfo {
@@ -447,6 +471,8 @@ impl DscInfo {
         };
 
         let mrs = Mutex::new(rs);
+        let sc: usize = 0;
+        let starter = Arc::new(std::sync::Mutex::new(sc));
 
         let dsc_work = DscWork::new(notify_tx);
         let work = Mutex::new(dsc_work);
@@ -456,6 +482,7 @@ impl DscInfo {
             rs: mrs,
             work,
             read_only,
+            starter,
         }))
     }
 
@@ -592,6 +619,12 @@ impl DscInfo {
             t
         };
 
+        let error_file = format!("downstairs-{}.err", port);
+        let error_path = {
+            let mut t = self.output_dir.clone();
+            t.push(error_file);
+            t
+        };
         let dsi = DownstairsInfo::new(
             rs.ds_bin.clone(),
             new_region_dir,
@@ -599,6 +632,7 @@ impl DscInfo {
             ds_uuid,
             String::from_utf8(output.stdout).unwrap(),
             output_path,
+            error_path,
             ds_id,
             self.read_only,
         );
@@ -642,6 +676,12 @@ impl DscInfo {
             let output_path = {
                 let mut t = self.output_dir.clone();
                 t.push(output_file);
+                t
+            };
+            let error_file = format!("downstairs-{}.err", port);
+            let error_path = {
+                let mut t = self.output_dir.clone();
+                t.push(error_file);
                 t
             };
             if !Path::new(&new_region_dir).exists() {
@@ -694,6 +734,7 @@ impl DscInfo {
                 def.uuid(),
                 "/dev/null".to_string(),
                 output_path,
+                error_path,
                 ds_id,
                 self.read_only,
             );
@@ -923,19 +964,22 @@ async fn start_dsc(
     dsci: &DscInfo,
     mut notify_rx: watch::Receiver<u64>,
 ) -> Result<()> {
-    let (tx, mut rx) = mpsc::channel::<MonitorInfo>(10);
+    let (tx, mut rx) = mpsc::channel::<MonitorInfo>(1000);
     let mut action_tx_list = Vec::new();
     let mut handles = vec![];
 
+    println!("DSC start_dsc now starting the downstairs");
+    // std::thread::sleep(std::time::Duration::from_secs(2));
     // Spawn a task to start and monitor each of our downstairs.
     let rs = dsci.rs.lock().await;
     for ds in rs.ds.iter() {
         println!("start ds: {:?}", ds.port);
         let txc = tx.clone();
         let dsc = ds.clone();
+        let smc = Arc::clone(&dsci.starter);
         let (action_tx, action_rx) = mpsc::channel(100);
         let handle = tokio::spawn(async move {
-            ds_start_monitor(dsc, txc, action_rx).await;
+            ds_start_monitor(dsc, txc, action_rx, smc).await;
         });
         action_tx_list.push(action_tx);
         handles.push(handle);
@@ -1182,8 +1226,12 @@ enum DscCmd {
 async fn start_ds(
     ds: &Arc<DownstairsInfo>,
     tx: &mpsc::Sender<MonitorInfo>,
+    starter: &Arc<std::sync::Mutex<usize>>,
 ) -> Child {
-    println!("Starting downstairs at port {}", ds.port);
+    println!(
+        "[{}][{}] Starting downstairs {} at port {}",
+        ds.port, ds.client_id, ds.client_id, ds.port
+    );
     tx.send(MonitorInfo {
         port: ds.port,
         client_id: ds.client_id,
@@ -1194,15 +1242,21 @@ async fn start_ds(
     .unwrap();
 
     // Create a new process that will run the downstairs
-    println!("call ds.start for port {}", ds.port);
-    let cmd = match ds.start() {
+    println!(
+        "[{}][{}] lock and call ds.start for port {}",
+        ds.port, ds.client_id, ds.port
+    );
+    let cmd = match ds.start(starter) {
         Ok(cmd) => cmd,
         Err(e) => {
             println!("failed starting port {} with {:?}", ds.port, e);
             panic!("failed starting port {} {:?}", ds.port, e);
         }
     };
-    println!("Now send message about Running for port {}", ds.port);
+    println!(
+        "[{}][{}] Now send message about Running for this client",
+        ds.client_id, ds.port
+    );
     tx.send(MonitorInfo {
         port: ds.port,
         client_id: ds.client_id,
@@ -1223,9 +1277,10 @@ async fn ds_start_monitor(
     ds: Arc<DownstairsInfo>,
     tx: mpsc::Sender<MonitorInfo>,
     mut action_rx: mpsc::Receiver<DownstairsAction>,
+    starter: Arc<std::sync::Mutex<usize>>,
 ) {
     // Start by starting.
-    let mut cmd = start_ds(&ds, &tx).await;
+    let mut cmd = start_ds(&ds, &tx, &starter).await;
 
     let mut keep_running = false;
     let mut start_once = false;
@@ -1236,7 +1291,7 @@ async fn ds_start_monitor(
                 if let Some(act) = a {
                     match act {
                         DownstairsAction::Start => {
-                            println!("[{}] got start action", ds.port);
+                            println!("[{}][{}] got start action", ds.port, ds.client_id);
                             // This does nothing if we are already
                             // running. If we are not running, then this
                             // will start the downstairs.
@@ -1244,8 +1299,9 @@ async fn ds_start_monitor(
                         },
                         DownstairsAction::Stop => {
                             println!(
-                                "[{}] Got stop action so:{} kr:{}",
+                                "[{}][{}] Got stop action so:{} kr:{}",
                                 ds.port,
+                                ds.client_id,
                                 start_once,
                                 keep_running);
                             start_once = false;
@@ -1259,15 +1315,24 @@ async fn ds_start_monitor(
                         DownstairsAction::DisableRestart => {
                             keep_running = false;
                             start_once = false;
-                            println!("[{}] Disable keep_running", ds.port);
+                            println!(
+                                "[{}][{}] Disable keep_running",
+                                ds.port, ds.client_id
+                            );
                         },
                         DownstairsAction::EnableRestart => {
                             keep_running = true;
-                            println!("[{}] Enable  keep_running", ds.port);
+                            println!(
+                                "[{}][{}] Enable  keep_running",
+                                ds.port, ds.client_id
+                            );
                         }
                     }
                 } else {
-                    println!("recv got error {:?}", a);
+                    println!(
+                        "[{}][{}] recv got error {:?}",
+                        ds.port, ds.client_id, a
+                    );
                 }
             }
             c = cmd.wait() => {
@@ -1277,9 +1342,12 @@ async fn ds_start_monitor(
                     Ok(status) => {
                         // Only notify we are down once,
                         if stop_notify {
-                            println!("[{}] Exited with: {:?}", ds.port, status);
-                                let state = {
-                                    if status.code().is_some() {
+                            println!(
+                                "[{}][{}] Exited with: {:?}",
+                                ds.port, ds.client_id, status
+                            );
+                            let state = {
+                                if status.code().is_some() {
                                     // There was a problem in the downstairs,
                                     // don't restart even if it was requested.
                                     keep_running = false;
@@ -1307,15 +1375,18 @@ async fn ds_start_monitor(
                             pid: cmd.id(),
                         }).await;
                         panic!(
-                            "[{}] wait error {} from downstairs",
-                            ds.port, e
+                            "[{}][{}] wait error {} from downstairs",
+                            ds.port, ds.client_id, e
                         );
                     }
                 }
                 // restart if desired, otherwise stay down.
                 if keep_running || start_once {
-                    println!("[{}] I am going to restart", ds.port);
-                    cmd = start_ds(&ds, &tx).await;
+                    println!(
+                        "[{}][{}] I am going to restart",
+                        ds.port, ds.client_id
+                    );
+                    cmd = start_ds(&ds, &tx, &starter).await;
                     start_once = false;
                     stop_notify = true;
                 } else {
@@ -1644,10 +1715,10 @@ fn main() -> Result<()> {
             }
 
             let dsci_c = Arc::clone(&dsci);
+            // console_subscriber::init();
             // Start the dropshot control endpoint
-            console_subscriber::init();
             runtime.spawn(control::begin(dsci_c, control));
-
+            // std::thread::sleep(std::time::Duration::from_secs(2));
             runtime.block_on(start_dsc(&dsci, notify_rx))
         }
     }

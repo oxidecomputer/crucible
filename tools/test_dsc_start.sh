@@ -28,7 +28,7 @@ done
 # Control-C to cleanup.
 trap ctrl_c INT
 function ctrl_c() {
-	echo "Stopping at your request"
+    echo "Stopping at your request"
     "$dsc" cmd --server $dsc_control shutdown
     exit 1
 }
@@ -58,25 +58,25 @@ pause_on_error=0
 shift_count=0
 while getopts 'c:hPp:r:u:' opt; do
     case "$opt" in
-	c) dsc_control=$OPTARG
-	    echo "Using $dsc_control for dsc control"
-	    ;;
+    c) dsc_control=$OPTARG
+        echo "Using $dsc_control for dsc control"
+        ;;
     h) usage
         ;;
-	p) port_base=$OPTARG
-	    echo "Using $port_base for downstairs port base"
-	    ;;
-	P) pause_on_error=1
-	    echo "Pause forever when we hit an error"
-	    ;;
-	r) region_sets=$OPTARG
-	    echo "Using $region_sets region sets"
-	    ;;
-	u) user=$OPTARG
-	    echo "Using $user for test name"
-	    ;;
-	*) usage
-	    ;;
+    p) port_base=$OPTARG
+        echo "Using $port_base for downstairs port base"
+        ;;
+    P) pause_on_error=1
+        echo "Pause forever when we hit an error"
+        ;;
+    r) region_sets=$OPTARG
+        echo "Using $region_sets region sets"
+        ;;
+    u) user=$OPTARG
+        echo "Using $user for test name"
+        ;;
+    *) usage
+        ;;
     esac
 done
 
@@ -122,49 +122,53 @@ fi
 errors=0
 while :; do
 
-	echo "[$loops][$errors] Starting $region_count downstairs                 "
-	echo "${dsc}" start "${dsc_args[@]}" --control $dsc_control --region-count $region_count >> "$dsc_output"
-	"${dsc}" start "${dsc_args[@]}" --control $dsc_control --region-count $region_count >> "$dsc_output" 2>&1 &
-	dsc_pid=$!
-	echo "[$loops] dsc started at PID: $dsc_pid, control: $dsc_control"
+    echo "[$loops][$errors] $(date) Starting $region_count downstairs"
+    echo "${dsc}" start "${dsc_args[@]}" --control $dsc_control --region-count $region_count >> "$dsc_output"
+    "${dsc}" start "${dsc_args[@]}" --control $dsc_control --region-count $region_count >> "$dsc_output" 2>&1 &
+    dsc_pid=$!
+    echo "[$loops] dsc started at PID: $dsc_pid, control: $dsc_control"
 
-	sleep 2
-	if ! pgrep -P $dsc_pid > /dev/null; then
-        echo ""
-	    echo "[$loops] Gosh diddly darn it, dsc at $dsc_pid did not start"
-	    exit 1
-	fi
+    sleep 2
+    if ! pgrep -P $dsc_pid > /dev/null; then
+        echo "[$loops] dsc started at PID: $dsc_pid, control: $dsc_control.. maybe"
+        sleep 5
+        if ! pgrep -P $dsc_pid > /dev/null; then
+            echo "[$loops] Gosh diddly darn it, dsc at $dsc_pid did not start"
+            exit 1
+        fi
+    fi
 
-	# Wait for all clients to be running.
-	echo "[$loops] waiting for $region_count downstairs to be running             "
-	cid=0
+    # Wait for all clients to be running.
+    echo "[$loops] waiting for $region_count downstairs to be running $(date)"
+    cid=0
     sleep_time=1
     wait_count=0
     found_error=0
-	while [[ "$cid" -lt "$region_count" ]]; do
-	    state=$("$dsc" cmd --server $dsc_control state -c "$cid")
-	    if [[ "$state" != "Running" ]]; then
-	        ((wait_count += 1))
+    while [[ "$cid" -lt "$region_count" ]]; do
+        state=$("$dsc" cmd --server $dsc_control state -c "$cid")
+        if [[ "$state" != "Running" ]]; then
+            ((wait_count += 1))
             echo "[$loops][$wait_count] Downstairs client $cid not running, waiting for it"
             sleep "$sleep_time"
-            if [[ "$sleep_time" -lt 5 ]]; then
+            if [[ "$sleep_time" -lt 10 ]]; then
                 ((sleep_time += 1))
             fi
 
-            if [[ "$wait_count" -gt 20 ]]; then
+            if [[ "$wait_count" -gt 5 ]]; then
                 echo ""
                 echo "[$loops] I've waited long enough, giving up"
+                echo "::walk thread" | mdb -k | wc -l
                 date
-                ps -ef | grep crucible-downstairs | grep -v oxide | grep -v grep
-	            ((loops+=1))
-	            ((errors+=1))
+                ptree $$
+                ((loops+=1))
+                ((errors+=1))
                 # Kill our downstairs (but not any oxide created ones)
-	        if [[ pause_on_error -eq 1 ]]; then
+                if [[ pause_on_error -eq 1 ]]; then
                     echo "[$loops] Pause here forever"
-		    while :; do
-		        sleep 300
-		    done
-		fi
+                    while :; do
+                        sleep 3000
+                    done
+                fi
                 for pid in $(ptree $$ | grep "crucible-downstairs run" | grep -v oxide | grep -v grep | awk '{print $1}'); do
                     kill $pid;
                 done
@@ -175,14 +179,14 @@ while :; do
             fi
             sleep $sleep_time
         else
-	        ((cid += 1))
+            ((cid += 1))
             sleep_time=1
-	    fi
-	done
+        fi
+    done
 
-	# Tests done, shut down the downstairs.
+    # Tests done, shut down the downstairs.
     if [[ $found_error -eq 0 ]]; then
-        echo "[$loops] All downstairs started, shutdown dsc              "
+        echo "[$loops] All downstairs started, shutdown dsc"
         if ! "$dsc" cmd --server $dsc_control shutdown; then
             (( res += 1 ))
             echo ""
@@ -191,11 +195,12 @@ while :; do
             exit 1
         fi
     fi
-	echo "[$loops] Wait for dsc $dsc_pid to exit                     "
-	wait $dsc_pid
+    echo "[$loops] Wait for dsc $dsc_pid to exit"
+    wait $dsc_pid
 
-	duration=$SECONDS
-	printf "[$loops][$errors] %d:%02d Test duration                    \n" \
+    duration=$SECONDS
+    printf "[$loops][$errors] %d:%02d Test duration\n" \
       $((duration / 60)) $((duration % 60))
-	((loops+=1))
+    ((loops+=1))
+    sleep 2
 done
