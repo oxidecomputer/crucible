@@ -149,7 +149,8 @@ fn make_repair_list(
 /// - Highest flush number (if generation numbers are equal)
 /// - Dirty bit set (if generation and flush numbers are equal)
 ///
-/// If there is still a tie at the end, then the earliest source is chosen
+/// If there is still a tie at the end, then the numerically lowest `ClientId`
+/// is chosen.
 fn find_source(
     i: usize,
     c0: &RegionMetadata,
@@ -192,7 +193,7 @@ fn find_dest(
 
     info!(
         log,
-        "find dest for source {source} for extent at index {i} => {out:?}"
+        "found dest for source {source} for extent at index {i} => {out:?}"
     );
     out
 }
