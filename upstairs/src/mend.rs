@@ -112,62 +112,17 @@ impl DownstairsMend {
             );
         }
 
-        /*
-         * As we walk the extents in our RegionMetadata vec, keep track
-         * of which extents we did not find a dirty bit set so we can
-         * continue to check for differences in gen/flush but only for
-         * extents we don't already know are a mismatch.
-         */
-        let mut to_check = Vec::new();
-
-        /*
-         * Any dirty bit set means that extent needs repair.
-         * Pick our source extent, and from that we decide which of the other
-         * two extents also need repair.
-         */
-        for (i, dirty0) in c0.dirty.iter().enumerate() {
-            if *dirty0 || c1.dirty[i] || c2.dirty[i] {
-                info!(log, "Extents {} dirty", i);
-                let log_mrl = log.new(o!("mrl" => "dirty".to_string()));
-                let ef = make_repair_list(i, c0, c1, c2, log_mrl);
+        for i in 0..match_len {
+            let m0 = c0.get(i).unwrap();
+            let m1 = c1.get(i).unwrap();
+            let m2 = c2.get(i).unwrap();
+            if m0.dirty || m1.dirty || m2.dirty || m0 != m1 || m1 != m2 {
+                info!(
+                    log,
+                    "extent {i} needs reconciliation: {m0:?} {m1:?} {m2:?}"
+                );
+                let ef = make_repair_list(i, c0, c1, c2, &log);
                 dsm.mend.insert(ExtentId(i as u32), ef);
-            } else {
-                to_check.push(i);
-            }
-        }
-
-        /*
-         * Find the index for any flush numbers that don't agree and
-         * add that to our to fix list.  If an index is okay, then add
-         * it to the final check for generation number.
-         */
-        let mut second_check = Vec::new();
-        for i in to_check.iter() {
-            if c0.flush_numbers[*i] != c1.flush_numbers[*i]
-                || c1.flush_numbers[*i] != c2.flush_numbers[*i]
-            {
-                info!(log, "Extent {} has flush number mismatch", i);
-                let log_mrl =
-                    log.new(o!("mrl" => "flush_mismatch".to_string()));
-                let ef = make_repair_list(*i, c0, c1, c2, log_mrl);
-                dsm.mend.insert(ExtentId(*i as u32), ef);
-            } else {
-                second_check.push(*i);
-            }
-        }
-
-        /*
-         * Walk all remaining indexes and add to the to_fix list
-         * any that are not all the same.
-         */
-        for i in second_check.iter() {
-            if c0.generation[*i] != c1.generation[*i]
-                || c1.generation[*i] != c2.generation[*i]
-            {
-                info!(log, "generation number mismatch {}", i);
-                let log_mrl = log.new(o!("mrl" => "gen_mismatch".to_string()));
-                let ef = make_repair_list(*i, c0, c1, c2, log_mrl);
-                dsm.mend.insert(ExtentId(*i as u32), ef);
             }
         }
 
@@ -189,10 +144,10 @@ fn make_repair_list(
     c0: &RegionMetadata,
     c1: &RegionMetadata,
     c2: &RegionMetadata,
-    log: Logger,
+    log: &Logger,
 ) -> ExtentFix {
-    let source = find_source(i, c0, c1, c2, &log);
-    let dest = find_dest(i, source, c0, c1, c2, &log);
+    let source = find_source(i, c0, c1, c2, log);
+    let dest = find_dest(i, source, c0, c1, c2, log);
 
     ExtentFix { source, dest }
 }
