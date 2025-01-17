@@ -8,7 +8,9 @@ use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use tokio::time::{sleep, Duration};
 
-use crucible::{Arg, DsState};
+use crucible::{
+    Arg, ClientStopReason, ConnectionMode, DsState, NegotiationState,
+};
 
 /// Connect to crucible control server
 #[derive(Parser, Debug)]
@@ -87,19 +89,46 @@ enum Action {
 // Translate a DsState into a three letter string for printing.
 fn short_state(dss: DsState) -> String {
     match dss {
-        DsState::New => "NEW".to_string(),
-        DsState::WaitActive => "WAC".to_string(),
-        DsState::WaitQuorum => "WAQ".to_string(),
-        DsState::Reconcile => "REC".to_string(),
+        DsState::Connecting {
+            state: NegotiationState::WaitActive,
+            ..
+        } => "WA".to_string(),
+
+        DsState::Connecting {
+            state: NegotiationState::WaitQuorum,
+            ..
+        } => "WQ".to_string(),
+        DsState::Connecting {
+            state: NegotiationState::Reconcile,
+            ..
+        } => "REC".to_string(),
         DsState::Active => "ACT".to_string(),
-        DsState::Faulted => "FLT".to_string(),
-        DsState::LiveRepairReady => "LRR".to_string(),
+        DsState::Connecting {
+            state: NegotiationState::LiveRepairReady,
+            ..
+        } => "LRR".to_string(),
+        DsState::Stopping(ClientStopReason::NegotiationFailed(..))
+        | DsState::Connecting {
+            mode: ConnectionMode::New,
+            ..
+        } => "NEW".to_string(),
+        DsState::Connecting {
+            mode: ConnectionMode::Faulted,
+            ..
+        }
+        | DsState::Stopping(ClientStopReason::Fault(..)) => "FLT".to_string(),
         DsState::LiveRepair => "LR".to_string(),
-        DsState::Offline => "OFF".to_string(),
-        DsState::Deactivated => "DAV".to_string(),
-        DsState::Disabled => "DIS".to_string(),
-        DsState::Replacing => "RPC".to_string(),
-        DsState::Replaced => "RPD".to_string(),
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            ..
+        } => "OFL".to_string(),
+        DsState::Stopping(ClientStopReason::Deactivated) => "DAV".to_string(),
+        DsState::Stopping(ClientStopReason::Disabled) => "DIS".to_string(),
+        DsState::Stopping(ClientStopReason::Replacing)
+        | DsState::Connecting {
+            mode: ConnectionMode::Replaced,
+            ..
+        } => "RPL".to_string(),
     }
 }
 

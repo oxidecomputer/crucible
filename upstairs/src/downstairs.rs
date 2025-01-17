@@ -8,21 +8,27 @@ use std::{
 
 use crate::{
     cdt,
-    client::{ClientAction, ClientStopReason, DownstairsClient, EnqueueResult},
+    client::{
+        ClientAction, ClientFaultReason, ClientNegotiationFailed,
+        ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
+        NegotiationState,
+    },
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
     live_repair::ExtentInfo,
+    notify::{NotifyQueue, NotifyRequest},
     stats::DownstairsStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, BlockRes, Buffer, ClientData,
-    ClientIOStateCount, ClientId, ClientMap, CrucibleError, DownstairsIO,
-    DownstairsMend, DsState, ExtentFix, ExtentRepairIDs, IOState, IOStateCount,
-    IOop, ImpactedBlocks, JobId, Message, RawReadResponse, RawWrite,
-    ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
+    ClientIOStateCount, ClientId, ClientMap, ConnectionMode, CrucibleError,
+    DownstairsIO, DownstairsMend, DsState, ExtentFix, ExtentRepairIDs, IOState,
+    IOStateCount, IOop, ImpactedBlocks, JobId, Message, RawReadResponse,
+    RawWrite, ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
     SnapshotDetails, WorkSummary,
 };
 use crucible_common::{
     impacted_blocks::ImpactedAddr, BlockIndex, BlockOffset, ExtentId,
+    NegotiationError,
 };
 use crucible_protocol::WriteHeader;
 
@@ -30,36 +36,11 @@ use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
 use uuid::Uuid;
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "notify-nexus")] {
-        use chrono::Utc;
-
-        use crate::client::ClientRunResult;
-        use crate::get_nexus_client;
-
-        use nexus_client::types::DownstairsClientStopped;
-        use nexus_client::types::DownstairsClientStoppedReason;
-        use nexus_client::types::DownstairsUnderRepair;
-        use nexus_client::types::RepairFinishInfo;
-        use nexus_client::types::RepairProgress;
-        use nexus_client::types::RepairStartInfo;
-        use nexus_client::types::UpstairsRepairType;
-
-        use omicron_uuid_kinds::DownstairsKind;
-        use omicron_uuid_kinds::GenericUuid;
-        use omicron_uuid_kinds::TypedUuid;
-        use omicron_uuid_kinds::UpstairsKind;
-        use omicron_uuid_kinds::UpstairsRepairKind;
-        use omicron_uuid_kinds::UpstairsSessionKind;
-    }
-}
-
 /// Downstairs data
 ///
 /// This data structure is responsible for tracking outstanding jobs from the
 /// perspective of the (3x) downstairs.  It contains a list of all active jobs,
 /// as well as three `DownstairsClient` with per-client data.
-#[derive(Debug)]
 pub(crate) struct Downstairs {
     /// Shared configuration
     cfg: Arc<UpstairsConfig>,
@@ -136,9 +117,8 @@ pub(crate) struct Downstairs {
     /// Handle for stats
     stats: DownstairsStatOuter,
 
-    /// A reqwest client, to be reused when creating Nexus clients
-    #[cfg(feature = "notify-nexus")]
-    reqwest_client: reqwest::Client,
+    /// A queue to send notifications to Nexus
+    notify: Option<NotifyQueue>,
 }
 
 /// Tuple storing a job and an optional result
@@ -339,6 +319,7 @@ impl Downstairs {
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
         stats: DownstairsStatOuter,
         io_limits: &IOLimits,
+        notify: Option<NotifyQueue>,
         log: Logger,
     ) -> Self {
         let mut clients = [None, None, None];
@@ -352,6 +333,7 @@ impl Downstairs {
                 tls_context.clone(),
             ));
         }
+
         let clients = clients.map(Option::unwrap);
         Self {
             clients: ClientData(clients),
@@ -389,13 +371,7 @@ impl Downstairs {
             repair: None,
             ddef: None,
             stats,
-
-            #[cfg(feature = "notify-nexus")]
-            reqwest_client: reqwest::ClientBuilder::new()
-                .connect_timeout(std::time::Duration::from_secs(15))
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .unwrap(),
+            notify,
         }
     }
 
@@ -418,8 +394,15 @@ impl Downstairs {
         // Build a set of fake IO limits that we won't hit
         let io_limits = IOLimits::new(u32::MAX as usize, u32::MAX as usize);
 
-        let mut ds =
-            Self::new(cfg, ClientMap::new(), None, stats, &io_limits, log);
+        let mut ds = Self::new(
+            cfg,
+            ClientMap::new(),
+            None,
+            stats,
+            &io_limits,
+            None,
+            log,
+        );
 
         // Create a fake repair address so this field is populated.
         for cid in ClientId::iter() {
@@ -439,15 +422,26 @@ impl Downstairs {
     /// Helper function to set all 3x clients as active, legally
     #[cfg(test)]
     pub fn force_active(&mut self) {
+        let up_state = UpstairsState::GoActive(BlockRes::dummy());
         for cid in ClientId::iter() {
-            for state in
-                [DsState::WaitActive, DsState::WaitQuorum, DsState::Active]
-            {
+            for state in [
+                NegotiationState::WaitActive,
+                NegotiationState::WaitForPromote,
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
+                NegotiationState::Reconcile,
+            ] {
                 self.clients[cid].checked_state_transition(
-                    &UpstairsState::Initializing,
-                    state,
+                    &up_state,
+                    DsState::Connecting {
+                        state,
+                        mode: ConnectionMode::New,
+                    },
                 );
             }
+            self.clients[cid]
+                .checked_state_transition(&up_state, DsState::Active);
         }
     }
 
@@ -646,6 +640,16 @@ impl Downstairs {
         client_id: ClientId,
         up_state: &UpstairsState,
     ) {
+        // Check whether we asked the IO task to stop ourselves
+        let stopped_due_to_fault = matches!(
+            self.clients[client_id].state(),
+            DsState::Stopping(ClientStopReason::Fault(..))
+        );
+
+        // Restart the IO task for that specific client, transitioning to a new
+        // state.
+        self.clients[client_id].reinitialize(up_state, self.can_replay);
+
         // If the IO task stops on its own, then under certain circumstances,
         // we want to skip all of its jobs.  (If we requested that the IO task
         // stop, then whoever made that request is responsible for skipping jobs
@@ -654,20 +658,16 @@ impl Downstairs {
         // Specifically, we want to skip jobs if the only path back online for
         // that client goes through live-repair; if that client can come back
         // through replay, then the jobs must remain live.
-        let client_state = self.clients[client_id].state();
-        if matches!(
-            client_state,
-            DsState::LiveRepair | DsState::LiveRepairReady
-        ) || matches!(
-            client_state,
-            DsState::Active | DsState::Offline if !self.can_replay
-        ) {
+        let now_faulted = matches!(
+            self.clients[client_id].state(),
+            DsState::Connecting {
+                mode: ConnectionMode::Faulted,
+                ..
+            }
+        );
+        if now_faulted && !stopped_due_to_fault {
             self.skip_all_jobs(client_id);
         }
-
-        // Restart the IO task for that specific client, transitioning to a new
-        // state.
-        self.clients[client_id].reinitialize(up_state, self.can_replay);
 
         for i in ClientId::iter() {
             // Clear per-client delay, because we're starting a new session
@@ -676,14 +676,16 @@ impl Downstairs {
 
         // Special-case: if a Downstairs goes away midway through initial
         // reconciliation, then we have to manually abort reconciliation.
-        if self.clients.iter().any(|c| c.state() == DsState::Reconcile) {
+        if self.clients.iter().any(|c| {
+            matches!(
+                c.state(),
+                DsState::Connecting {
+                    state: NegotiationState::Reconcile,
+                    ..
+                }
+            )
+        }) {
             self.abort_reconciliation(up_state);
-        }
-
-        // If this client is coming back from being offline, then mark that its
-        // jobs must be replayed when it completes negotiation.
-        if self.clients[client_id].state() == DsState::Offline {
-            self.clients[client_id].needs_replay();
         }
     }
 
@@ -726,11 +728,19 @@ impl Downstairs {
         // setting faulted, we return false here and let the faulting framework
         // take care of clearing out the skipped jobs.  This then allows the
         // requested deactivation to finish.
-        if self.clients[client_id].state() == DsState::Offline {
+        if matches!(
+            self.clients[client_id].state(),
+            DsState::Connecting {
+                mode: ConnectionMode::Offline,
+                ..
+            }
+        ) {
             info!(self.log, "[{}] Offline client moved to Faulted", client_id);
-            self.skip_all_jobs(client_id);
-            self.clients[client_id]
-                .fault(up_state, ClientStopReason::OfflineDeactivated);
+            self.fault_client(
+                client_id,
+                up_state,
+                ClientFaultReason::OfflineDeactivated,
+            );
             return false;
         }
         // If there are jobs in the queue, then we have to check them!
@@ -787,17 +797,10 @@ impl Downstairs {
         self.next_id
     }
 
-    /// Sends replay jobs to the given client if `needs_replay` is set
-    pub(crate) fn check_replay(&mut self, client_id: ClientId) {
-        if self.clients[client_id].check_replay() {
-            self.replay_jobs(client_id);
-        }
-    }
-
     /// Sends all pending jobs for the given client
     ///
     /// Jobs are pending if they have not yet been flushed by this client.
-    fn replay_jobs(&mut self, client_id: ClientId) {
+    pub(crate) fn replay_jobs(&mut self, client_id: ClientId) {
         let lf = self.clients[client_id].last_flush();
 
         info!(
@@ -835,7 +838,7 @@ impl Downstairs {
     /// Decide if we need repair, and if so create the repair list
     ///
     /// Returns `true` if repair is needed, `false` otherwise
-    pub(crate) fn collate(&mut self) -> Result<bool, CrucibleError> {
+    pub(crate) fn collate(&mut self) -> Result<bool, NegotiationError> {
         let r = self.collate_inner();
         if r.is_err() {
             // If we failed to begin the repair, then assert that nothing has
@@ -844,13 +847,19 @@ impl Downstairs {
             assert!(self.reconcile.is_none());
 
             for c in self.clients.iter() {
-                assert_eq!(c.state(), DsState::WaitQuorum);
+                assert_eq!(
+                    c.state(),
+                    DsState::Connecting {
+                        state: NegotiationState::WaitQuorum,
+                        mode: ConnectionMode::New
+                    }
+                );
             }
         }
         r
     }
 
-    fn collate_inner(&mut self) -> Result<bool, CrucibleError> {
+    fn collate_inner(&mut self) -> Result<bool, NegotiationError> {
         /*
          * Show some (or all if small) of the info from each region.
          *
@@ -913,9 +922,7 @@ impl Downstairs {
         let requested_gen = self.cfg.generation();
         if requested_gen == 0 {
             error!(self.log, "generation number should be at least 1");
-            return Err(CrucibleError::GenerationNumberTooLow(
-                "Generation 0 illegal".to_owned(),
-            ));
+            return Err(NegotiationError::GenerationZeroIsIllegal);
         } else if requested_gen < max_gen {
             /*
              * We refuse to connect. The provided generation number is not
@@ -927,10 +934,10 @@ impl Downstairs {
                 max_gen,
                 requested_gen,
             );
-            return Err(CrucibleError::GenerationNumberTooLow(format!(
-                "found generation number {}, larger than requested: {}",
-                max_gen, requested_gen,
-            )));
+            return Err(NegotiationError::GenerationNumberTooLow {
+                requested: requested_gen,
+                actual: max_gen,
+            });
         } else {
             info!(
                 self.log,
@@ -968,11 +975,7 @@ impl Downstairs {
                 reconcile.reconcile_repair_needed,
             );
 
-            #[cfg(feature = "notify-nexus")]
-            {
-                self.notify_nexus_of_reconcile_start(&reconcile);
-            }
-
+            self.notify_reconcile_start(&reconcile);
             self.reconcile = Some(reconcile);
             self.reconcile_repaired = 0;
 
@@ -1067,11 +1070,8 @@ impl Downstairs {
             self.repair.as_ref().unwrap().id
         );
 
-        #[cfg(feature = "notify-nexus")]
-        {
-            let repair = self.repair.as_ref().unwrap();
-            self.notify_nexus_of_live_repair_start(repair);
-        }
+        let repair = self.repair.as_ref().unwrap();
+        self.notify_live_repair_start(repair);
 
         // We'll be back in on_live_repair once the initial job finishes
         true
@@ -1253,17 +1253,14 @@ impl Downstairs {
                     let aborting = repair.aborting_repair;
                     let source_downstairs = repair.source_downstairs;
 
-                    #[cfg(feature = "notify-nexus")]
-                    {
-                        let repair_id = repair.id;
-                        let extent_count = repair.extent_count;
+                    let repair_id = repair.id;
+                    let extent_count = repair.extent_count;
 
-                        self.notify_nexus_of_live_repair_progress(
-                            repair_id,
-                            active_extent,
-                            extent_count,
-                        );
-                    }
+                    self.notify_live_repair_progress(
+                        repair_id,
+                        active_extent,
+                        extent_count,
+                    );
 
                     self.begin_repair_for(
                         active_extent,
@@ -1288,11 +1285,8 @@ impl Downstairs {
                     }
                 }
 
-                #[cfg(feature = "notify-nexus")]
-                {
-                    let repair = self.repair.as_ref().unwrap();
-                    self.notify_nexus_of_live_repair_finish(repair);
-                }
+                let repair = self.repair.as_ref().unwrap();
+                self.notify_live_repair_finish(repair);
 
                 // Set `self.repair` to `None` on our way out the door (because
                 // repair is done, one way or the other)
@@ -1810,22 +1804,19 @@ impl Downstairs {
 
         reconcile.current_work = Some(next);
 
-        #[cfg(feature = "notify-nexus")]
-        {
-            let reconcile_id = reconcile.id;
+        let reconcile_id = reconcile.id;
 
-            // `on_reconciliation_job_done` increments one of these and
-            // decrements the other, so add them together to get total task
-            // count to send to Nexus.
-            let task_count =
-                self.reconcile_repaired + reconcile.reconcile_repair_needed;
+        // `on_reconciliation_job_done` increments one of these and
+        // decrements the other, so add them together to get total task
+        // count to send to Nexus.
+        let task_count =
+            self.reconcile_repaired + reconcile.reconcile_repair_needed;
 
-            self.notify_nexus_of_reconcile_progress(
-                reconcile_id,
-                self.reconcile_repaired,
-                task_count,
-            );
-        }
+        self.notify_reconcile_progress(
+            reconcile_id,
+            self.reconcile_repaired,
+            task_count,
+        );
 
         false
     }
@@ -1860,7 +1851,15 @@ impl Downstairs {
         // If any client have dropped out of repair-readiness (e.g. due to
         // failed reconciliation, timeouts, etc), then we have to kick
         // everything else back to the beginning.
-        if self.clients.iter().any(|c| c.state() != DsState::Reconcile) {
+        if self.clients.iter().any(|c| {
+            !matches!(
+                c.state(),
+                DsState::Connecting {
+                    state: NegotiationState::Reconcile,
+                    ..
+                }
+            )
+        }) {
             // Something has changed, so abort this repair.
             // Mark any downstairs that have not changed as failed and disable
             // them so that they restart.
@@ -1908,12 +1907,18 @@ impl Downstairs {
         // Mark any downstairs that have not changed as failed and disable
         // them so that they restart.
         for (i, c) in self.clients.iter_mut().enumerate() {
-            if c.state() == DsState::Reconcile {
+            if matches!(
+                c.state(),
+                DsState::Connecting {
+                    state: NegotiationState::Reconcile,
+                    ..
+                }
+            ) {
                 // Restart the IO task.  This will cause the Upstairs to
                 // deactivate through a ClientAction::TaskStopped.
-                c.restart_connection(
+                c.abort_negotiation(
                     up_state,
-                    ClientStopReason::FailedReconcile,
+                    ClientNegotiationFailed::FailedReconcile,
                 );
                 error!(self.log, "Mark {} as FAILED REPAIR", i);
             }
@@ -1922,16 +1927,7 @@ impl Downstairs {
         info!(self.log, "Clear out existing repair work queue");
 
         if let Some(r) = self.reconcile.take() {
-            #[cfg(feature = "notify-nexus")]
-            {
-                self.notify_nexus_of_reconcile_finished(
-                    &r, true, /* aborted */
-                );
-            }
-            #[cfg(not(feature = "notify-nexus"))]
-            {
-                let _ = r; // avoid unused warning
-            }
+            self.notify_reconcile_finished(&r, true /* aborted */);
             self.reconcile_repaired = 0;
         } else {
             // If reconcile is None, then these should also be cleared
@@ -1944,30 +1940,21 @@ impl Downstairs {
     ///
     /// # Panics
     /// If that isn't the case!
-    pub(crate) fn on_reconciliation_done(&mut self, from_state: DsState) {
+    pub(crate) fn on_reconciliation_done(&mut self, did_work: bool) {
         assert!(self.ds_active.is_empty());
 
-        for (i, c) in self.clients.iter_mut().enumerate() {
-            assert_eq!(c.state(), from_state, "invalid state for client {i}");
+        for c in self.clients.iter_mut() {
             c.set_active();
         }
 
-        if from_state == DsState::Reconcile {
+        if did_work {
             // reconciliation completed
             let r = self.reconcile.take().unwrap();
             assert!(r.task_list.is_empty());
-
-            #[cfg(feature = "notify-nexus")]
-            {
-                self.notify_nexus_of_reconcile_finished(
-                    &r, false, /* aborted */
-                );
-            }
-        } else if from_state == DsState::WaitQuorum {
+            self.notify_reconcile_finished(&r, false /* aborted */);
+        } else {
             // no reconciliation was required
             assert!(self.reconcile.is_none());
-        } else {
-            panic!("unexpected from_state {from_state}");
         }
     }
 
@@ -2551,9 +2538,11 @@ impl Downstairs {
             // We don't really know if the "old" matches what was old,
             // as that info is gone to us now, so assume it was true.
             match self.clients[new_client_id].state() {
-                DsState::Replacing
-                | DsState::Replaced
-                | DsState::LiveRepairReady
+                DsState::Stopping(ClientStopReason::Replacing)
+                | DsState::Connecting {
+                    mode: ConnectionMode::Replaced,
+                    ..
+                }
                 | DsState::LiveRepair => {
                     // These states indicate a replacement is in progress.
                     return Ok(ReplaceResult::StartedAlready);
@@ -2581,16 +2570,25 @@ impl Downstairs {
                 continue;
             }
             match self.clients[client_id].state() {
-                DsState::Replacing
-                | DsState::Replaced
-                | DsState::LiveRepairReady
-                | DsState::LiveRepair => {
+                DsState::Stopping(..)
+                | DsState::LiveRepair
+                | DsState::Connecting {
+                    mode:
+                        ConnectionMode::Replaced
+                        | ConnectionMode::Offline
+                        | ConnectionMode::Faulted,
+                    ..
+                } => {
                     return Err(CrucibleError::ReplaceRequestInvalid(format!(
                         "Replace {old} failed, downstairs {client_id} is {:?}",
                         self.clients[client_id].state(),
                     )));
                 }
-                _ => {}
+                DsState::Active
+                | DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    ..
+                } => {}
             }
         }
 
@@ -2617,7 +2615,13 @@ impl Downstairs {
         client_id: ClientId,
         up_state: &UpstairsState,
     ) {
-        assert_eq!(self.clients[client_id].state(), DsState::Offline);
+        assert!(matches!(
+            self.clients[client_id].state(),
+            DsState::Connecting {
+                mode: ConnectionMode::Offline,
+                ..
+            }
+        ));
 
         let byte_count = self.clients[client_id].total_bytes_outstanding();
         let work_count = self.clients[client_id].total_live_work();
@@ -2626,28 +2630,38 @@ impl Downstairs {
                 self.log,
                 "downstairs failed, too many outstanding jobs {work_count}"
             );
-            Some(ClientStopReason::TooManyOutstandingJobs)
+            Some(ClientFaultReason::TooManyOutstandingJobs)
         } else if byte_count as u64 > crate::IO_OUTSTANDING_MAX_BYTES {
             warn!(
                 self.log,
                 "downstairs failed, too many outstanding bytes {byte_count}"
             );
-            Some(ClientStopReason::TooManyOutstandingBytes)
+            Some(ClientFaultReason::TooManyOutstandingBytes)
         } else if !self.can_replay {
             // XXX can this actually happen?
             warn!(
                 self.log,
                 "downstairs became ineligible for replay while offline"
             );
-            Some(ClientStopReason::IneligibleForReplay)
+            Some(ClientFaultReason::IneligibleForReplay)
         } else {
             None
         };
 
         if let Some(err) = failed {
-            self.skip_all_jobs(client_id);
-            self.clients[client_id].fault(up_state, err);
+            self.fault_client(client_id, up_state, err);
         }
+    }
+
+    /// Marks a client as faulted, skipping pending IO and stopping the worker
+    pub(crate) fn fault_client(
+        &mut self,
+        client_id: ClientId,
+        up_state: &UpstairsState,
+        err: ClientFaultReason,
+    ) {
+        self.skip_all_jobs(client_id);
+        self.clients[client_id].fault(up_state, err);
     }
 
     /// Move all `New` and `InProgress` jobs for the given client to `Skipped`
@@ -2691,45 +2705,51 @@ impl Downstairs {
     /// The live-repair may continue after this point to clean up reserved jobs,
     /// to avoid blocking dependencies, but jobs are replaced with no-ops.
     fn abort_repair(&mut self, up_state: &UpstairsState) {
-        assert!(self.clients.iter().any(|c| {
-            c.state() == DsState::LiveRepair ||
-                // If connection aborted, and restarted, then the re-negotiation
-                // could have won this race, and transitioned the reconnecting
-                // downstairs from LiveRepair to Faulted to LiveRepairReady.
-                c.state() == DsState::LiveRepairReady ||
-                // If just a single IO reported failure, we will fault this
-                // downstairs and it won't yet have had a chance to move back
-                // around to LiveRepairReady yet.
-                c.state() == DsState::Faulted
-        }));
+        let mut found_valid_state = false;
         for i in ClientId::iter() {
             match self.clients[i].state() {
                 DsState::LiveRepair => {
-                    self.skip_all_jobs(i);
-                    self.clients[i].abort_repair(up_state, true);
+                    found_valid_state = true;
+                    self.fault_client(
+                        i,
+                        up_state,
+                        ClientFaultReason::FailedLiveRepair,
+                    );
                 }
-                DsState::Faulted => {
-                    // Jobs were already skipped when we hit the IO error that
-                    // marked us as faulted
-                    self.clients[i].abort_repair(up_state, false);
+                // If just a single IO reported failure, we will fault this
+                // downstairs and it won't yet have had a chance to move back
+                // around to Connecting yet.
+                DsState::Stopping(
+                    ClientStopReason::Replacing
+                    | ClientStopReason::Disabled
+                    | ClientStopReason::Deactivated
+                    | ClientStopReason::Fault(..),
+                ) => {
+                    found_valid_state = true;
                 }
-                DsState::LiveRepairReady => {
-                    // TODO I don't think this is necessary
-                    self.skip_all_jobs(i);
 
-                    // Set repair_info to None, so that the next
-                    // ExtentFlushClose sees it empty (as expected). repair_info
-                    // is set on all clients, even those not directly
-                    // participating in live-repair, so we have to always clear
-                    // it; in the cases above, it's cleared in `abort_repair`.
-                    self.clients[i].repair_info = None;
-                }
-                _ => {
-                    // (see comment above)
-                    self.clients[i].repair_info = None;
-                }
+                // If connection aborted, and restarted, then the re-negotiation
+                // could have won this race, and transitioned the reconnecting
+                // downstairs from LiveRepair to Stopping to Connecting.
+                DsState::Connecting {
+                    mode: ConnectionMode::Faulted,
+                    ..
+                } => found_valid_state = true,
+
+                // Other states are invalid
+                _ => {}
             }
+            // Set repair_info to None, so that the next ExtentFlushClose sees
+            // it empty (as expected). repair_info is set on all clients, even
+            // those not directly participating in live-repair, so we have to
+            // always clear it.
+            self.clients[i].clear_repair_state();
         }
+        assert!(
+            found_valid_state,
+            "abort_repair called without a valid client state: {:?}",
+            self.clients.iter().map(|c| c.state()).collect::<Vec<_>>(),
+        );
 
         if let Some(repair) = &mut self.repair {
             repair.aborting_repair = true;
@@ -3217,8 +3237,12 @@ impl Downstairs {
          */
         let ds_state = self.clients[client_id].state();
         match ds_state {
-            DsState::Active | DsState::Reconcile | DsState::LiveRepair => {}
-            DsState::Faulted => {
+            DsState::Active | DsState::LiveRepair => {}
+            DsState::Stopping(ClientStopReason::Fault(..))
+            | DsState::Connecting {
+                mode: ConnectionMode::Faulted,
+                ..
+            } => {
                 error!(
                     self.clients[client_id].log,
                     "Dropping job {}, this downstairs is faulted", ds_id,
@@ -3348,9 +3372,8 @@ impl Downstairs {
                     "Saw CrucibleError::UpstairsInactive on client {}!",
                     client_id
                 );
-                self.clients[client_id]
-                    .checked_state_transition(up_state, DsState::Disabled);
-                // TODO should we also restart the IO task here?
+                // XXX should we also change the upstairs state here?
+                self.clients[client_id].disable(up_state);
             }
             Some(CrucibleError::DecryptionError) => {
                 // We should always be able to decrypt the data.  If we
@@ -3383,15 +3406,11 @@ impl Downstairs {
                         | IOop::ExtentLiveNoOp { .. }
                         | IOop::ExtentLiveReopen { .. }
                 ) {
-                    // This error means the downstairs will go to Faulted.
-                    // Walk the active job list and mark any that were
-                    // new or in progress to skipped.
-                    self.skip_all_jobs(client_id);
-                    self.clients[client_id]
-                        .checked_state_transition(up_state, DsState::Faulted);
-                    self.clients[client_id].restart_connection(
+                    // Send this Downstairs to faulted
+                    self.fault_client(
+                        client_id,
                         up_state,
-                        ClientStopReason::IOError,
+                        ClientFaultReason::IOError,
                     );
                 }
             }
@@ -3581,20 +3600,7 @@ impl Downstairs {
     fn repair_test_all_active() -> Self {
         let mut ds = Self::test_default();
 
-        for cid in ClientId::iter() {
-            ds.clients[cid].checked_state_transition(
-                &UpstairsState::Active,
-                DsState::WaitActive,
-            );
-            ds.clients[cid].checked_state_transition(
-                &UpstairsState::Active,
-                DsState::WaitQuorum,
-            );
-            ds.clients[cid].checked_state_transition(
-                &UpstairsState::Active,
-                DsState::Active,
-            );
-        }
+        ds.force_active();
 
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
@@ -3613,16 +3619,7 @@ impl Downstairs {
 
         // Set one of the clients to want a repair
         let to_repair = ClientId::new(1);
-        ds.clients[to_repair]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
-            DsState::LiveRepairReady,
-        );
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
-            DsState::LiveRepair,
-        );
+        test::move_to_live_repair(&mut ds, to_repair);
 
         // At this point you might think it makes sense to run
         //   `self.start_live_repair(&UpstairsState::Active, gw, 3, 0);`
@@ -3722,562 +3719,194 @@ impl Downstairs {
         }
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn get_target_addrs(&self) -> Vec<SocketAddr> {
-        self.clients
-            .iter()
-            .filter_map(|client| client.target_addr)
-            .collect()
+    fn notify_live_repair_start(&self, repair: &LiveRepairData) {
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("repair" => repair.id.to_string()));
+            let mut repairs =
+                Vec::with_capacity(repair.repair_downstairs.len());
+
+            for cid in &repair.repair_downstairs {
+                let Some(region_uuid) = self.clients[*cid].id() else {
+                    // A downstairs doesn't have an id but is being repaired...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
+
+                let Some(target_addr) = self.clients[*cid].target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // repaired...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
+
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::LiveRepairStart {
+                upstairs_id: self.cfg.upstairs_id,
+                session_id: self.cfg.session_id,
+                repair_id: repair.id,
+                repairs,
+            })
+        }
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_live_repair_start(&self, repair: &LiveRepairData) {
-        let log = self.log.new(o!("repair" => repair.id.to_string()));
+    fn notify_live_repair_finish(&self, repair: &LiveRepairData) {
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("repair" => repair.id.to_string()));
 
-        let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
+            let mut repairs =
+                Vec::with_capacity(repair.repair_downstairs.len());
 
-        for cid in &repair.repair_downstairs {
-            let Some(region_uuid) = self.clients[*cid].id() else {
-                // A downstairs doesn't have an id but is being repaired...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
+            for cid in &repair.repair_downstairs {
+                let Some(region_uuid) = self.clients[*cid].id() else {
+                    // A downstairs doesn't have an id but is being repaired...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
 
-            let Some(target_addr) = self.clients[*cid].target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // repaired...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
+                let Some(target_addr) = self.clients[*cid].target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // repaired...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
 
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::LiveRepairFinish {
+                upstairs_id: self.cfg.upstairs_id,
+                session_id: self.cfg.session_id,
+                repair_id: repair.id,
+                repairs,
+                aborted: repair.aborting_repair,
             });
         }
-
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(repair.id);
-
-        let now = Utc::now();
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting start notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_start(
-                        &upstairs_id,
-                        &RepairStartInfo {
-                            time: now,
-                            repair_id,
-                            repair_type: UpstairsRepairType::Live,
-                            session_id,
-                            repairs: repairs.clone(),
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of repair start");
-                }
-
-                Err(e) => {
-                    error!(log, "failed to notify Nexus of repair start! {e}");
-                }
-            }
-        });
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_live_repair_finish(&self, repair: &LiveRepairData) {
-        let log = self.log.new(o!("repair" => repair.id.to_string()));
-
-        let aborted = repair.aborting_repair;
-
-        let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
-
-        for cid in &repair.repair_downstairs {
-            let Some(region_uuid) = self.clients[*cid].id() else {
-                // A downstairs doesn't have an id but is being repaired...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
-
-            let Some(target_addr) = self.clients[*cid].target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // repaired...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
-
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
-            });
-        }
-
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(repair.id);
-
-        let now = Utc::now();
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting finish notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_finish(
-                        &upstairs_id,
-                        &RepairFinishInfo {
-                            time: now,
-                            repair_id,
-                            repair_type: UpstairsRepairType::Live,
-                            session_id,
-                            repairs: repairs.clone(),
-                            aborted,
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of repair finish");
-                }
-
-                Err(e) => {
-                    error!(log, "failed to notify Nexus of repair finish! {e}");
-                }
-            }
-        });
-    }
-
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_live_repair_progress(
+    fn notify_live_repair_progress(
         &self,
         repair_id: Uuid,
         current_extent: ExtentId,
         extent_count: u32,
     ) {
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(repair_id);
-
-        let now = Utc::now();
-        let log = self.log.new(o!("repair" => repair_id.to_string()));
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting progress notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_progress(
-                        &upstairs_id,
-                        &repair_id,
-                        &RepairProgress {
-                            time: now,
-                            // surely we won't have u64::MAX extents
-                            current_item: current_extent.0 as i64,
-                            // i am serious, and don't call me shirley
-                            total_items: extent_count as i64,
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of repair progress");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "failed to notify Nexus of repair progress! {e}"
-                    );
-                }
-            }
-        });
-    }
-
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_reconcile_start(&self, reconcile: &ReconcileData) {
-        let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
-
-        // Reconcilation involves everyone
-        let mut repairs = Vec::with_capacity(self.clients.len());
-
-        for (cid, client) in self.clients.iter().enumerate() {
-            let Some(region_uuid) = client.id() else {
-                // A downstairs doesn't have an id but is being reconciled...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
-
-            let Some(target_addr) = client.target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // reconciled...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
-
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
+        if let Some(notify) = &self.notify {
+            notify.send(NotifyRequest::LiveRepairProgress {
+                upstairs_id: self.cfg.upstairs_id,
+                repair_id,
+                // surely we won't have u64::MAX extents
+                current_item: current_extent.0 as i64,
+                // i am serious, and don't call me shirley
+                total_items: extent_count as i64,
             });
         }
-
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(reconcile.id);
-
-        let now = Utc::now();
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting start notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_start(
-                        &upstairs_id,
-                        &RepairStartInfo {
-                            time: now,
-                            repair_id,
-                            repair_type: UpstairsRepairType::Reconciliation,
-                            session_id,
-                            repairs: repairs.clone(),
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of reconcile start");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "error notifying Nexus of reconcile start! {e}"
-                    );
-                }
-            }
-        });
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_reconcile_finished(
+    fn notify_reconcile_start(&self, reconcile: &ReconcileData) {
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
+
+            // Reconcilation involves everyone
+            let mut repairs = Vec::with_capacity(self.clients.len());
+
+            for (cid, client) in self.clients.iter().enumerate() {
+                let Some(region_uuid) = client.id() else {
+                    // A downstairs doesn't have an id but is being reconciled...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
+
+                let Some(target_addr) = client.target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // reconciled...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
+
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::ReconcileStart {
+                upstairs_id: self.cfg.upstairs_id,
+                repair_id: reconcile.id,
+                session_id: self.cfg.session_id,
+                repairs,
+            });
+        }
+    }
+
+    fn notify_reconcile_finished(
         &self,
         reconcile: &ReconcileData,
         aborted: bool,
     ) {
-        let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
 
-        // Reconcilation involves everyone
-        let mut repairs = Vec::with_capacity(self.clients.len());
+            // Reconcilation involves everyone
+            let mut repairs = Vec::with_capacity(self.clients.len());
 
-        for (cid, client) in self.clients.iter().enumerate() {
-            let Some(region_uuid) = client.id() else {
-                // A downstairs doesn't have an id but is being reconciled...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
+            for (cid, client) in self.clients.iter().enumerate() {
+                let Some(region_uuid) = client.id() else {
+                    // A downstairs doesn't have an id but is being reconciled...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
 
-            let Some(target_addr) = client.target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // reconciled...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
+                let Some(target_addr) = client.target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // reconciled...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
 
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::ReconcileFinish {
+                upstairs_id: self.cfg.upstairs_id,
+                session_id: self.cfg.session_id,
+                repair_id: reconcile.id,
+                aborted,
+                repairs,
             });
         }
-
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(reconcile.id);
-
-        let now = Utc::now();
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting finish notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_finish(
-                        &upstairs_id,
-                        &RepairFinishInfo {
-                            time: now,
-                            repair_id,
-                            repair_type: UpstairsRepairType::Reconciliation,
-                            session_id,
-                            repairs: repairs.clone(),
-                            aborted,
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of reconcile finish");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "failed to notify Nexus of reconcile finish! {e}"
-                    );
-                }
-            }
-        });
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_reconcile_progress(
+    fn notify_reconcile_progress(
         &self,
         reconcile_id: Uuid,
         current_task: usize,
         task_count: usize,
     ) {
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(reconcile_id);
-
-        let now = Utc::now();
-        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting progress notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_progress(
-                        &upstairs_id,
-                        &repair_id,
-                        &RepairProgress {
-                            time: now,
-                            // surely we won't have usize::MAX extents
-                            current_item: current_task as i64,
-                            // i am serious, and don't call me shirley
-                            total_items: task_count as i64,
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of reconcile progress");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "failed to notify Nexus of reconcile progress! {e}"
-                    );
-                }
-            }
-        });
+        if let Some(notify) = &self.notify {
+            notify.send(NotifyRequest::ReconcileProgress {
+                upstairs_id: self.cfg.upstairs_id,
+                repair_id: reconcile_id,
+                // surely we won't have usize::MAX extents
+                current_item: current_task as i64,
+                // i am serious, and don't call me shirley
+                total_items: task_count as i64,
+            });
+        }
     }
 
-    #[cfg(feature = "notify-nexus")]
-    pub(crate) fn notify_nexus_of_client_task_stopped(
+    pub(crate) fn notify_client_task_stopped(
         &self,
         client_id: ClientId,
         reason: ClientRunResult,
     ) {
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-
-        let Some(downstairs_id) = self.clients[client_id].id() else {
-            return;
-        };
-        let downstairs_id: TypedUuid<DownstairsKind> =
-            TypedUuid::from_untyped_uuid(downstairs_id);
-
-        let now = Utc::now();
-        let log = self
-            .log
-            .new(o!("downstairs_id" => downstairs_id.to_string()));
-
-        let reason = match reason {
-            ClientRunResult::ConnectionTimeout => {
-                DownstairsClientStoppedReason::ConnectionTimeout
-            }
-            ClientRunResult::ConnectionFailed(_) => {
-                // skip this notification, it's too noisy during connection
-                // retries
-                //DownstairsClientStoppedReason::ConnectionFailed
-                return;
-            }
-            ClientRunResult::Timeout => DownstairsClientStoppedReason::Timeout,
-            ClientRunResult::WriteFailed(_) => {
-                DownstairsClientStoppedReason::WriteFailed
-            }
-            ClientRunResult::ReadFailed(_) => {
-                DownstairsClientStoppedReason::ReadFailed
-            }
-            ClientRunResult::RequestedStop(_) => {
-                // skip this notification, it fires for *every* Upstairs
-                // deactivation
-                //DownstairsClientStoppedReason::RequestedStop
-                return;
-            }
-            ClientRunResult::Finished => {
-                DownstairsClientStoppedReason::Finished
-            }
-            ClientRunResult::QueueClosed => {
-                DownstairsClientStoppedReason::QueueClosed
-            }
-            ClientRunResult::ReceiveTaskCancelled => {
-                DownstairsClientStoppedReason::ReceiveTaskCancelled
-            }
-        };
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
+        if let Some(notify) = &self.notify {
+            let Some(downstairs_id) = self.clients[client_id].id() else {
                 return;
             };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_downstairs_client_stopped(
-                        &upstairs_id,
-                        &downstairs_id,
-                        &DownstairsClientStopped { time: now, reason },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of client stopped");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "failed to notify Nexus of client stopped: {e}"
-                    );
-                }
-            }
-        });
+            notify.send(NotifyRequest::ClientTaskStopped {
+                upstairs_id: self.cfg.upstairs_id,
+                downstairs_id,
+                reason,
+            });
+        }
     }
 
     pub(crate) fn set_ddef(&mut self, ddef: RegionDefinition) {
@@ -4337,12 +3966,15 @@ struct DownstairsBackpressureConfig {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use super::{Downstairs, PendingJob};
+    use super::{
+        ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
+        ConnectionMode, Downstairs, NegotiationState, PendingJob,
+    };
     use crate::{
         downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
-        BlockOpWaiter, ClientId, CrucibleError, DsState, ExtentFix,
+        BlockOpWaiter, BlockRes, ClientId, CrucibleError, DsState, ExtentFix,
         ExtentRepairIDs, IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId,
         RawReadResponse, ReconcileIO, ReconcileIOState, ReconciliationId,
         SnapshotDetails,
@@ -4359,6 +3991,17 @@ pub(crate) mod test {
     };
 
     use uuid::Uuid;
+
+    // Helper constants for verbose stopping states
+    const STOP_FAULT_REQUESTED: DsState = DsState::Stopping(
+        ClientStopReason::Fault(ClientFaultReason::RequestedFault),
+    );
+    const STOP_IO_ERROR: DsState =
+        DsState::Stopping(ClientStopReason::Fault(ClientFaultReason::IOError));
+    const STOP_FAILED_RECONCILE: DsState =
+        DsState::Stopping(ClientStopReason::NegotiationFailed(
+            ClientNegotiationFailed::FailedReconcile,
+        ));
 
     /// Builds a single-block reply from the given request and response data
     pub fn build_read_response(data: &[u8]) -> RawReadResponse {
@@ -4387,20 +4030,57 @@ pub(crate) mod test {
         }
     }
 
+    /// Helper function to legally move the given client to live-repair
+    fn to_live_repair_ready(ds: &mut Downstairs, to_repair: ClientId) {
+        ds.fault_client(
+            to_repair,
+            &UpstairsState::Active,
+            ClientFaultReason::RequestedFault,
+        );
+        let mode = ConnectionMode::Faulted;
+        for state in [
+            NegotiationState::Start { auto_promote: true },
+            NegotiationState::WaitForPromote,
+            NegotiationState::WaitForRegionInfo,
+            NegotiationState::GetExtentVersions,
+            NegotiationState::LiveRepairReady,
+        ] {
+            ds.clients[to_repair].checked_state_transition(
+                &UpstairsState::Active,
+                DsState::Connecting { state, mode },
+            );
+        }
+    }
+
+    /// Helper function to legally move the given client to live-repair
+    pub(super) fn move_to_live_repair(
+        ds: &mut Downstairs,
+        to_repair: ClientId,
+    ) {
+        to_live_repair_ready(ds, to_repair);
+        ds.clients[to_repair].checked_state_transition(
+            &UpstairsState::Active,
+            DsState::LiveRepair,
+        );
+    }
+
     fn set_all_reconcile(ds: &mut Downstairs) {
-        for i in ClientId::iter() {
-            ds.clients[i].checked_state_transition(
-                &UpstairsState::Initializing,
-                DsState::WaitActive,
-            );
-            ds.clients[i].checked_state_transition(
-                &UpstairsState::Initializing,
-                DsState::WaitQuorum,
-            );
-            ds.clients[i].checked_state_transition(
-                &UpstairsState::Initializing,
-                DsState::Reconcile,
-            );
+        let mode = ConnectionMode::New;
+        let up_state = UpstairsState::GoActive(BlockRes::dummy());
+        for cid in ClientId::iter() {
+            for state in [
+                NegotiationState::WaitActive,
+                NegotiationState::WaitForPromote,
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
+                NegotiationState::Reconcile,
+            ] {
+                ds.clients[cid].checked_state_transition(
+                    &up_state,
+                    DsState::Connecting { state, mode },
+                );
+            }
         }
     }
 
@@ -6023,7 +5703,6 @@ pub(crate) mod test {
     fn send_next_reconciliation_req_none() {
         // No repairs on the queue, should return None
         let mut ds = Downstairs::test_default();
-        set_all_reconcile(&mut ds);
 
         ds.reconcile = Some(ReconcileData::new([]));
 
@@ -6065,9 +5744,10 @@ pub(crate) mod test {
 
         // Fault client 1, so that later event handling will kick us out of
         // repair
-        ds.clients[ClientId::new(1)].checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Faulted,
+        ds.fault_client(
+            ClientId::new(1),
+            &UpstairsState::Active,
+            ClientFaultReason::RequestedFault,
         );
 
         // Send an ack to trigger the reconciliation state check
@@ -6079,9 +5759,9 @@ pub(crate) mod test {
         assert!(!nw);
 
         // The two troublesome tasks will end up in DsState::New.
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::New);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_FAILED_RECONCILE,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_FAULT_REQUESTED);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), STOP_FAILED_RECONCILE);
 
         // Verify that reconciliation has been stopped
         assert!(ds.reconcile.is_none());
@@ -6122,9 +5802,9 @@ pub(crate) mod test {
 
         // Getting the next work to do should verify the previous is done,
         // and handle a state change for a downstairs.
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::New);
+        for c in ds.clients.iter() {
+            assert_eq!(c.state(), STOP_FAILED_RECONCILE);
+        }
 
         // Verify that reconciliation has stopped
         assert!(ds.reconcile.is_none());
@@ -6135,7 +5815,6 @@ pub(crate) mod test {
     fn reconcile_rep_in_progress_bad1() {
         // Verify the same downstairs can't mark a job in progress twice
         let mut ds = Downstairs::test_default();
-        set_all_reconcile(&mut ds);
 
         let rep_id = ReconciliationId(0);
         ds.reconcile = Some(ReconcileData::new([ReconcileIO::new(
@@ -6246,7 +5925,6 @@ pub(crate) mod test {
     fn reconcile_repair_inprogress_not_done() {
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
-        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(1);
@@ -6281,7 +5959,6 @@ pub(crate) mod test {
         // Verify we can't start a new job before the old is finished.
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
-        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let close_id = ReconciliationId(0);
@@ -6336,8 +6013,11 @@ pub(crate) mod test {
         ds.force_active();
 
         // Mark client 1 as faulted
-        ds.clients[ClientId::new(1)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.fault_client(
+            ClientId::new(1),
+            &UpstairsState::Active,
+            ClientFaultReason::RequestedFault,
+        );
 
         // Create a write, enqueue it on both the downstairs
         // and the guest work queues.
@@ -6387,11 +6067,14 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
 
-        // Mark client 1 as faulted
-        ds.clients[ClientId::new(1)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
-        ds.clients[ClientId::new(2)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        // Mark clients 1 and 2 as faulted
+        for cid in [ClientId::new(1), ClientId::new(2)] {
+            ds.fault_client(
+                cid,
+                &UpstairsState::Active,
+                ClientFaultReason::RequestedFault,
+            );
+        }
 
         // Create a write, enqueue it on both the downstairs
         // and the guest work queues.
@@ -6429,8 +6112,11 @@ pub(crate) mod test {
         // will result in an error back to the guest.
         let mut ds = Downstairs::test_default();
         ds.force_active();
-        ds.clients[ClientId::new(2)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.fault_client(
+            ClientId::new(2),
+            &UpstairsState::Active,
+            ClientFaultReason::RequestedFault,
+        );
 
         // Create a write, enqueue it on both the downstairs
         // and the guest work queues.
@@ -6470,8 +6156,11 @@ pub(crate) mod test {
         // from acking back OK for a flush to the guest.
         let mut ds = Downstairs::test_default();
         ds.force_active();
-        ds.clients[ClientId::new(1)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.fault_client(
+            ClientId::new(1),
+            &UpstairsState::Active,
+            ClientFaultReason::RequestedFault,
+        );
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
@@ -6504,10 +6193,13 @@ pub(crate) mod test {
         // back to the guest.
         let mut ds = Downstairs::test_default();
         ds.force_active();
-        ds.clients[ClientId::new(1)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
-        ds.clients[ClientId::new(2)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        for cid in [ClientId::new(1), ClientId::new(2)] {
+            ds.fault_client(
+                cid,
+                &UpstairsState::Active,
+                ClientFaultReason::RequestedFault,
+            );
+        }
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
@@ -6529,8 +6221,11 @@ pub(crate) mod test {
         // error back to the guest.
         let mut ds = Downstairs::test_default();
         ds.force_active();
-        ds.clients[ClientId::new(0)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.fault_client(
+            ClientId::new(0),
+            &UpstairsState::Active,
+            ClientFaultReason::RequestedFault,
+        );
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
@@ -6583,7 +6278,7 @@ pub(crate) mod test {
             None,
         ));
         // client 0 is failed, the others should be okay still
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
@@ -6595,8 +6290,8 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None,
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // Three failures, But since this is a write we already have marked
@@ -6609,9 +6304,9 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None,
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), STOP_IO_ERROR,);
 
         // Verify that this work should have been fast-acked
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
@@ -6642,7 +6337,7 @@ pub(crate) mod test {
             None
         ));
         // client 0 should be marked failed.
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
 
         let ok_response = || Ok(Default::default());
         // Process the good operation for client 1
@@ -6662,7 +6357,7 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
@@ -6771,7 +6466,7 @@ pub(crate) mod test {
             None,
         ));
         // client 0 is failed, the others should be okay still
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
@@ -6783,8 +6478,8 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         let ok_response = Ok(Default::default());
@@ -6796,8 +6491,8 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_IO_ERROR,);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // Verify we should have fast-ackd this work
@@ -6876,7 +6571,7 @@ pub(crate) mod test {
 
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // A faulted write won't change skipped job count.
@@ -7018,7 +6713,7 @@ pub(crate) mod test {
 
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // Verify the read switched from InProgress to Skipped
@@ -7083,7 +6778,7 @@ pub(crate) mod test {
 
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_IO_ERROR,);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         // The write was fast-acked, and the read is still going
@@ -7193,7 +6888,7 @@ pub(crate) mod test {
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), STOP_IO_ERROR,);
 
         // Verify all IOs are done
         for cid in ClientId::iter() {
@@ -7302,7 +6997,7 @@ pub(crate) mod test {
         // Verify client states
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), STOP_IO_ERROR,);
 
         // Verify all IOs are done
         for cid in ClientId::iter() {
@@ -7340,8 +7035,11 @@ pub(crate) mod test {
         // downstairs has failed. One write, one read, and one flush.
         let mut ds = Downstairs::test_default();
         ds.force_active();
-        ds.clients[ClientId::new(0)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.fault_client(
+            ClientId::new(0),
+            &UpstairsState::Active,
+            ClientFaultReason::RequestedFault,
+        );
 
         // Create a write
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
@@ -7452,10 +7150,13 @@ pub(crate) mod test {
         // one downstairs.
         let mut ds = Downstairs::test_default();
         ds.force_active();
-        ds.clients[ClientId::new(0)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
-        ds.clients[ClientId::new(2)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        for cid in [ClientId::new(0), ClientId::new(2)] {
+            ds.fault_client(
+                cid,
+                &UpstairsState::Active,
+                ClientFaultReason::RequestedFault,
+            );
+        }
 
         // Create a write
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
@@ -7548,9 +7249,10 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
         for cid in ClientId::iter() {
-            ds.clients[cid].checked_state_transition(
+            ds.fault_client(
+                cid,
                 &UpstairsState::Active,
-                DsState::Faulted,
+                ClientFaultReason::RequestedFault,
             );
         }
 
@@ -7582,9 +7284,10 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
         for cid in ClientId::iter() {
-            ds.clients[cid].checked_state_transition(
+            ds.fault_client(
+                cid,
                 &UpstairsState::Active,
-                DsState::Faulted,
+                ClientFaultReason::RequestedFault,
             );
         }
 
@@ -7614,9 +7317,10 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
         for cid in ClientId::iter() {
-            ds.clients[cid].checked_state_transition(
+            ds.fault_client(
+                cid,
                 &UpstairsState::Active,
-                DsState::Faulted,
+                ClientFaultReason::RequestedFault,
             );
         }
 
@@ -7644,9 +7348,10 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
         for cid in ClientId::iter() {
-            ds.clients[cid].checked_state_transition(
+            ds.fault_client(
+                cid,
                 &UpstairsState::Active,
-                DsState::Faulted,
+                ClientFaultReason::RequestedFault,
             );
         }
 
@@ -7697,9 +7402,10 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
         for cid in ClientId::iter() {
-            ds.clients[cid].checked_state_transition(
+            ds.fault_client(
+                cid,
                 &UpstairsState::Active,
-                DsState::Faulted,
+                ClientFaultReason::RequestedFault,
             );
         }
 
@@ -8216,10 +7922,37 @@ pub(crate) mod test {
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
     }
 
+    // Test function that will return a LiveRepairData struct populated with
+    // data you provide for it.
+    fn create_live_repair_data(
+        extent_count: u32,
+        repair_ids: ExtentRepairIDs,
+        eid: ExtentId,
+    ) -> Option<LiveRepairData> {
+        let state = LiveRepairState::Closing {
+            close_job: PendingJob::new(repair_ids.close_id),
+            repair_job: PendingJob::new(repair_ids.repair_id),
+            reopen_job: PendingJob::new(repair_ids.reopen_id),
+            noop_job: PendingJob::new(repair_ids.noop_id),
+        };
+        Some(LiveRepairData {
+            id: Uuid::new_v4(),
+            extent_count: extent_count,
+            repair_downstairs: vec![ClientId::new(1)],
+            source_downstairs: ClientId::new(0),
+            aborting_repair: false,
+            active_extent: eid,
+            min_id: repair_ids.close_id,
+            repair_job_ids: BTreeMap::new(),
+            state,
+        })
+    }
+
     #[test]
     fn test_live_repair_enqueue_reopen() {
         // Make sure the create_and_enqueue_reopen_io() function does
         // what we expect it to do
+
         let mut ds = Downstairs::repair_test_one_repair();
 
         let eid = ExtentId(0);
@@ -8227,6 +7960,12 @@ pub(crate) mod test {
         // Upstairs "guest" work IDs.
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
+
+        ds.repair = create_live_repair_data(
+            ds.ddef.unwrap().extent_count(),
+            repair_ids,
+            eid,
+        );
 
         // deps for our reopen job
         deps.push(repair_ids.close_id);
@@ -8274,6 +8013,12 @@ pub(crate) mod test {
         // Upstairs "guest" work IDs.
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
+
+        ds.repair = create_live_repair_data(
+            ds.ddef.unwrap().extent_count(),
+            repair_ids,
+            eid,
+        );
 
         deps.push(repair_ids.close_id);
         deps.push(repair_ids.repair_id);
@@ -8339,6 +8084,12 @@ pub(crate) mod test {
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 
+        ds.repair = create_live_repair_data(
+            ds.ddef.unwrap().extent_count(),
+            repair_ids,
+            eid,
+        );
+
         deps.push(repair_ids.repair_id);
         deps.push(repair_ids.noop_id);
 
@@ -8400,6 +8151,12 @@ pub(crate) mod test {
         // Reserved work IDs.
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
+
+        ds.repair = create_live_repair_data(
+            ds.ddef.unwrap().extent_count(),
+            repair_ids,
+            eid,
+        );
 
         deps.push(repair_ids.repair_id);
         deps.push(repair_ids.noop_id);
@@ -9619,17 +9376,7 @@ pub(crate) mod test {
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
-        ds.skip_all_jobs(to_repair);
-        ds.clients[to_repair]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
-            DsState::LiveRepairReady,
-        );
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
-            DsState::LiveRepair,
-        );
+        move_to_live_repair(&mut ds, to_repair);
 
         let next_id = ds.peek_next_id().0;
         ds.repair = Some(LiveRepairData {
@@ -9674,23 +9421,19 @@ pub(crate) mod test {
         // New jobs will go -> Skipped for the downstairs in repair.
         submit_three_ios(&mut ds);
 
-        // Good downstairs don't need changes
-        assert!(!ds.clients[ClientId::new(0)].dependencies_need_cleanup());
-        assert!(!ds.clients[ClientId::new(2)].dependencies_need_cleanup());
+        // Submit a flush as well.
+        let flush_id = ds.submit_flush(None, None, None);
 
-        // LiveRepair downstairs might need a change
-        assert!(ds.clients[ClientId::new(1)].dependencies_need_cleanup());
-
-        // For the three latest jobs, they should be New as they are IOs that
+        // For the four latest jobs, they should be New as they are IOs that
         // are on an extent we "already repaired".
-        for job_id in (1006..1009).map(JobId) {
+        for job_id in (1006..1010).map(JobId) {
             let job = ds.ds_active.get(&job_id).unwrap();
             assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
             assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
             assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
         }
 
-        // Walk the three final jobs, verify that the dependencies will be
+        // Walk the four final jobs, verify that the dependencies will be
         // updated for our downstairs under repair, but will still include
         // the jobs that came after the repair.
         let job = ds.ds_active.get(&JobId(1006)).unwrap();
@@ -9716,6 +9459,48 @@ pub(crate) mod test {
             ds.get_pruned_deps(JobId(1008), ClientId::new(1)),
             [JobId(1007)]
         );
+
+        // For the flush, verify that the extent limit is cleared on clients
+        // that are not under repair, and that it is present for clients
+        // that are being repaired.
+        let job = ds.ds_active.get(&flush_id).unwrap();
+        let ioop = ds.clients[ClientId::new(0)].prune_deps(
+            flush_id,
+            job.work.clone(),
+            ds.repair.as_ref().map(|r| r.min_id),
+        );
+        match ioop {
+            IOop::Flush {
+                dependencies,
+                extent_limit,
+                ..
+            } => {
+                assert_eq!(dependencies, &[JobId(1008)]);
+                assert!(extent_limit.is_none());
+            }
+            _ => {
+                panic!("Wrong job type");
+            }
+        }
+
+        let ioop = ds.clients[ClientId::new(1)].prune_deps(
+            flush_id,
+            job.work.clone(),
+            ds.repair.as_ref().map(|r| r.min_id),
+        );
+        match ioop {
+            IOop::Flush {
+                dependencies,
+                extent_limit,
+                ..
+            } => {
+                assert_eq!(dependencies, &[JobId(1008)]);
+                assert!(extent_limit.is_some());
+            }
+            _ => {
+                panic!("Wrong job type");
+            }
+        }
     }
 
     #[test]
@@ -9786,17 +9571,7 @@ pub(crate) mod test {
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
-        ds.skip_all_jobs(to_repair);
-        ds.clients[to_repair]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
-            DsState::LiveRepairReady,
-        );
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
-            DsState::LiveRepair,
-        );
+        move_to_live_repair(&mut ds, to_repair);
 
         let next_id = ds.peek_next_id().0;
 
@@ -9940,13 +9715,7 @@ pub(crate) mod test {
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
-        ds.skip_all_jobs(to_repair);
-        ds.clients[to_repair]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
-        ds.clients[to_repair].checked_state_transition(
-            &UpstairsState::Active,
-            DsState::LiveRepairReady,
-        );
+        to_live_repair_ready(&mut ds, to_repair);
 
         // Start the repair normally. This enqueues the close & reopen jobs, and
         // reserves Job IDs for the repair/noop

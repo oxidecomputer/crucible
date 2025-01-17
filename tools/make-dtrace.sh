@@ -10,6 +10,7 @@ rm -f out/crucible-dtrace.tar 2> /dev/null
 
 mkdir -p out
 
+
 echo "$(date) Create DTrace archive on $(hostname)" > /tmp/dtrace-info.txt
 echo "git log -1:" >> dtrace-info.txt
 git log -1 >> dtrace-info.txt
@@ -27,6 +28,8 @@ tar cvf ../../out/crucible-dtrace.tar \
     get-ds-state.sh \
     get-lr-state.d \
     get-lr-state.sh \
+    get-up-state.d \
+    get-up-state.sh \
     perf-downstairs-os.d \
     perf-downstairs-three.d \
     perf-downstairs-tick.d \
@@ -42,6 +45,7 @@ tar cvf ../../out/crucible-dtrace.tar \
     sled_upstairs_info.d \
     trace-vol.d \
     tracegw.d \
+    up-info.d \
     upstairs_action.d \
     upstairs_count.d \
     upstairs_info.d \

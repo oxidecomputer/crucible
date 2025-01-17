@@ -133,9 +133,6 @@ pub enum CrucibleError {
     #[error("Repair stream error {0}")]
     RepairStreamError(String),
 
-    #[error("Generation number is too low: {0}")]
-    GenerationNumberTooLow(String),
-
     #[error("Active with different generation number")]
     GenerationNumberInvalid,
 
@@ -165,6 +162,9 @@ pub enum CrucibleError {
 
     #[error("Incompatible RegionDefinition {0}")]
     RegionIncompatible(String),
+
+    #[error("Negotiation error: {0}")]
+    NegotiationError(NegotiationError),
 }
 
 impl From<std::io::Error> for CrucibleError {
@@ -195,6 +195,61 @@ impl<T> From<std::sync::mpsc::SendError<T>> for CrucibleError {
     fn from(e: std::sync::mpsc::SendError<T>) -> Self {
         CrucibleError::GenericError(format!("{:?}", e))
     }
+}
+
+impl From<NegotiationError> for CrucibleError {
+    fn from(value: NegotiationError) -> Self {
+        CrucibleError::NegotiationError(value)
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(
+    thiserror::Error,
+    Debug,
+    PartialEq,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+pub enum NegotiationError {
+    #[error("Message received out of order")]
+    OutOfOrder,
+
+    #[error("Generation 0 is illegal")]
+    GenerationZeroIsIllegal,
+
+    #[error(
+        "Generation number is too low: requested {requested}, found {actual}"
+    )]
+    GenerationNumberTooLow { requested: u64, actual: u64 },
+
+    #[error("Incompatible message version: wanted {expected}, got {actual}")]
+    IncompatibleVersion { expected: u32, actual: u32 },
+
+    #[error(
+        "Incompatible encryption settings: wanted {expected}, got {actual}"
+    )]
+    EncryptionMismatch { expected: bool, actual: bool },
+
+    #[error(
+        "Incompatible read-only settings: wanted {expected}, got {actual}"
+    )]
+    ReadOnlyMismatch { expected: bool, actual: bool },
+
+    #[error("Incompatible upstairs ID: wanted {expected}, got {actual}")]
+    UpstairsIdMismatch {
+        expected: uuid::Uuid,
+        actual: uuid::Uuid,
+    },
+
+    #[error("Incompatible session ID: wanted {expected}, got {actual}")]
+    SessionIdMismatch {
+        expected: uuid::Uuid,
+        actual: uuid::Uuid,
+    },
 }
 
 #[macro_export]
@@ -394,7 +449,6 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::DecryptionError
             | CrucibleError::Disconnect
             | CrucibleError::EncryptionError(_)
-            | CrucibleError::GenerationNumberTooLow(_)
             | CrucibleError::GenerationNumberInvalid
             | CrucibleError::GenericError(_)
             | CrucibleError::HashMismatch
@@ -417,7 +471,8 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::MissingContextSlot(..)
             | CrucibleError::BadMetadata(..)
             | CrucibleError::BadContextSlot(..)
-            | CrucibleError::MissingBlockContext => {
+            | CrucibleError::MissingBlockContext
+            | CrucibleError::NegotiationError(..) => {
                 dropshot::HttpError::for_internal_error(e.to_string())
             }
         }

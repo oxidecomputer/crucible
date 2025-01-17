@@ -59,6 +59,18 @@ crucible_upstairs*:::gw-write-unwritten-done
     @write_unwritten_done = count();
 }
 
+crucible_upstairs*:::gw-barrier-start
+/pid == $1/
+{
+    @barrier_start = count();
+}
+
+crucible_upstairs*:::gw-barrier-done
+/pid == $1/
+{
+    @barrier_done = count();
+}
+
 /*
  * Every second, check and see if we have printed enough that it is
  * time to print the header again
@@ -66,17 +78,18 @@ crucible_upstairs*:::gw-write-unwritten-done
 tick-1s
 /show > 20/
 {
-    printf("%4s %4s %4s %4s %5s %5s %4s %4s",
-        "F>", "F<", "W>", "W<", "R>", "R<", "WU>", "WU<");
+    printf("%4s %4s %4s %4s %5s %5s %4s %4s %4s %4s",
+        "F>", "F<", "W>", "W<", "R>", "R<", "WU>", "WU<", "B>", "B<");
     printf("\n");
     show = 0;
 }
 
 tick-1s
 {
-    printa("%@4u %@4u %@4u %@4u %@5u %@5u %@4u %@4u",
+    printa("%@4u %@4u %@4u %@4u %@5u %@5u %@4u %@4u %@4u %@4u",
         @flush_start, @flush_done, @write_start, @write_done,
-        @read_start, @read_done, @write_unwritten_start, @write_unwritten_done
+        @read_start, @read_done, @write_unwritten_start, @write_unwritten_done,
+        @barrier_start, @barrier_done
     );
     printf("\n");
     clear(@flush_start);
@@ -87,5 +100,7 @@ tick-1s
     clear(@read_done);
     clear(@write_unwritten_start);
     clear(@write_unwritten_done);
+    clear(@barrier_start);
+    clear(@barrier_done);
     show = show + 1;
 }

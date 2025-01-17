@@ -15,7 +15,7 @@ pub struct Property<'a> {
 }
 
 impl<'a> Property<'a> {
-    pub(crate) fn new(scf: &'a Scf) -> Result<Property> {
+    pub(crate) fn new(scf: &'a Scf) -> Result<Property<'a>> {
         if let Some(property) =
             NonNull::new(unsafe { scf_property_create(scf.handle.as_ptr()) })
         {
