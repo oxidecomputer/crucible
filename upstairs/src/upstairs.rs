@@ -599,7 +599,7 @@ impl Upstairs {
         }
 
         // Check whether we need to start live-repair
-        self.on_repair_check();
+        self.check_live_repair_start();
 
         // Check whether we need to mark an offline Downstairs as faulted
         // because too many jobs have piled up.
@@ -886,7 +886,7 @@ impl Upstairs {
     /// any Downstairs from
     /// `DsState::Connecting { state:  NegotiationState::LiveRepairReady, .. }`
     /// back to [DsState::Active] without actually performing any repair.
-    pub(crate) fn on_repair_check(&mut self) {
+    pub(crate) fn check_live_repair_start(&mut self) {
         if !matches!(self.state, UpstairsState::Active) {
             return;
         }
@@ -2128,7 +2128,7 @@ pub(crate) mod test {
         to_live_repair_ready(&mut up, or_ds);
 
         // Assert that the repair started
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
 
         // The first thing that should happen after we start repair_extent
@@ -3413,13 +3413,13 @@ pub(crate) mod test {
 
         // Before we are active, we have no need to repair or check for future
         // repairs.
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(!up.downstairs.live_repair_in_progress());
 
         up.force_active().unwrap();
 
         // No need to repair or check for future repairs here either
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(!up.downstairs.live_repair_in_progress());
 
         // No downstairs should change state.
@@ -3442,7 +3442,7 @@ pub(crate) mod test {
 
         // Force client 1 into LiveRepairReady
         to_live_repair_ready(&mut up, ClientId::new(1));
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some());
@@ -3462,7 +3462,7 @@ pub(crate) mod test {
         up.ds_transition(ClientId::new(1), DsState::LiveRepair);
 
         // Start the live-repair
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
 
         // Pretend that DS 0 faulted then came back through to LiveRepairReady;
@@ -3470,7 +3470,7 @@ pub(crate) mod test {
         // repair_check_deadline to check again in the future.
         to_live_repair_ready(&mut up, ClientId::new(0));
 
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
     }
 
@@ -3485,11 +3485,11 @@ pub(crate) mod test {
         up.force_active().unwrap();
         to_live_repair_ready(&mut up, ClientId::new(1));
 
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
 
         // Checking again is idempotent
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
     }
 
