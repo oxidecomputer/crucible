@@ -1757,11 +1757,11 @@ impl DownstairsClient {
                  * comparison with the other downstairs in this
                  * region set.
                  */
-                let dsr = RegionMetadata {
-                    generation: gen_numbers,
-                    flush_numbers,
-                    dirty: dirty_bits,
-                };
+                let dsr = RegionMetadata::new(
+                    &gen_numbers,
+                    &flush_numbers,
+                    &dirty_bits,
+                );
 
                 if let Some(old_rm) = self.region_metadata.replace(dsr) {
                     warn!(self.log, "new RM replaced this: {:?}", old_rm);

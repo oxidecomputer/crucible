@@ -877,41 +877,29 @@ impl Downstairs {
             .map(|c| c.region_metadata.as_ref().unwrap())
             .enumerate()
         {
-            let mf = rec.flush_numbers.iter().max().unwrap() + 1;
-            if mf > max_flush {
-                max_flush = mf;
+            // We log the first 12 pieces of extent metadata
+            const MAX_LOG: usize = 12;
+            let mut flush_log = Vec::with_capacity(MAX_LOG);
+            let mut gen_log = Vec::with_capacity(MAX_LOG);
+            let mut dirty_log = Vec::with_capacity(MAX_LOG);
+
+            for (i, m) in rec.iter().enumerate() {
+                max_flush = max_flush.max(m.flush + 1);
+                max_gen = max_gen.max(m.gen + 1);
+                if i < MAX_LOG {
+                    flush_log.push(m.flush);
+                    gen_log.push(m.gen);
+                    dirty_log.push(m.dirty);
+                }
             }
-            let mg = rec.generation.iter().max().unwrap() + 1;
-            if mg > max_gen {
-                max_gen = mg;
-            }
-            if rec.flush_numbers.len() > 12 {
-                info!(
-                    self.log,
-                    "[{}]R flush_numbers[0..12]: {:?}",
-                    cid,
-                    rec.flush_numbers[0..12].to_vec()
-                );
-                info!(
-                    self.log,
-                    "[{}]R generation[0..12]: {:?}",
-                    cid,
-                    rec.generation[0..12].to_vec()
-                );
-                info!(
-                    self.log,
-                    "[{}]R dirty[0..12]: {:?}",
-                    cid,
-                    rec.dirty[0..12].to_vec()
-                );
+            let slice = if rec.len() > MAX_LOG {
+                format!("[0..{MAX_LOG}]")
             } else {
-                info!(
-                    self.log,
-                    "[{}]R  flush_numbers: {:?}", cid, rec.flush_numbers
-                );
-                info!(self.log, "[{}]R  generation: {:?}", cid, rec.generation);
-                info!(self.log, "[{}]R  dirty: {:?}", cid, rec.dirty);
-            }
+                "".to_owned()
+            };
+            info!(self.log, "[{cid}]R flush_numbers{slice}: {flush_log:?}",);
+            info!(self.log, "[{cid}]R generation{slice}: {gen_log:?}",);
+            info!(self.log, "[{cid}]R dirty{slice}: {dirty_log:?}",);
         }
 
         info!(self.log, "Max found gen is {}", max_gen);
