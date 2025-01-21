@@ -1280,14 +1280,16 @@ impl DownstairsClient {
         }
     }
 
-    /// Moves from `LiveRepairReady` to `LiveRepair`, a no-op otherwise
+    /// Moves from `LiveRepairReady` to `LiveRepair`
+    ///
+    /// # Panics
+    /// If the state is not `Connecting { state: LiveRepairReady }`
     pub(crate) fn start_live_repair(&mut self, up_state: &UpstairsState) {
         let DsState::Connecting { state, .. } = self.state else {
-            return;
+            panic!("invalid state");
         };
-        if state == NegotiationState::LiveRepairReady {
-            self.checked_state_transition(up_state, DsState::LiveRepair);
-        }
+        assert_eq!(state, NegotiationState::LiveRepairReady);
+        self.checked_state_transition(up_state, DsState::LiveRepair);
     }
 
     /// Continues the negotiation and initial reconciliation process

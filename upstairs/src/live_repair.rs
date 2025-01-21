@@ -1129,7 +1129,7 @@ pub mod repair_test {
                 DsState::Connecting { state, mode },
             );
         }
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.downstairs.last_repair_extent(), Some(ExtentId(0)));
 

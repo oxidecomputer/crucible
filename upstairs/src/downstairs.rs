@@ -989,26 +989,16 @@ impl Downstairs {
 
     /// Tries to start live-repair
     ///
-    /// Returns true on success, false otherwise; the only time it returns
-    /// `false` is if there are no clients in `DsState::Active` to serve as
-    /// sources for live-repair.
-    ///
-    /// # Panics
-    /// If `self.repair.is_some()` (because that means a repair is already in
-    /// progress), or if no clients are in `LiveRepairReady`
-    pub(crate) fn start_live_repair(
+    /// This function is idempotent; it returns without doing anything if
+    /// live-repair either can't be started or is already running.
+    pub(crate) fn check_live_repair_start(
         &mut self,
         up_state: &UpstairsState,
         extent_count: u32,
-    ) -> bool {
-        assert!(self.repair.is_none());
-
-        // Move the upstairs that were LiveRepairReady to LiveRepair
-        //
-        // After this point, we must call `abort_repair` if something goes wrong
-        // to abort the repair on the troublesome clients.
-        for c in self.clients.iter_mut() {
-            c.start_live_repair(up_state);
+    ) {
+        // If we're already doing live-repair, then we can't start live-repair
+        if self.live_repair_in_progress() {
+            return;
         }
 
         // Begin setting up live-repair state
@@ -1016,31 +1006,38 @@ impl Downstairs {
         let mut source_downstairs = None;
         for cid in ClientId::iter() {
             match self.clients[cid].state() {
-                DsState::LiveRepair => {
+                DsState::Connecting {
+                    state: NegotiationState::LiveRepairReady,
+                    ..
+                } => {
                     repair_downstairs.push(cid);
                 }
                 DsState::Active => {
                     source_downstairs = Some(cid);
                 }
-                state => {
-                    warn!(
-                        self.log,
-                        "Unknown repair action for ds:{} in state {}",
-                        cid,
-                        state,
-                    );
-                    // TODO, what other states are okay?
+                _state => {
+                    // ignore Downstairs in irrelevant states
                 }
             }
         }
 
+        // Can't start live-repair if no one is LiveRepairReady
+        if repair_downstairs.is_empty() {
+            return;
+        }
+
+        // Can't start live-repair if we don't have a source downstairs
         let Some(source_downstairs) = source_downstairs else {
-            error!(self.log, "failed to find source downstairs for repair");
-            self.abort_repair(up_state);
-            return false;
+            return;
         };
 
-        assert!(!repair_downstairs.is_empty());
+        // Move the upstairs that were LiveRepairReady to LiveRepair
+        //
+        // After this point, we must call `abort_repair` if something goes wrong
+        // to abort the repair on the troublesome clients.
+        for &cid in &repair_downstairs {
+            self.clients[cid].start_live_repair(up_state);
+        }
 
         // Submit the initial repair jobs, which kicks everything off
         self.begin_repair_for(
@@ -1054,15 +1051,12 @@ impl Downstairs {
 
         info!(
             self.log,
-            "starting repair {}",
+            "started repair {}",
             self.repair.as_ref().unwrap().id
         );
 
         let repair = self.repair.as_ref().unwrap();
         self.notify_live_repair_start(repair);
-
-        // We'll be back in on_live_repair once the initial job finishes
-        true
     }
 
     /// Checks whether live-repair can continue
@@ -7925,7 +7919,7 @@ pub(crate) mod test {
         };
         Some(LiveRepairData {
             id: Uuid::new_v4(),
-            extent_count: extent_count,
+            extent_count,
             repair_downstairs: vec![ClientId::new(1)],
             source_downstairs: ClientId::new(0),
             aborting_repair: false,
@@ -9707,7 +9701,8 @@ pub(crate) mod test {
 
         // Start the repair normally. This enqueues the close & reopen jobs, and
         // reserves Job IDs for the repair/noop
-        assert!(ds.start_live_repair(&UpstairsState::Active, 3));
+        ds.check_live_repair_start(&UpstairsState::Active, 3);
+        assert!(ds.live_repair_in_progress());
 
         // Submit a write.
         ds.submit_test_write_block(ExtentId(0), BlockOffset(1), false);
