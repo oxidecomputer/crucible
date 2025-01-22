@@ -44,7 +44,7 @@ inline string short_state[string ss] =
     ss == "reconcile" ? "REC" :
     ss == "wait_quorum" ? "WQ" :
     ss == "wait_active" ? "WA" :
-    ss == "replaced" ? "RPL" :
+    ss == "connecting" ? "CON" :
     ss;
 
 /*

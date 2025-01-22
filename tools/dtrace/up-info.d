@@ -41,7 +41,6 @@ tick-1s
 inline string short_state[string ss] =
     ss == "active" ? "ACT" :
     ss == "new" ? "NEW" :
-    ss == "replaced" ? "RPL" :
     ss == "live_repair_ready" ? "LRR" :
     ss == "live_repair" ? "LR" :
     ss == "faulted" ? "FLT" :
@@ -50,6 +49,7 @@ inline string short_state[string ss] =
     ss == "wait_quorum" ? "WQ" :
     ss == "wait_active" ? "WA" :
     ss == "replaced" ? "RPL" :
+    ss == "connecting" ? "CON" :
     ss;
 
 /*
