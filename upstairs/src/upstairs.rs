@@ -567,13 +567,26 @@ impl Upstairs {
                 self.on_client_message(m);
             }
             UpstairsAction::FlushCheck => {
-                self.counters.action_flush_check += 1;
-                cdt::up__action_flush_check!(|| (self
-                    .counters
-                    .action_flush_check));
-                if self.need_flush {
-                    let io_guard = self.try_acquire_io(0);
-                    self.submit_flush(None, None, io_guard);
+                if !has_jobs {
+                    self.counters.action_flush_check += 1;
+                    cdt::up__action_flush_check!(|| (self
+                        .counters
+                        .action_flush_check));
+                    if self.need_flush {
+                        let io_guard = self.try_acquire_io(0);
+                        self.submit_flush(None, None, io_guard);
+                    }
+                } else {
+                    // The flush timer is reset after every event, so getting
+                    // here indicates that we didn't see _any_ events for 500 ms
+                    // despite jobs being pending.
+                    //
+                    // This is surprising, and may indicate network issues or
+                    // other problems.
+                    warn!(
+                        self.log,
+                        "flush check fired despite having jobs; resetting it"
+                    );
                 }
                 self.flush_deadline = Instant::now() + self.flush_interval;
             }
