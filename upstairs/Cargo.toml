@@ -28,6 +28,7 @@ crucible-common.workspace = true
 crucible-client-types.workspace = true
 crucible-protocol.workspace = true
 dropshot.workspace = true
+fakedata_generator.workspace = true 
 futures.workspace = true
 futures-core.workspace = true
 itertools.workspace = true

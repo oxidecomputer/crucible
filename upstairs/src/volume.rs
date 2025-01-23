@@ -1956,8 +1956,10 @@ mod test {
     use super::*;
     use std::fs::File;
     use std::io::Write;
+    use std::net::{Ipv4Addr, SocketAddrV4};
 
     use base64::{engine, Engine};
+    use fakedata_generator::gen_ipv4;
     use rand::prelude::*;
     use slog::{o, Drain, Logger};
     use tempfile::tempdir;
@@ -3492,12 +3494,13 @@ mod test {
         let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
         let key_string = engine::general_purpose::STANDARD.encode(key_bytes);
 
+        let ds_ip = gen_ipv4();
         CrucibleOpts {
             id: vol_id,
             target: vec![
-                "127.0.0.1:5555".parse().unwrap(),
-                "127.0.0.1:6666".parse().unwrap(),
-                "127.0.0.1:7777".parse().unwrap(),
+                format!("{}:1111", ds_ip).parse().unwrap(),
+                format!("{}:2222", ds_ip).parse().unwrap(),
+                format!("{}:3333", ds_ip).parse().unwrap(),
             ],
             lossy: false,
             flush_timeout: None,
