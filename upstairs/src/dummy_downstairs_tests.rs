@@ -2924,7 +2924,6 @@ async fn test_ro_activate_from_list(activate: [bool; 3]) {
         }));
     }
 
-
     // Move negotiation along for downstairs we want to activate.
     for (i, ds) in [&mut ds1, &mut ds2, &mut ds3].iter_mut().enumerate() {
         if activate[i] {
@@ -2962,10 +2961,10 @@ async fn test_ro_activate_from_list(activate: [bool; 3]) {
     });
 
     // Ack the read on the downstairs that are active.
-    if activate[0] { 
+    if activate[0] {
         harness.ds1().ack_read().await;
     }
-    if activate[1] { 
+    if activate[1] {
         harness.ds2.ack_read().await;
     }
     if activate[2] {
