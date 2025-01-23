@@ -1956,7 +1956,6 @@ mod test {
     use super::*;
     use std::fs::File;
     use std::io::Write;
-    use std::net::{Ipv4Addr, SocketAddrV4};
 
     use base64::{engine, Engine};
     use fakedata_generator::gen_ipv4;
