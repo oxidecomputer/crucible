@@ -332,7 +332,6 @@ mod cdt {
     fn up__action_leak_check(_: u64) {}
     fn up__action_flush_check(_: u64) {}
     fn up__action_stat_check(_: u64) {}
-    fn up__action_repair_check(_: u64) {}
     fn up__action_control_check(_: u64) {}
     fn up__action_noop(_: u64) {}
     fn volume__read__start(_: u32, _: Uuid) {}

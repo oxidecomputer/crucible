@@ -20,7 +20,7 @@ tick-1s
 {
     printf("%9s %9s %9s", "APPLY", "DOWN_S", "GUEST");
     printf(" %9s %9s %9s", "DFR_BLK", "DFR_MSG", "LEAK_CHK");
-    printf(" %9s %9s %9s", "FLUSH_CHK", "STAT_CHK", "REPR_CHK");
+    printf(" %9s %9s", "FLUSH_CHK", "STAT_CHK");
     printf(" %9s %9s", "CTRL_CHK", "NOOP");
     printf("\n");
     show = 0;
@@ -37,7 +37,6 @@ crucible_upstairs*:::up-status
     printf(" %9s", json(copyinstr(arg1), "ok.up_counters.action_leak_check"));
     printf(" %9s", json(copyinstr(arg1), "ok.up_counters.action_flush_check"));
     printf(" %9s", json(copyinstr(arg1), "ok.up_counters.action_stat_check"));
-    printf(" %9s", json(copyinstr(arg1), "ok.up_counters.action_repair_check"));
     printf(" %9s", json(copyinstr(arg1), "ok.up_counters.action_control_check"));
     printf(" %9s", json(copyinstr(arg1), "ok.up_counters.action_noop"));
     printf("\n");
