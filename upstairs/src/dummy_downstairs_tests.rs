@@ -2885,8 +2885,7 @@ async fn test_no_send_offline() {
     }
 }
 
-#[tokio::test]
-async fn test_ro_activate_with_two() {
+async fn test_ro_activate_from_list(activate: [bool; 3]) {
     let log = csl();
 
     let cfg = DownstairsConfig {
@@ -2901,7 +2900,7 @@ async fn test_ro_activate_with_two() {
 
     let mut ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
     let mut ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
-    let ds3 = cfg.clone().start(log.new(o!("downstairs" => 3))).await;
+    let mut ds3 = cfg.clone().start(log.new(o!("downstairs" => 3))).await;
 
     let (g, io) = Guest::new(Some(log.clone()));
     let guest = Arc::new(g);
@@ -2925,9 +2924,14 @@ async fn test_ro_activate_with_two() {
         }));
     }
 
-    for ds in [&mut ds1, &mut ds2] {
-        ds.negotiate_start().await;
-        ds.negotiate_step_extent_versions_please().await;
+
+    // Move negotiation along for downstairs we want to activate.
+    for (i, ds) in [&mut ds1, &mut ds2, &mut ds3].iter_mut().enumerate() {
+        if activate[i] {
+            info!(log, "Activate downstairs {i}");
+            ds.negotiate_start().await;
+            ds.negotiate_step_extent_versions_please().await;
+        }
     }
 
     for _ in 0..10 {
@@ -2957,11 +2961,34 @@ async fn test_ro_activate_with_two() {
         guest.read(BlockIndex(0), &mut buffer).await.unwrap();
     });
 
-    // Ack the read on the two downstairs that are active.
-    harness.ds1().ack_read().await;
-    harness.ds2.ack_read().await;
+    // Ack the read on the downstairs that are active.
+    if activate[0] { 
+        harness.ds1().ack_read().await;
+    }
+    if activate[1] { 
+        harness.ds2.ack_read().await;
+    }
+    if activate[2] {
+        harness.ds3.ack_read().await;
+    }
 
     h.await.unwrap(); // after > 1x response, the read finishes
+}
+
+#[tokio::test]
+async fn test_ro_activate_with_one() {
+    // Verify ro upstairs can activate with just one downstairs ready.
+    test_ro_activate_from_list([true, false, false]).await;
+    test_ro_activate_from_list([false, true, false]).await;
+    test_ro_activate_from_list([false, false, true]).await;
+}
+
+#[tokio::test]
+async fn test_ro_activate_with_two() {
+    // Verify ro upstairs will activate with only two downstairs ready.
+    test_ro_activate_from_list([true, true, false]).await;
+    test_ro_activate_from_list([true, false, true]).await;
+    test_ro_activate_from_list([false, true, true]).await;
 }
 
 /// Test that barrier operations are sent periodically
