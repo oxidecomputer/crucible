@@ -1362,12 +1362,12 @@ impl DownstairsClient {
          * For WaitActive, it means this downstairs never was "Active" and we
          * have to go through the full compare of this downstairs with other
          * downstairs and make sure they are consistent.  To do that, we will
-         * request extent versions and skip over NegotiationState::GetLastFlush.
+         * request extent versions, instead of setting the last flush.
          *
          * For Faulted, we don't know the condition of the data on the
          * Downstairs, so we transition this downstairs to LiveRepairReady.  We
          * also request extent versions and will have to repair this
-         * downstairs, skipping over NegotiationState::GetLastFlush as well.
+         * downstairs, skipping over LastFlush as well.
          *
          * Replay (offline only)
          * ------------------------------
