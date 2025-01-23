@@ -805,14 +805,14 @@ impl Downstairs {
 
         info!(
             self.log,
-            "[{client_id}] client re-new {} jobs since flush {lf}",
+            "[{client_id}] client re-new {} jobs since flush {lf:?}",
             self.ds_active.len(),
         );
 
         let mut to_send = vec![];
         self.ds_active.for_each(|ds_id, job| {
             // We don't need to send anything before our last good flush
-            if *ds_id <= lf {
+            if lf.is_some_and(|lf| *ds_id <= lf) {
                 assert_eq!(IOState::Done, job.state[client_id]);
                 return;
             }
@@ -824,7 +824,7 @@ impl Downstairs {
         let count = to_send.len();
         info!(
             self.log,
-            "[{client_id}] Replayed {count} jobs since flush: {lf}"
+            "[{client_id}] Replayed {count} jobs since flush: {lf:?}"
         );
         for (ds_id, io) in to_send {
             self.send(ds_id, io, client_id);
@@ -2932,7 +2932,7 @@ impl Downstairs {
         self.io_state_count().show_all();
         print!("Last Flush: ");
         for c in self.clients.iter() {
-            print!("{} ", c.last_flush());
+            print!("{:?} ", c.last_flush());
         }
         println!();
     }
@@ -4562,9 +4562,9 @@ pub(crate) mod test {
 
         // Make sure downstairs 0 and 1 update their last flush id and
         // that downstairs 2 does not.
-        assert_eq!(ds.clients[ClientId::new(0)].last_flush, flush_id);
-        assert_eq!(ds.clients[ClientId::new(1)].last_flush, flush_id);
-        assert_eq!(ds.clients[ClientId::new(2)].last_flush, JobId(0));
+        assert_eq!(ds.clients[ClientId::new(0)].last_flush(), Some(flush_id));
+        assert_eq!(ds.clients[ClientId::new(1)].last_flush(), Some(flush_id));
+        assert_eq!(ds.clients[ClientId::new(2)].last_flush(), None);
 
         // Make sure all work is still on the active side
         assert!(ds.retired_ids.is_empty());
@@ -4600,7 +4600,7 @@ pub(crate) mod test {
         // All three jobs should now move to completed
         assert_eq!(ds.retired_ids.len(), 3);
         // Downstairs 2 should update the last flush it just did.
-        assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(2)].last_flush(), Some(flush_id));
     }
 
     #[test]
@@ -4991,9 +4991,9 @@ pub(crate) mod test {
         assert!(ds.retired_ids.is_empty());
 
         // Verify who has updated their last flush.
-        assert_eq!(ds.clients[ClientId::new(0)].last_flush, flush_id);
-        assert_eq!(ds.clients[ClientId::new(1)].last_flush, JobId(0));
-        assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(0)].last_flush(), Some(flush_id));
+        assert_eq!(ds.clients[ClientId::new(1)].last_flush(), None);
+        assert_eq!(ds.clients[ClientId::new(2)].last_flush(), Some(flush_id));
 
         // Now, complete the writes
         assert!(!ds.process_ds_completion(
@@ -5027,7 +5027,7 @@ pub(crate) mod test {
         assert_eq!(ds.retired_ids.len(), 3);
 
         // downstairs 1 should now have that flush
-        assert_eq!(ds.clients[ClientId::new(1)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(1)].last_flush(), Some(flush_id));
     }
 
     #[test]

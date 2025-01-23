@@ -1656,7 +1656,6 @@ impl Upstairs {
             | Message::ReadOnlyMismatch { .. }
             | Message::YouAreNowActive { .. }
             | Message::RegionInfo { .. }
-            | Message::LastFlushAck { .. }
             | Message::ExtentVersions { .. } => {
                 // negotiation and initial reconciliation
                 let r = self.downstairs.clients[client_id]
