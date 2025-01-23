@@ -94,6 +94,13 @@ pub mod repair_test {
         },
     };
 
+    const STOP_IO_ERROR: DsState =
+        DsState::Stopping(ClientStopReason::Fault(ClientFaultReason::IOError));
+
+    const STOP_FAILED_LR: DsState = DsState::Stopping(ClientStopReason::Fault(
+        ClientFaultReason::FailedLiveRepair,
+    ));
+
     /// Test function to send fake replies for the given job, completing it
     ///
     /// Fake replies are applied through `Upstairs::apply`, so the reply may
@@ -486,7 +493,7 @@ pub mod repair_test {
         }
 
         // process_ds_completion should force the downstairs to fail
-        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
 
         info!(up.log, "repair job should have got here, move it forward");
         // The repair (NoOp) job should have shown up.  Move it forward.
@@ -581,8 +588,10 @@ pub mod repair_test {
 
         // Because the repair has failed, the extent that was under
         // repair should also now be faulted.
-        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
-        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
+        if err_ds != or_ds {
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
+        }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();
         match &job.work {
@@ -658,8 +667,10 @@ pub mod repair_test {
         // process_ds_completion should force both the downstairs that
         // reported the error, and the downstairs that is under repair to
         // fail.
-        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
-        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
+        if err_ds != or_ds {
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
+        }
 
         // When we completed the repair jobs, the repair_extent should
         // have gone ahead and issued the NoOp that should be issued next.
@@ -727,8 +738,10 @@ pub mod repair_test {
             assert_eq!(job.state_count().skipped, 1);
         }
 
-        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
-        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
+        if err_ds != or_ds {
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
+        }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();
         match &job.work {
@@ -840,8 +853,10 @@ pub mod repair_test {
             assert_eq!(job.state_count().skipped, 1);
         }
 
-        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
-        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
+        if err_ds != or_ds {
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
+        }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();
         match &job.work {
@@ -960,8 +975,10 @@ pub mod repair_test {
         assert_eq!(job.state_count().done, 2);
         assert_eq!(job.state_count().skipped, 1);
 
-        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
-        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
+        if err_ds != or_ds {
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
+        }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();
         match &job.work {
@@ -1060,8 +1077,10 @@ pub mod repair_test {
         assert_eq!(job.state_count().done, 2);
         assert_eq!(job.state_count().error, 1);
 
-        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
-        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
+        if err_ds != or_ds {
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
+        }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();
         match &job.work {
@@ -1090,11 +1109,27 @@ pub mod repair_test {
         assert_eq!(up.downstairs.last_repair_extent(), None);
         assert!(up.downstairs.repair().is_none());
 
-        // Start the LiveRepair
-        let client = &mut up.downstairs.clients[ClientId::new(1)];
-        client.checked_state_transition(&up.state, DsState::Faulted);
-        client.checked_state_transition(&up.state, DsState::LiveRepairReady);
-        up.on_repair_check();
+        // Start the LiveRepair, manually walking through states
+        let client = ClientId::new(1);
+        up.downstairs.fault_client(
+            client,
+            &up.state,
+            ClientFaultReason::RequestedFault,
+        );
+        let mode = ConnectionMode::Faulted;
+        for state in [
+            NegotiationState::Start { auto_promote: true },
+            NegotiationState::WaitForPromote,
+            NegotiationState::WaitForRegionInfo,
+            NegotiationState::GetExtentVersions,
+            NegotiationState::LiveRepairReady,
+        ] {
+            up.downstairs.clients[client].checked_state_transition(
+                &up.state,
+                DsState::Connecting { state, mode },
+            );
+        }
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.downstairs.last_repair_extent(), Some(ExtentId(0)));
 

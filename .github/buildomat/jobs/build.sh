@@ -3,7 +3,7 @@
 #: name = "build"
 #: variety = "basic"
 #: target = "helios-2.0"
-#: rust_toolchain = "1.70.0"
+#: rust_toolchain = "1.84.0"
 #: output_rules = [
 #:	"/work/bins/*",
 #:	"/work/scripts/*",

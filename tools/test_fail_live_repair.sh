@@ -53,6 +53,12 @@ for bin in $cds $crucible_test $dsc; do
     fi
 done
 
+# The jq program is required for processing the /info endpoint
+if ! jq --version > /dev/null; then
+    echo "Can't find jq program, required for this test"
+    exit 1
+fi
+
 # Verify there is not a downstairs already running.
 if pgrep -fl -U "$(id -u)" "$cds"; then
     echo "Downstairs already running" >&2
@@ -160,13 +166,7 @@ while [[ $count -le $loops ]]; do
     choice_state="undefined"
     while [[ "$choice_state" != "faulted" ]]; do
         sleep 3
-        if [[ $choice -eq 0 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8}')
-        elif [[ $choice -eq 1 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $10}')
-        else
-            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $12}')
-        fi
+        choice_state=$(curl -s http://127.0.0.1:7890/info | jq -r .ds_state[$choice].type)
     done
 
     if [[ $pstop -eq 0 ]]; then
@@ -180,13 +180,7 @@ while [[ $count -le $loops ]]; do
     choice_state="undefined"
     while [[ "$choice_state" != "live_repair" ]]; do
         sleep 2
-        if [[ $choice -eq 0 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8}')
-        elif [[ $choice -eq 1 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $10}')
-        else
-            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $12}')
-        fi
+        choice_state=$(curl -s http://127.0.0.1:7890/info | jq -r .ds_state[$choice].type)
     done
 
     # Give the live repair between 5 and 10 seconds to start repairing.
@@ -204,13 +198,7 @@ while [[ $count -le $loops ]]; do
     choice_state="undefined"
     while [[ "$choice_state" != "faulted" ]]; do
         sleep 3
-        if [[ $choice -eq 0 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8}')
-        elif [[ $choice -eq 1 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $10}')
-        else
-            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $12}')
-        fi
+        choice_state=$(curl -s http://127.0.0.1:7890/info | jq -r .ds_state[$choice].type)
     done
 
     sleep 2
@@ -223,10 +211,11 @@ while [[ $count -le $loops ]]; do
 
     # Now wait for all downstairs to be active
     echo Now wait for all downstairs to be active | tee -a "$test_log"
-    all_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8","$10","$12}')
-    while [[ "${all_state}" != "active,active,active" ]]; do
+    all_state=$(curl -s http://127.0.0.1:7890/info | jq -r .ds_state[].type | tr '\n' ',')
+    # The trailing comma here is required
+    while [[ "${all_state}" != "active,active,active," ]]; do
         sleep 5
-        all_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8","$10","$12}')
+        all_state=$(curl -s http://127.0.0.1:7890/info | jq -r .ds_state[].type | tr '\n' ',')
     done
 
     echo All downstairs active, now stop IO test and wait for it to finish | tee -a "$test_log"

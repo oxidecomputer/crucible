@@ -12,8 +12,10 @@ use crate::guest::Guest;
 use crate::up_main;
 use crate::BlockIO;
 use crate::Buffer;
+use crate::ConnectionMode;
 use crate::CrucibleError;
 use crate::DsState;
+use crate::NegotiationState;
 use crate::{
     IO_CACHED_MAX_BYTES, IO_CACHED_MAX_JOBS, IO_OUTSTANDING_MAX_BYTES,
     IO_OUTSTANDING_MAX_JOBS,
@@ -213,14 +215,12 @@ impl DownstairsHandle {
 
     pub async fn negotiate_step_last_flush(
         &mut self,
-        last_flush_number: JobId,
+        expected_last_flush: Option<JobId>,
     ) {
         let packet = self.recv().await.unwrap();
-        if let Message::LastFlush { .. } = &packet {
+        if let Message::LastFlush { last_flush_number } = &packet {
+            assert_eq!(*last_flush_number, expected_last_flush);
             info!(self.log, "negotiate packet {:?}", packet);
-
-            self.send(Message::LastFlushAck { last_flush_number })
-                .unwrap();
         } else {
             panic!("wrong packet: {packet:?}, expected LastFlush");
         }
@@ -708,7 +708,7 @@ async fn test_replay_occurs() {
     harness.restart_ds1().await;
 
     harness.ds1().negotiate_start().await;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
+    harness.ds1().negotiate_step_last_flush(None).await;
 
     let mut ds1_message_second_time = None;
 
@@ -1562,7 +1562,13 @@ async fn test_byte_fault_condition() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Faulted,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1633,7 +1639,13 @@ async fn test_byte_fault_condition_offline() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1662,11 +1674,23 @@ async fn test_byte_fault_condition_offline() {
 
         let ds = harness.guest.downstairs_state().await.unwrap();
         if (i + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
-            assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+            assert_eq!(
+                ds[ClientId::new(0)],
+                DsState::Connecting {
+                    mode: ConnectionMode::Offline,
+                    state: NegotiationState::Start { auto_promote: true }
+                }
+            );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
         } else {
-            assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+            assert_eq!(
+                ds[ClientId::new(0)],
+                DsState::Connecting {
+                    mode: ConnectionMode::Faulted,
+                    state: NegotiationState::Start { auto_promote: true }
+                }
+            );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
         }
@@ -1711,7 +1735,13 @@ async fn test_offline_can_deactivate() {
 
     // Check to make sure downstairs 1 is now offline.
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1748,7 +1778,13 @@ async fn test_offline_with_io_can_deactivate() {
 
     // Check to make sure downstairs 1 is now offline.
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1799,9 +1835,15 @@ async fn test_all_offline_with_io_can_deactivate() {
 
     // Check to make sure all downstairs are offline.
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
-    assert_eq!(ds[ClientId::new(1)], DsState::Offline);
-    assert_eq!(ds[ClientId::new(2)], DsState::Offline);
+    for cid in ClientId::iter() {
+        assert_eq!(
+            ds[cid],
+            DsState::Connecting {
+                mode: ConnectionMode::Offline,
+                state: NegotiationState::Start { auto_promote: true }
+            }
+        );
+    }
 
     // We must `spawn` here because `read` will wait for the response to
     // come back before returning
@@ -1898,7 +1940,13 @@ async fn test_job_fault_condition() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Faulted,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1964,7 +2012,13 @@ async fn test_job_fault_condition_offline() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -2007,12 +2061,24 @@ async fn test_job_fault_condition_offline() {
         let ds = harness.guest.downstairs_state().await.unwrap();
         if i + barrier_count < IO_OUTSTANDING_MAX_JOBS {
             // At this point, we should still be offline
-            assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+            assert_eq!(
+                ds[ClientId::new(0)],
+                DsState::Connecting {
+                    mode: ConnectionMode::Offline,
+                    state: NegotiationState::Start { auto_promote: true }
+                }
+            );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
         } else {
             // After ds1 is kicked out, we shouldn't see any more messages
-            assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+            assert_eq!(
+                ds[ClientId::new(0)],
+                DsState::Connecting {
+                    mode: ConnectionMode::Faulted,
+                    state: NegotiationState::Start { auto_promote: true }
+                }
+            );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
         }
@@ -2715,7 +2781,7 @@ async fn test_write_replay() {
     harness.restart_ds1().await;
 
     harness.ds1().negotiate_start().await;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
+    harness.ds1().negotiate_step_last_flush(None).await;
 
     // Ensure that we get the same Write
     // Send a reply, which is the second time this Write operation completes
@@ -2752,7 +2818,13 @@ async fn test_no_send_offline() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
     info!(harness.log, "DS1 is offline");
@@ -2771,7 +2843,7 @@ async fn test_no_send_offline() {
     // Start negotiation
     harness.ds1().negotiate_start().await;
 
-    // Check that a write doesn't make it to DS1
+    // Check that a write doesn't make it to DS1 before replay
     let write_handle = harness.spawn(|guest| async move {
         let mut data = BytesMut::new();
         data.resize(512, 1u8);
@@ -2780,27 +2852,15 @@ async fn test_no_send_offline() {
     harness.ds2.ack_write().await;
     harness.ds3.ack_write().await;
 
-    // We expect to receive the next negotiation packet, not the Write
+    // We expect to receive the final negotiation packet, followed by the Write
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let last_flush_number = match harness.ds1().try_recv() {
+    match harness.ds1().try_recv() {
         Ok(Message::LastFlush { last_flush_number }) => last_flush_number,
         m => panic!("unexpected message {m:?}"),
     };
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(harness.ds1().try_recv(), Err(TryRecvError::Empty));
-
     // The write should be done
     write_handle.await.unwrap();
-
-    // Now, bring the Downstairs up, which should trigger replay
-    harness
-        .ds1()
-        .send(Message::LastFlushAck { last_flush_number })
-        .unwrap();
-
-    // Give the replay a moment to happen
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // We should see that write sent as a replay
     match harness.ds1().try_recv() {

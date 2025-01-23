@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [features]
 asm = ["usdt/asm"]
-notify-nexus = ["nexus-client", "internal-dns", "progenitor-client", "http", "omicron-uuid-kinds"]
+notify-nexus = []
 integration-tests = []
 
 [dependencies]
@@ -28,7 +28,7 @@ crucible-common.workspace = true
 crucible-client-types.workspace = true
 crucible-protocol.workspace = true
 dropshot.workspace = true
-fakedata_generator.workspace = true 
+fakedata_generator.workspace = true
 futures.workspace = true
 futures-core.workspace = true
 itertools.workspace = true
@@ -57,11 +57,9 @@ aes-gcm-siv.workspace = true
 rand_chacha.workspace = true
 reqwest.workspace = true
 crucible-workspace-hack.workspace = true
-nexus-client = { workspace = true, optional = true }
-internal-dns = { workspace = true, optional = true }
-omicron-uuid-kinds = { workspace = true, optional = true }
-progenitor-client = { workspace = true, optional = true }
-http = { workspace = true, optional = true }
+nexus-client.workspace = true
+omicron-uuid-kinds.workspace = true
+internal-dns.workspace = true
 
 [dev-dependencies]
 expectorate.workspace = true

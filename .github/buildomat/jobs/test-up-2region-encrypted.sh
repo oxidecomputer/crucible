@@ -1,6 +1,6 @@
 #!/bin/bash
 #:
-#: name = "test-up-unencrypted"
+#: name = "test-up-2region-encrypted"
 #: variety = "basic"
 #: target = "helios-2.0"
 #: output_rules = [
@@ -28,9 +28,6 @@ pfexec coreadm -i /tmp/core.%f.%p \
  -e proc-setid \
  -e global-setid
 
-echo "input bins dir contains:"
-ls -ltr "$input"/bins || true
-
 banner unpack
 mkdir -p /var/tmp/bins
 for t in "$input/bins/"*.gz; do
@@ -41,10 +38,9 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
-export RUST_BACKTRACE=1
 
-# Give this test two hours to finish
-jobpid=$$; (sleep $(( 120 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
+# Give this test one hour to finish
+jobpid=$$; (sleep $(( 60 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
@@ -57,7 +53,7 @@ vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
 pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.txt 2>&1 &
 pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upstairs-info.txt 2>&1 &
 
-banner test_up_unencrypted
-ptime -m bash "$input/scripts/test_up.sh" -N unencrypted
+banner test_up_2r_encrypted
+ptime -m bash "$input/scripts/test_up.sh" -r 2 -N encrypted
 
-echo "test-up-unencrypted ends"
+echo "test-up-2region-encrypted ends"

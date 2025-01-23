@@ -1597,13 +1597,16 @@ impl ActiveConnection {
             // The job completed successfully, so update our stats
             dss.on_complete(&m);
 
-            // Notify the upstairs before completing work, which
-            // consumes the message (so we'll check whether it's
-            // a FlushAck beforehand)
-            let is_flush = matches!(m, Message::FlushAck { .. });
+            // Reply to the upstairs before completing work.  Replying consumes
+            // the message, so we'll check whether it's a FlushAck / BarrierAck
+            // beforehand.
+            let reset_work = matches!(
+                m,
+                Message::FlushAck { .. } | Message::BarrierAck { .. }
+            );
             self.reply(m)?;
 
-            if is_flush {
+            if reset_work {
                 self.work.completed.reset(new_id);
             } else {
                 self.work.completed.push(new_id);
@@ -2954,21 +2957,14 @@ impl Downstairs {
                 *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
-                    Some(last_flush_number),
+                    last_flush_number,
                     &self.log,
                 ));
 
-                info!(self.log, "Set last flush {}", last_flush_number);
-
-                let state = &self.connection_state[&conn_id]; // reborrow
-                if let Err(e) =
-                    state.reply(Message::LastFlushAck { last_flush_number })
-                {
-                    bail!("Failed sending LastFlushAck: {}", e);
-                }
+                info!(self.log, "Set last flush {:?}", last_flush_number);
 
                 /*
-                 * Once this command is sent, we are ready to exit
+                 * Once this command is received, we are ready to exit
                  * the loop and move forward with receiving IOs
                  */
                 info!(self.log, "Downstairs has completed Negotiation");

@@ -257,7 +257,7 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
     if remainder > 0 {
         // let block_remainder = remainder % native_block_size;
         // round up
-        let blocks = (remainder + native_block_size - 1) / native_block_size;
+        let blocks = remainder.div_ceil(native_block_size);
         let mut buffer =
             Buffer::new(blocks as usize, native_block_size as usize);
         let block_idx = (cmd_count * opt.iocmd_block_count) + block_offset;
@@ -277,13 +277,13 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
 // - read/mod/write the last block if necessary
 // - issue a flush
 // - block on all futures
-async fn write_remainder_and_finalize<'a, T: BlockIO>(
+async fn write_remainder_and_finalize<T: BlockIO>(
     crucible: &Arc<T>,
     mut w_buf: BytesMut,
     offset: BlockIndex,
     n_read: usize,
     native_block_size: u64,
-    mut futures: VecDeque<CrucibleBlockIOFuture<'a>>,
+    mut futures: VecDeque<CrucibleBlockIOFuture<'_>>,
 ) -> Result<()> {
     // the input stream ended,
     // - read/mod/write for alignment

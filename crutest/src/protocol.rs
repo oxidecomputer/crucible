@@ -37,7 +37,8 @@ pub enum CliMessage {
     // Run the sparse fill test.
     FillSparse,
     Flush,
-    Generic(usize, bool),
+    // Run the generic test
+    Generic(usize, bool, bool),
     Info(VolumeInfo),
     InfoPlease,
     IsActive,
@@ -310,7 +311,7 @@ mod tests {
 
     #[test]
     fn rt_generic() -> Result<()> {
-        let input = CliMessage::Generic(2, true);
+        let input = CliMessage::Generic(2, true, true);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
