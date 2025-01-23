@@ -157,9 +157,12 @@ pub(crate) struct DownstairsClient {
 
     /// The `JobId` of the last flush that this downstairs has acked
     ///
+    /// This will be `None` between initial startup and the first flush that
+    /// this Downstairs acks.
+    ///
     /// Note that this is a job ID, not a downstairs flush index (contrast with
     /// [`Downstairs::next_flush`], which is a flush index).
-    pub(crate) last_flush: JobId,
+    last_flush: Option<JobId>,
 
     /// Jobs that have been skipped
     pub(crate) skipped_jobs: BTreeSet<JobId>,
@@ -224,7 +227,7 @@ impl DownstairsClient {
                     auto_promote: false,
                 },
             },
-            last_flush: JobId(0),
+            last_flush: None,
             stats: DownstairsStats::default(),
             skipped_jobs: BTreeSet::new(),
             region_metadata: None,
@@ -589,7 +592,7 @@ impl DownstairsClient {
     }
 
     /// Returns the last flush ID handled by this client
-    pub(crate) fn last_flush(&self) -> JobId {
+    pub(crate) fn last_flush(&self) -> Option<JobId> {
         self.last_flush
     }
 
@@ -1175,7 +1178,7 @@ impl DownstairsClient {
                         assert!(read_data.data.is_empty());
                         assert!(extent_info.is_none());
 
-                        self.last_flush = ds_id;
+                        self.last_flush = Some(ds_id);
                     }
                     IOop::ExtentFlushClose { .. } => {
                         assert!(read_data.blocks.is_empty());
@@ -1678,7 +1681,7 @@ impl DownstairsClient {
                         let lf = self.last_flush;
                         info!(
                             self.log,
-                            "send last flush ID to this DS: {}", lf
+                            "send last flush ID to this DS: {:?}", lf
                         );
                         self.send(Message::LastFlush {
                             last_flush_number: lf,

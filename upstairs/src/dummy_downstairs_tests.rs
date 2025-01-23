@@ -215,7 +215,7 @@ impl DownstairsHandle {
 
     pub async fn negotiate_step_last_flush(
         &mut self,
-        expected_last_flush: JobId,
+        expected_last_flush: Option<JobId>,
     ) {
         let packet = self.recv().await.unwrap();
         if let Message::LastFlush { last_flush_number } = &packet {
@@ -708,7 +708,7 @@ async fn test_replay_occurs() {
     harness.restart_ds1().await;
 
     harness.ds1().negotiate_start().await;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
+    harness.ds1().negotiate_step_last_flush(None).await;
 
     let mut ds1_message_second_time = None;
 
@@ -2781,7 +2781,7 @@ async fn test_write_replay() {
     harness.restart_ds1().await;
 
     harness.ds1().negotiate_start().await;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
+    harness.ds1().negotiate_step_last_flush(None).await;
 
     // Ensure that we get the same Write
     // Send a reply, which is the second time this Write operation completes

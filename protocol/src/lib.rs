@@ -472,7 +472,7 @@ pub enum Message {
     },
 
     LastFlush {
-        last_flush_number: JobId,
+        last_flush_number: Option<JobId>,
     },
 
     /*

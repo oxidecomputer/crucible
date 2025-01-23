@@ -2957,11 +2957,11 @@ impl Downstairs {
                 *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
-                    Some(last_flush_number),
+                    last_flush_number,
                     &self.log,
                 ));
 
-                info!(self.log, "Set last flush {}", last_flush_number);
+                info!(self.log, "Set last flush {:?}", last_flush_number);
 
                 /*
                  * Once this command is received, we are ready to exit
