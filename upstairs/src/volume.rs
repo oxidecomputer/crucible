@@ -3575,6 +3575,17 @@ mod test {
         }
     }
 
+    // Replace the targets in a CrucibleOpts struct with a randomly
+    // generated IP address.
+    fn new_targets_for_opts(opts: &mut CrucibleOpts) {
+        let ds_ip = gen_ipv4();
+        opts.target = vec![
+            format!("{}:1111", ds_ip).parse().unwrap(),
+            format!("{}:2222", ds_ip).parse().unwrap(),
+            format!("{}:3333", ds_ip).parse().unwrap(),
+        ];
+    }
+
     // Helper function to build as many sv_count sub-volumes as requested.
     fn build_subvolume_vcr(
         sv_count: usize,
@@ -3585,61 +3596,77 @@ mod test {
         gen: u64,
     ) -> Vec<VolumeConstructionRequest> {
         (0..sv_count)
-            .map(|_| VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen,
-            })
-            .collect()
-    }
-
-    // Take an existing VCR (required to be VCR::Region), and fabricate a
-    // new set of VCRs from it.  We change the generation number of all the
-    // new sub_volumes, but only change the requested target in one requested
-    // sub_volume at the requested client ID.
-    fn build_replacement_subvol(
-        sv_count: usize,
-        sv_changed: usize,
-        source_vcr: VolumeConstructionRequest,
-        cid: usize,
-    ) -> Vec<VolumeConstructionRequest> {
-        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
-
-        let (block_size, blocks_per_extent, extent_count, opts, gen) =
-            match source_vcr {
+            .map(|i| {
+                let mut new_opts = opts.clone();
+                // The first sub volume will use the targets given to us
+                // by the caller.  Any additional subvolumes will get a
+                // random IP assigned.
+                if i != 0 {
+                    new_targets_for_opts(&mut new_opts);
+                }
                 VolumeConstructionRequest::Region {
                     block_size,
                     blocks_per_extent,
                     extent_count,
-                    opts,
+                    opts: new_opts,
                     gen,
-                } => {
-                    (block_size, blocks_per_extent, extent_count, opts, gen + 1)
+                }
+            })
+            .collect()
+    }
+
+    // Duplicate a list of VCRs, updating the following in the new copy:
+    // All generation numbers are increased by one.
+    // At the provided sv_changed index, update the CrucibleOpts target at
+    // the provided client ID to be the provided new_target.
+    //
+    // VCRs are required to be of type VCR::Region
+    fn build_replacement_subvol(
+        sv_changed: usize,
+        source_vcr: &Vec<VolumeConstructionRequest>,
+        cid: usize,
+        new_target: SocketAddr,
+    ) -> Vec<VolumeConstructionRequest> {
+        assert!(sv_changed < source_vcr.len());
+
+        let mut new_vcr_vec = source_vcr.to_owned();
+
+        for (i, sv) in new_vcr_vec.iter_mut().enumerate() {
+            match sv {
+                VolumeConstructionRequest::Region { opts, gen, .. } => {
+                    *gen += 1;
+                    if i == sv_changed {
+                        opts.target[cid] = new_target;
+                    }
                 }
                 _ => {
                     panic!("Unsupported VCR");
                 }
             };
+        }
+        new_vcr_vec
+    }
 
-        (0..sv_count)
-            .map(|i| {
-                let mut replacement_opts = opts.clone();
-
-                if i == sv_changed {
-                    replacement_opts.target[cid] = new_target;
+    // Given a Vec of sub volumes, return the target at the requested
+    // subvolume index and cid index.
+    fn get_target_from_sv(
+        source_vcr: &[VolumeConstructionRequest],
+        sv_index: usize,
+        cid: usize,
+    ) -> SocketAddr {
+        for (i, sv) in source_vcr.iter().enumerate() {
+            match sv {
+                VolumeConstructionRequest::Region { opts, .. } => {
+                    if i == sv_index {
+                        return opts.target[cid];
+                    }
                 }
-
-                VolumeConstructionRequest::Region {
-                    block_size,
-                    blocks_per_extent,
-                    extent_count,
-                    opts: replacement_opts.clone(),
-                    gen,
+                _ => {
+                    panic!("Unsupported VCR");
                 }
-            })
-            .collect()
+            };
+        }
+        panic!("Failed to find target {} in subvolume {}", cid, sv_index);
     }
 
     // A basic replacement of a target in a sub_volume, with options to
@@ -3695,6 +3722,7 @@ mod test {
             opts.clone(),
             2,
         );
+        let original_target = get_target_from_sv(&sub_volumes, sv_changed, cid);
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -3705,15 +3733,10 @@ mod test {
 
         // Change just the minimum things and use the updated values
         // in the replacement volume.
-        let original_target = opts.target[cid];
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
 
-        let replacement_sub_volumes = build_replacement_subvol(
-            sv_count,
-            sv_changed,
-            sub_volumes[0].clone(),
-            cid,
-        );
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, cid, new_target);
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4027,7 +4050,7 @@ mod test {
             ReadOnlyParentMode::Neither => (None, None),
         };
 
-        let sub_volumes = build_subvolume_vcr(
+        let mut sub_volumes = build_subvolume_vcr(
             sv_count,
             block_size,
             blocks_per_extent,
@@ -4039,24 +4062,26 @@ mod test {
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes,
+            sub_volumes: sub_volumes.clone(),
             read_only_parent: original_rop,
         };
 
-        let replacement_sub_volumes = (0..sv_count)
-            .map(|_| VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            })
-            .collect();
+        // Update the sub_volumes for the replacement.
+        for sv in sub_volumes.iter_mut() {
+            match sv {
+                VolumeConstructionRequest::Region { gen, .. } => {
+                    *gen += 1;
+                }
+                _ => {
+                    panic!("Invalid VCR");
+                }
+            }
+        }
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: replacement_sub_volumes,
+            sub_volumes,
             read_only_parent: replacement_rop,
         };
 
@@ -4066,7 +4091,7 @@ mod test {
         let res = Volume::compare_vcr_for_target_replacement(
             original.clone(),
             replacement.clone(),
-            &log,
+            &log.clone(),
         );
         if rop_mode == ReadOnlyParentMode::OnlyReplacement {
             assert!(res.is_err());
@@ -4121,12 +4146,9 @@ mod test {
             2,
         );
 
-        let replacement_sub_volumes = build_replacement_subvol(
-            sv_count,
-            sv_changed,
-            sub_volumes[0].clone(),
-            1,
-        );
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, 1, new_target);
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4189,12 +4211,9 @@ mod test {
             2,
         );
 
-        let replacement_sub_volumes = build_replacement_subvol(
-            sv_count,
-            sv_changed,
-            sub_volumes[0].clone(),
-            1,
-        );
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, 1, new_target);
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4256,12 +4275,9 @@ mod test {
             2,
         );
 
-        let replacement_sub_volumes = build_replacement_subvol(
-            sv_count,
-            sv_changed,
-            sub_volumes[0].clone(),
-            1,
-        );
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, 1, new_target);
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4321,7 +4337,7 @@ mod test {
         let opts = generic_crucible_opts(vol_id);
 
         // Make the sub_volume(s).
-        let sub_volumes = build_subvolume_vcr(
+        let mut sub_volumes = build_subvolume_vcr(
             sv_count,
             block_size,
             blocks_per_extent,
@@ -4337,7 +4353,7 @@ mod test {
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes,
+            sub_volumes: sub_volumes.clone(),
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Region {
                     block_size,
@@ -4354,14 +4370,18 @@ mod test {
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
         rop_opts.target[1] = new_target;
 
-        let sub_volumes = build_subvolume_vcr(
-            sv_count,
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts.clone(),
-            3,
-        );
+        // Use the same sub-volume, just bump the generation numbers
+        for sv in sub_volumes.iter_mut() {
+            match sv {
+                VolumeConstructionRequest::Region { gen, .. } => {
+                    *gen += 1;
+                }
+                _ => {
+                    panic!("Unsupported VCR");
+                }
+            }
+        }
+
         // Make the replacement VCR with the updated target for the
         // read_only_parent.
         let replacement = VolumeConstructionRequest::Volume {
@@ -4442,12 +4462,9 @@ mod test {
             gen: 4,
         };
 
-        let replacement_sub_volumes = build_replacement_subvol(
-            sv_count,
-            sv_changed,
-            sub_volumes[0].clone(),
-            1,
-        );
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, 1, new_target);
 
         // Make the original VCR using what we created above.
         let original = VolumeConstructionRequest::Volume {
