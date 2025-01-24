@@ -858,6 +858,14 @@ impl DownstairsClient {
         match self.state {
             // We never send jobs if we're in certain inactive states
             DsState::Connecting {
+                mode: ConnectionMode::New,
+                ..
+            } if self.cfg.read_only => {
+                // Read only upstairs can connect with just a single downstairs
+                // ready, we skip jobs on the other downstairs till they connect.
+                EnqueueResult::Skip
+            }
+            DsState::Connecting {
                 mode: ConnectionMode::Faulted | ConnectionMode::Replaced,
                 ..
             }
@@ -897,7 +905,7 @@ impl DownstairsClient {
 
             DsState::Stopping(ClientStopReason::Deactivated)
             | DsState::Connecting {
-                mode: ConnectionMode::New,
+                mode: ConnectionMode::New, // RO client checked above
                 ..
             } => panic!(
                 "enqueue should not be called from state {:?}",

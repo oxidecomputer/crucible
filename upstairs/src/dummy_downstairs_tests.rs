@@ -2871,6 +2871,111 @@ async fn test_no_send_offline() {
     }
 }
 
+async fn test_ro_activate_from_list(activate: [bool; 3]) {
+    let log = csl();
+
+    let cfg = DownstairsConfig {
+        read_only: true,
+        reply_to_ping: true,
+        extent_count: DEFAULT_EXTENT_COUNT,
+        extent_size: Block::new_512(DEFAULT_BLOCK_COUNT),
+        gen_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
+        flush_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
+        dirty_bits: vec![false; DEFAULT_EXTENT_COUNT as usize],
+    };
+
+    let mut ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
+    let mut ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
+    let mut ds3 = cfg.clone().start(log.new(o!("downstairs" => 3))).await;
+
+    let (g, io) = Guest::new(Some(log.clone()));
+    let guest = Arc::new(g);
+
+    let crucible_opts = CrucibleOpts {
+        id: Uuid::new_v4(),
+        target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
+        flush_timeout: Some(1.0),
+        read_only: true,
+
+        ..Default::default()
+    };
+
+    let join_handle = up_main(crucible_opts, 1, None, io, None).unwrap();
+
+    let mut handles: Vec<JoinHandle<()>> = vec![];
+    {
+        let guest = guest.clone();
+        handles.push(tokio::spawn(async move {
+            guest.activate().await.unwrap();
+        }));
+    }
+
+    // Move negotiation along for downstairs we want to activate.
+    for (i, ds) in [&mut ds1, &mut ds2, &mut ds3].iter_mut().enumerate() {
+        if activate[i] {
+            info!(log, "Activate downstairs {i}");
+            ds.negotiate_start().await;
+            ds.negotiate_step_extent_versions_please().await;
+        }
+    }
+
+    for _ in 0..10 {
+        if guest.query_is_active().await.unwrap() {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    assert!(guest.query_is_active().await.unwrap());
+
+    // Create our test harness so we can send IO.
+    let mut harness = TestHarness {
+        log: log.clone(),
+        ds1: Some(ds1),
+        ds2,
+        ds3,
+        _join_handle: join_handle,
+        guest,
+    };
+
+    // We must `spawn` here because `read` will wait for the response to
+    // come back before returning
+    let h = harness.spawn(|guest| async move {
+        let mut buffer = Buffer::new(1, 512);
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
+    });
+
+    // Ack the read on the downstairs that are active.
+    if activate[0] {
+        harness.ds1().ack_read().await;
+    }
+    if activate[1] {
+        harness.ds2.ack_read().await;
+    }
+    if activate[2] {
+        harness.ds3.ack_read().await;
+    }
+
+    h.await.unwrap(); // after > 1x response, the read finishes
+}
+
+#[tokio::test]
+async fn test_ro_activate_with_one() {
+    // Verify ro upstairs can activate with just one downstairs ready.
+    test_ro_activate_from_list([true, false, false]).await;
+    test_ro_activate_from_list([false, true, false]).await;
+    test_ro_activate_from_list([false, false, true]).await;
+}
+
+#[tokio::test]
+async fn test_ro_activate_with_two() {
+    // Verify ro upstairs will activate with only two downstairs ready.
+    test_ro_activate_from_list([true, true, false]).await;
+    test_ro_activate_from_list([true, false, true]).await;
+    test_ro_activate_from_list([false, true, true]).await;
+}
+
 /// Test that barrier operations are sent periodically
 #[tokio::test]
 async fn test_jobs_based_barrier() {
