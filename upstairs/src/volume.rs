@@ -1398,7 +1398,6 @@ impl Volume {
 
                     parts.push_back(read_only_parent_compare);
                 }
-
                 CompareResult::Region { delta } => {
                     match delta {
                         VCRDelta::Same => {
@@ -1437,9 +1436,6 @@ impl Volume {
                 // Walk the cases. As some deltas are okay for a read only
                 // parent that are not for a sub_volume, we need to look at all
                 // the possible permutations Nexus supports.
-                //
-                // TODO also modify this when multiple subvolumes supported!
-
                 if targets.is_empty() {
                     // If here, we passed by the `all_same` bail above, meaning
                     // there's a generation delta somewhere.
@@ -1461,6 +1457,30 @@ impl Volume {
                 let VCRDelta::Target { old, new } = targets[0] else {
                     panic!("should only have pushed Target");
                 };
+
+                // We know we have one target that is different.  Verify that
+                // all the rest of the sub_volumes have a generation number
+                // difference.
+                for sc in sub_compares {
+                    match sc {
+                        CompareResult::Region { delta } => match delta {
+                            VCRDelta::Same => {
+                                crucible_bail!(
+                                    ReplaceRequestInvalid,
+                                    "SubVolumes don't have generation bump"
+                                );
+                            }
+                            VCRDelta::Generation | VCRDelta::Target { .. } => {}
+                        },
+                        r => {
+                            crucible_bail!(
+                                ReplaceRequestInvalid,
+                                "Unsupported multi level CompareResult {:?}",
+                                r
+                            );
+                        }
+                    }
+                }
 
                 Ok(Some((*old, *new)))
             }
@@ -1487,6 +1507,12 @@ impl Volume {
         }
     }
 
+    // Given two VCRs, compare them to each other, including each sub_volume
+    // and the read only parent.  Return the collection of results in the
+    // CompareResult struct.  Any mismatch results in an error returned
+    // right away and no further processing.  The caller is responsible for
+    // parsing the CompareResult and deciding what to do if there are
+    // multiple changes.
     fn compare_vcr_for_replacement(
         log: &Logger,
         o_vol: &VolumeConstructionRequest,
@@ -1536,52 +1562,51 @@ impl Volume {
                     )
                 }
 
-                // Presently, we only support one sub_volume for replacement.
-                // If support for multiple sub_volumes is added, then this
-                // following section will need to be updated to loop over the
-                // sub_volume Vec and find the specific one with a difference,
-                // while verifying that all other sub_volumes are no different.
-                if n_sub_volumes.len() != 1 {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Only a single sub_volume is supported"
-                    )
+                let mut sv_results = Vec::new();
+                // Walk the list of SubVolumes, get the compare result from
+                // each one and add it to list for the final result.
+                // If we get an error, then that is returned right away and
+                // we don't bother processing any further.
+                for (o_sv, new_sv) in
+                    o_sub_volumes.iter().zip(n_sub_volumes.iter())
+                {
+                    let sv_res = Self::compare_vcr_for_replacement(
+                        log, o_sv, new_sv, read_only,
+                    )?;
+                    sv_results.push(sv_res);
                 }
+                let read_only_parent_compare =
+                    Box::new(match (o_read_only_parent, n_read_only_parent) {
+                        (.., None) => {
+                            // The replacement VCR has no read_only_parent. This
+                            // is a valid situation as read_only_parents will go
+                            // away after a scrub finishes.
+                            CompareResult::NewMissing
+                        }
 
-                Ok(CompareResult::Volume {
-                    sub_compares: vec![Self::compare_vcr_for_replacement(
-                        log,
-                        &o_sub_volumes[0],
-                        &n_sub_volumes[0],
-                        read_only,
-                    )?],
+                        (None, Some(..)) => {
+                            // It's never valid when comparing VCRs to have the
+                            // original VCR be missing a read_only_parent and the
+                            // new VCR to have a read_only_parent.
+                            crucible_bail!(
+                                ReplaceRequestInvalid,
+                                "VCR added where there should not be one"
+                            );
+                        }
 
-                    read_only_parent_compare: Box::new(
-                        match (o_read_only_parent, n_read_only_parent) {
-                            (.., None) => {
-                                // The New VCR is none. When comparing
-                                // read_only_parents this is okay.
-                                CompareResult::NewMissing
-                            }
+                        (Some(o_vol), Some(n_vol)) => {
+                            Self::compare_vcr_for_replacement(
+                                log, o_vol, n_vol, true,
+                            )?
+                        }
+                    });
 
-                            (None, Some(..)) => {
-                                // It's never valid when comparing VCRs to have
-                                // the original VCR be missing and the new VCR
-                                // is present.
-                                crucible_bail!(
-                                    ReplaceRequestInvalid,
-                                    "VCR added where there should not be one"
-                                );
-                            }
+                let sv_res = CompareResult::Volume {
+                    sub_compares: sv_results,
+                    read_only_parent_compare,
+                };
 
-                            (Some(o_vol), Some(n_vol)) => {
-                                Self::compare_vcr_for_replacement(
-                                    log, o_vol, n_vol, true,
-                                )?
-                            }
-                        },
-                    ),
-                })
+                Ok(sv_res)
             }
 
             (
@@ -1933,6 +1958,7 @@ mod test {
     use std::io::Write;
 
     use base64::{engine, Engine};
+    use fakedata_generator::gen_ipv4;
     use rand::prelude::*;
     use slog::{o, Drain, Logger};
     use tempfile::tempdir;
@@ -3467,12 +3493,13 @@ mod test {
         let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
         let key_string = engine::general_purpose::STANDARD.encode(key_bytes);
 
+        let ds_ip = gen_ipv4();
         CrucibleOpts {
             id: vol_id,
             target: vec![
-                "127.0.0.1:5555".parse().unwrap(),
-                "127.0.0.1:6666".parse().unwrap(),
-                "127.0.0.1:7777".parse().unwrap(),
+                format!("{}:1111", ds_ip).parse().unwrap(),
+                format!("{}:2222", ds_ip).parse().unwrap(),
+                format!("{}:3333", ds_ip).parse().unwrap(),
             ],
             lossy: false,
             flush_timeout: None,
@@ -3485,60 +3512,244 @@ mod test {
         }
     }
 
+    // For tests to decide what mix of read_only_parents the two VCRs should
+    // be created with.
+    #[derive(Debug, PartialEq)]
+    enum ReadOnlyParentMode {
+        Both,
+        OnlyOriginal,
+        OnlyReplacement,
+        Neither,
+    }
+
+    impl ReadOnlyParentMode {
+        fn test_all<F: FnMut(Self)>(mut f: F) {
+            f(ReadOnlyParentMode::Both);
+            f(ReadOnlyParentMode::OnlyOriginal);
+            f(ReadOnlyParentMode::OnlyReplacement);
+            f(ReadOnlyParentMode::Neither);
+        }
+    }
+
     #[test]
     fn volume_replace_basic() {
         // A valid replacement VCR is provided with only one target being
         // different.
         // Test all three targets for replacement.
-        for cid in 0..3 {
-            test_volume_replace_cid(cid).unwrap();
+        // Test with 1, 2, and 3 sub_volumes.
+        // Test with the difference being in each sub_volume.
+        // Test all combinations of read_only_parents.
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                for cid in 0..3 {
+                    test_volume_replace_inner(
+                        sv,
+                        sv_changed,
+                        cid,
+                        ReadOnlyParentMode::Both,
+                    )
+                    .unwrap();
+                    test_volume_replace_inner(
+                        sv,
+                        sv_changed,
+                        cid,
+                        ReadOnlyParentMode::OnlyOriginal,
+                    )
+                    .unwrap();
+                    test_volume_replace_inner(
+                        sv,
+                        sv_changed,
+                        cid,
+                        ReadOnlyParentMode::OnlyReplacement,
+                    )
+                    .unwrap_err();
+                    test_volume_replace_inner(
+                        sv,
+                        sv_changed,
+                        cid,
+                        ReadOnlyParentMode::Neither,
+                    )
+                    .unwrap();
+                }
+            }
         }
     }
 
-    fn test_volume_replace_cid(cid: usize) -> Result<()> {
+    // Replace the targets in a CrucibleOpts struct with a randomly
+    // generated IP address.
+    fn new_targets_for_opts(opts: &mut CrucibleOpts) {
+        let ds_ip = gen_ipv4();
+        opts.target = vec![
+            format!("{}:1111", ds_ip).parse().unwrap(),
+            format!("{}:2222", ds_ip).parse().unwrap(),
+            format!("{}:3333", ds_ip).parse().unwrap(),
+        ];
+    }
+
+    // Helper function to build as many sv_count sub-volumes as requested.
+    fn build_subvolume_vcr(
+        sv_count: usize,
+        block_size: u64,
+        blocks_per_extent: u64,
+        extent_count: u32,
+        opts: CrucibleOpts,
+        gen: u64,
+    ) -> Vec<VolumeConstructionRequest> {
+        (0..sv_count)
+            .map(|i| {
+                let mut new_opts = opts.clone();
+                // The first sub volume will use the targets given to us
+                // by the caller.  Any additional subvolumes will get a
+                // random IP assigned.
+                if i != 0 {
+                    new_targets_for_opts(&mut new_opts);
+                }
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: new_opts,
+                    gen,
+                }
+            })
+            .collect()
+    }
+
+    // Duplicate a list of VCRs, updating the following in the new copy:
+    // All generation numbers are increased by one.
+    // At the provided sv_changed index, update the CrucibleOpts target at
+    // the provided client ID to be the provided new_target.
+    //
+    // VCRs are required to be of type VCR::Region
+    fn build_replacement_subvol(
+        sv_changed: usize,
+        source_vcr: &Vec<VolumeConstructionRequest>,
+        cid: usize,
+        new_target: SocketAddr,
+    ) -> Vec<VolumeConstructionRequest> {
+        assert!(sv_changed < source_vcr.len());
+
+        let mut new_vcr_vec = source_vcr.to_owned();
+
+        for (i, sv) in new_vcr_vec.iter_mut().enumerate() {
+            match sv {
+                VolumeConstructionRequest::Region { opts, gen, .. } => {
+                    *gen += 1;
+                    if i == sv_changed {
+                        opts.target[cid] = new_target;
+                    }
+                }
+                _ => {
+                    panic!("Unsupported VCR");
+                }
+            };
+        }
+        new_vcr_vec
+    }
+
+    // Given a Vec of sub volumes, return the target at the requested
+    // subvolume index and cid index.
+    fn get_target_from_sv(
+        source_vcr: &[VolumeConstructionRequest],
+        sv_index: usize,
+        cid: usize,
+    ) -> SocketAddr {
+        for (i, sv) in source_vcr.iter().enumerate() {
+            match sv {
+                VolumeConstructionRequest::Region { opts, .. } => {
+                    if i == sv_index {
+                        return opts.target[cid];
+                    }
+                }
+                _ => {
+                    panic!("Unsupported VCR");
+                }
+            };
+        }
+        panic!("Failed to find target {} in subvolume {}", cid, sv_index);
+    }
+
+    // A basic replacement of a target in a sub_volume, with options to
+    // create multiple sub_volumes, and to select which sub_volume and specific
+    // target to be different.
+    //
+    // sv_count: The number of sub volumes we create in each volume.
+    // sv_changed: The index (zero based) of the sub volume where we
+    // want the target to be different.
+    // cid: The client ID where the change will happen, which is the
+    // same as the index in the crucible opts target array.
+    // rop_mode: enum of which VCR will have a ROP and which will not.
+    fn test_volume_replace_inner(
+        sv_count: usize,
+        sv_changed: usize,
+        cid: usize,
+        rop_mode: ReadOnlyParentMode,
+    ) -> Result<()> {
+        assert!(sv_count > sv_changed);
+        assert!(cid < 3);
         // A valid replacement VCR is provided with a larger generation
         // number and only one target being different.
+        let vol_id = Uuid::new_v4();
+        let opts = generic_crucible_opts(vol_id);
+
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let mut opts = generic_crucible_opts(vol_id);
+        let test_rop = Box::new(VolumeConstructionRequest::Region {
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts: opts.clone(),
+            gen: 3,
+        });
+
+        let (original_rop, replacement_rop) = match rop_mode {
+            ReadOnlyParentMode::Both => {
+                (Some(test_rop.clone()), Some(test_rop))
+            }
+            ReadOnlyParentMode::OnlyOriginal => (Some(test_rop), None),
+            ReadOnlyParentMode::OnlyReplacement => (None, Some(test_rop)),
+            ReadOnlyParentMode::Neither => (None, None),
+        };
+
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+        let original_target = get_target_from_sv(&sub_volumes, sv_changed, cid);
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
-            read_only_parent: None,
+            sub_volumes: sub_volumes.clone(),
+            read_only_parent: original_rop,
         };
 
         // Change just the minimum things and use the updated values
         // in the replacement volume.
-        let original_target = opts.target[cid];
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
-        opts.target[cid] = new_target;
+
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, cid, new_target);
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            }],
-            read_only_parent: None,
+            sub_volumes: replacement_sub_volumes,
+            read_only_parent: replacement_rop,
         };
 
         let log = csl();
-        info!(log, "Test replacement of CID {cid}");
+        info!(log,
+            "replacement of CID {} with sv_count:{} sv_changed:{} rop_mode:{:?}",
+            cid, sv_count, sv_changed, rop_mode
+        );
         let ReplacementRequestCheck::Valid { old, new } =
             Volume::compare_vcr_for_target_replacement(
                 original,
@@ -3549,24 +3760,43 @@ mod test {
             panic!("wrong variant returned!");
         };
 
-        info!(log, "replace {old} with {new}");
+        info!(log, "replaced {old} with {new}");
         assert_eq!(original_target, old);
         assert_eq!(new_target, new);
         Ok(())
     }
 
     #[test]
-    fn volume_replace_rop() {
-        // A replacement VCR is provided with one target being
-        // different, both new and old have a read_only_parent
+    fn test_volume_replace_no_gen() {
+        // We need at least two sub_volumes for this test.
+        for sv in 2..4 {
+            for sv_changed in 0..sv {
+                ReadOnlyParentMode::test_all(|mode| {
+                    test_volume_replace_no_gen_inner(sv, sv_changed, mode);
+                });
+            }
+        }
+    }
+
+    fn test_volume_replace_no_gen_inner(
+        sv_count: usize,
+        sv_changed: usize,
+        rop_mode: ReadOnlyParentMode,
+    ) {
+        assert!(sv_count > sv_changed);
+        // A replacement VCR is created with a single sub_volume that has
+        // a new target and a larger generation, but the other sub_volumes do
+        // not have increased generation numbers, which is not valid
+        // We require that all sub_volumes have bumped generation numbers.
+        let vol_id = Uuid::new_v4();
+        let opts = generic_crucible_opts(vol_id);
+
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let opts = generic_crucible_opts(vol_id);
-
-        let rop = Box::new(VolumeConstructionRequest::Region {
+        let test_rop = Box::new(VolumeConstructionRequest::Region {
             block_size,
             blocks_per_extent,
             extent_count,
@@ -3574,51 +3804,75 @@ mod test {
             gen: 3,
         });
 
+        let (original_rop, replacement_rop) = match rop_mode {
+            ReadOnlyParentMode::Both => {
+                (Some(test_rop.clone()), Some(test_rop))
+            }
+            ReadOnlyParentMode::OnlyOriginal => (Some(test_rop), None),
+            ReadOnlyParentMode::OnlyReplacement => (None, Some(test_rop)),
+            ReadOnlyParentMode::Neither => (None, None),
+        };
+
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
-            read_only_parent: Some(rop.clone()),
+            sub_volumes,
+            read_only_parent: original_rop,
         };
 
-        let mut new_opts = opts.clone();
-        let original_target = opts.target[1];
+        // Change just the target and gen for one subvolume, but not the others.
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
-        new_opts.target[1] = new_target;
+
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = opts.clone();
+                let mut replacement_gen = 2;
+
+                if i == sv_changed {
+                    replacement_opts.target[1] = new_target;
+                    replacement_gen += 1;
+                }
+
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: replacement_opts.clone(),
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: new_opts.clone(),
-                gen: 3,
-            }],
-            read_only_parent: Some(rop),
+            sub_volumes: replacement_sub_volumes,
+            read_only_parent: replacement_rop,
         };
 
         let log = csl();
-        let ReplacementRequestCheck::Valid { old, new } =
-            Volume::compare_vcr_for_target_replacement(
-                original,
-                replacement,
-                &log,
-            )
-            .unwrap()
-        else {
-            panic!("wrong variant returned!");
-        };
-
-        assert_eq!(original_target, old);
-        assert_eq!(new_target, new);
+        info!(
+            log,
+            "replacement of with sv_count:{} sv_changed:{} rop_mode:{:?}",
+            sv_count,
+            sv_changed,
+            rop_mode,
+        );
+        assert!(Volume::compare_vcr_for_target_replacement(
+            original,
+            replacement,
+            &log,
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -3688,10 +3942,22 @@ mod test {
         assert_eq!(new_target, new);
     }
 
-    #[tokio::test]
-    async fn volume_replace_self() {
-        // Send the same VCR as both old and new, this should return error
-        // because the generation number did not change.
+    #[test]
+    // Send the same VCR as both old and new, this should return error
+    // because the generation number did not change.
+    // Test with 1, 2, and 3 sub_volumes.
+    // Test both with and without a read_only_parent.
+    fn volume_replace_self() {
+        for sv in 1..4 {
+            test_volume_replace_self_inner(sv, ReadOnlyParentMode::Both);
+            test_volume_replace_self_inner(sv, ReadOnlyParentMode::Neither);
+        }
+    }
+
+    fn test_volume_replace_self_inner(
+        sv_count: usize,
+        rop_mode: ReadOnlyParentMode,
+    ) {
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
@@ -3699,17 +3965,37 @@ mod test {
 
         let opts = generic_crucible_opts(vol_id);
 
+        let rop = match rop_mode {
+            ReadOnlyParentMode::Both => {
+                let test_rop = Box::new(VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 3,
+                });
+                Some(test_rop)
+            }
+            ReadOnlyParentMode::Neither => None,
+            ReadOnlyParentMode::OnlyOriginal
+            | ReadOnlyParentMode::OnlyReplacement => {
+                panic!("Unsupported test mode");
+            }
+        };
+
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts,
-                gen: 2,
-            }],
-            read_only_parent: None,
+            sub_volumes,
+            read_only_parent: rop,
         };
 
         let log = csl();
@@ -3722,100 +4008,170 @@ mod test {
         .is_err());
     }
 
-    #[tokio::test]
-    async fn volume_vcr_no_target() {
-        // A replacement VCR is provided with differing gen, but the
-        // same targets.
-        // This is valid for a migration, but not valid for a target
-        // replacement.  We test both calls here.
+    #[test]
+    // A replacement VCR is provided with differing gen, but the same targets.
+    // This is valid for a migration, but not valid for a target replacement.
+    // We test both calls here.
+    // Test with 1, 2, and 3 sub_volumes.
+    // Test with all combinations of read_only_parent, knowing that the
+    // OnlyReplacement case should always fail.
+    fn volume_vcr_no_targets() {
+        for sv in 1..3 {
+            ReadOnlyParentMode::test_all(|mode| {
+                volume_vcr_no_targets_inner(sv, mode);
+            });
+        }
+    }
+
+    fn volume_vcr_no_targets_inner(
+        sv_count: usize,
+        rop_mode: ReadOnlyParentMode,
+    ) {
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
         let opts = generic_crucible_opts(vol_id);
+        let test_rop = Box::new(VolumeConstructionRequest::Region {
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts: opts.clone(),
+            gen: 3,
+        });
+
+        let (original_rop, replacement_rop) = match rop_mode {
+            ReadOnlyParentMode::Both => {
+                (Some(test_rop.clone()), Some(test_rop))
+            }
+            ReadOnlyParentMode::OnlyOriginal => (Some(test_rop), None),
+            ReadOnlyParentMode::OnlyReplacement => (None, Some(test_rop)),
+            ReadOnlyParentMode::Neither => (None, None),
+        };
+
+        let mut sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
-            read_only_parent: None,
+            sub_volumes: sub_volumes.clone(),
+            read_only_parent: original_rop,
         };
+
+        // Update the sub_volumes for the replacement.
+        for sv in sub_volumes.iter_mut() {
+            match sv {
+                VolumeConstructionRequest::Region { gen, .. } => {
+                    *gen += 1;
+                }
+                _ => {
+                    panic!("Invalid VCR");
+                }
+            }
+        }
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts,
-                gen: 3,
-            }],
-            read_only_parent: None,
+            sub_volumes,
+            read_only_parent: replacement_rop,
         };
 
         let log = csl();
 
         // Replacement should return ReplacementMatchesOriginal
-        assert!(matches!(
-            Volume::compare_vcr_for_target_replacement(
-                original.clone(),
-                replacement.clone(),
-                &log,
-            ),
-            Ok(ReplacementRequestCheck::ReplacementMatchesOriginal),
-        ));
+        let res = Volume::compare_vcr_for_target_replacement(
+            original.clone(),
+            replacement.clone(),
+            &log.clone(),
+        );
+        if rop_mode == ReadOnlyParentMode::OnlyReplacement {
+            assert!(res.is_err());
+        } else {
+            assert!(matches!(
+                res,
+                Ok(ReplacementRequestCheck::ReplacementMatchesOriginal)
+            ));
+        };
 
         // Migration is valid with these VCRs
-        Volume::compare_vcr_for_migration(original, replacement, &log).unwrap();
+        let res =
+            Volume::compare_vcr_for_migration(original, replacement, &log);
+        if rop_mode == ReadOnlyParentMode::OnlyReplacement {
+            assert!(res.is_err());
+        } else {
+            assert!(res.is_ok());
+        };
     }
 
-    #[tokio::test]
-    async fn volume_replace_mismatch_vblock() {
-        // A replacement VCR is provided with one target being
-        // different, but with incorrect volume layer block size
+    #[test]
+    // A replacement VCR is provided with one target being different, but with
+    // incorrect volume layer block size
+    // Test with 1, 2, and 3 sub_volumes.
+    // Test both with each sub_volume having the difference.
+    fn volume_replace_mismatch_vblock() {
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                volume_replace_mismatch_vblock_inner(sv, sv_changed);
+            }
+        }
+    }
+
+    fn volume_replace_mismatch_vblock_inner(
+        sv_count: usize,
+        sv_changed: usize,
+    ) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let mut opts = generic_crucible_opts(vol_id);
+        let opts = generic_crucible_opts(vol_id);
+
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, 1, new_target);
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
+            sub_volumes,
             read_only_parent: None,
         };
-
-        opts.target[1] = "127.0.0.1:8888".parse().unwrap();
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size: 4096,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts,
-                gen: 3,
-            }],
+            sub_volumes: replacement_sub_volumes,
             read_only_parent: None,
         };
 
         let log = csl();
+        info!(
+            log,
+            "block_size mismatch with sv_count:{} sv_changed:{}",
+            sv_count,
+            sv_changed,
+        );
+
         assert!(Volume::compare_vcr_for_target_replacement(
             original,
             replacement,
@@ -3824,44 +4180,62 @@ mod test {
         .is_err());
     }
 
-    #[tokio::test]
-    async fn volume_replace_mismatch_vid() {
-        // A replacement VCR is provided with one target being
-        // different, but with incorrect volume layer volume id
+    #[test]
+    // A replacement VCR is provided with one target being different, but with
+    // incorrect volume layer volume id
+    // Test with 1, 2, and 3 sub_volumes.
+    // Test both with each sub_volume having the difference.
+    fn volume_replace_mismatch_vid() {
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                volume_replace_mismatch_vid_inner(sv, sv_changed);
+            }
+        }
+    }
+
+    fn volume_replace_mismatch_vid_inner(sv_count: usize, sv_changed: usize) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let mut opts = generic_crucible_opts(vol_id);
+        let opts = generic_crucible_opts(vol_id);
+
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, 1, new_target);
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
+            sub_volumes,
             read_only_parent: None,
         };
 
-        opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         let replacement = VolumeConstructionRequest::Volume {
             id: Uuid::new_v4(),
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            }],
+            sub_volumes: replacement_sub_volumes,
             read_only_parent: None,
         };
 
         let log = csl();
+        info!(
+            log,
+            "volume id mismatch with sv_count:{} sv_changed:{}",
+            sv_count,
+            sv_changed,
+        );
         assert!(Volume::compare_vcr_for_target_replacement(
             original,
             replacement,
@@ -3870,42 +4244,53 @@ mod test {
         .is_err());
     }
 
-    #[tokio::test]
-    async fn volume_replace_mismatch_vrop() {
-        // A replacement VCR is provided with one target being
-        // different, but with the replacement volume having a read only
-        // parent, which is not allowed.
+    #[test]
+    // A replacement VCR is provided with one target being different, but with
+    // the replacement volume having a read only parent, which is not allowed.
+    // Test with 1, 2, and 3 sub_volumes.
+    // Test both with each sub_volume having the difference.
+    fn volume_replace_mismatch_vrop() {
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                volume_replace_mismatch_vrop_inner(sv, sv_changed);
+            }
+        }
+    }
+
+    fn volume_replace_mismatch_vrop_inner(sv_count: usize, sv_changed: usize) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let mut opts = generic_crucible_opts(vol_id);
+        let opts = generic_crucible_opts(vol_id);
+
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, 1, new_target);
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
+            sub_volumes,
             read_only_parent: None,
         };
 
-        opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         // Replacement can't have a read_only_parent
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            }],
+            sub_volumes: replacement_sub_volumes,
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Region {
                     block_size,
@@ -3918,6 +4303,12 @@ mod test {
         };
 
         let log = csl();
+        info!(
+            log,
+            "volume no new ROP with sv_count:{} sv_changed:{}",
+            sv_count,
+            sv_changed,
+        );
         assert!(Volume::compare_vcr_for_target_replacement(
             original,
             replacement,
@@ -3926,18 +4317,34 @@ mod test {
         .is_err());
     }
 
-    #[tokio::test]
-    async fn volume_replace_read_only_parent_ok() {
-        // Verify VCR replacement passes with a valid difference in
-        // just the read_only_parents.
+    #[test]
+    // Verify VCR replacement passes with a valid difference in
+    // just the read_only_parents.
+    // Test with 1, 2, and 3 sub_volumes.
+    fn volume_replace_read_only_parent_ok() {
+        for sv in 1..4 {
+            volume_replace_read_only_parent_ok_inner(sv);
+        }
+    }
+
+    fn volume_replace_read_only_parent_ok_inner(sv_count: usize) {
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let rop_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        // Make the sub_volume that both VCRs will share.
         let opts = generic_crucible_opts(vol_id);
+
+        // Make the sub_volume(s).
+        let mut sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         // Make the read only parent.
         let mut rop_opts = generic_crucible_opts(rop_id);
@@ -3946,13 +4353,7 @@ mod test {
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
+            sub_volumes: sub_volumes.clone(),
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Region {
                     block_size,
@@ -3969,18 +4370,24 @@ mod test {
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
         rop_opts.target[1] = new_target;
 
+        // Use the same sub-volume, just bump the generation numbers
+        for sv in sub_volumes.iter_mut() {
+            match sv {
+                VolumeConstructionRequest::Region { gen, .. } => {
+                    *gen += 1;
+                }
+                _ => {
+                    panic!("Unsupported VCR");
+                }
+            }
+        }
+
         // Make the replacement VCR with the updated target for the
         // read_only_parent.
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            }],
+            sub_volumes,
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Region {
                     block_size,
@@ -4008,26 +4415,42 @@ mod test {
         assert_eq!(new_target, new);
     }
 
-    #[tokio::test]
-    async fn volume_replace_with_both_subvol_and_rop_diff() {
-        // Verify that a valid diff in both the sub_volumes and the
-        // read_only_parent returns an error (we can do only one at
-        // a time).
+    #[test]
+    // Verify that a valid diff in both the sub_volumes and the
+    // read_only_parent returns an error (we can do only one at a time).
+    // Test with 1, 2, and 3 sub_volumes.
+    // Test both with each sub_volume having the difference.
+    fn volume_replace_with_both_subvol_and_rop_diff() {
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                volume_replace_with_both_subvol_and_rop_diff_inner(
+                    sv, sv_changed,
+                );
+            }
+        }
+    }
+
+    fn volume_replace_with_both_subvol_and_rop_diff_inner(
+        sv_count: usize,
+        sv_changed: usize,
+    ) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let rop_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        // Make the sub_volume that both VCRs will share.
-        let mut opts = generic_crucible_opts(vol_id);
-        let sub_vol = vec![VolumeConstructionRequest::Region {
+        // Make the sub_volume(s) that both VCRs will share.
+        let opts = generic_crucible_opts(vol_id);
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
             block_size,
             blocks_per_extent,
             extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        }];
+            opts.clone(),
+            2,
+        );
 
         // Make the read only parent.
         let mut rop_opts = generic_crucible_opts(rop_id);
@@ -4039,16 +4462,17 @@ mod test {
             gen: 4,
         };
 
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes =
+            build_replacement_subvol(sv_changed, &sub_volumes, 1, new_target);
+
         // Make the original VCR using what we created above.
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: sub_vol.clone(),
+            sub_volumes,
             read_only_parent: Some(Box::new(rop.clone())),
         };
-
-        // Update the sub_volume target with a new downstairs
-        opts.target[1] = "127.0.0.1:9888".parse().unwrap();
 
         // Update the ROP target with a new downstairs
         rop_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
@@ -4058,25 +4482,25 @@ mod test {
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            }],
+            sub_volumes: replacement_sub_volumes,
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Region {
                     block_size,
                     blocks_per_extent,
                     extent_count,
                     opts: rop_opts.clone(),
-                    gen: 5,
+                    gen: 4,
                 },
             )),
         };
 
         let log = csl();
+        info!(
+            log,
+            "new ROP and new SV with sv_count:{} sv_changed:{}",
+            sv_count,
+            sv_changed,
+        );
 
         assert!(Volume::compare_vcr_for_target_replacement(
             original,
@@ -4086,45 +4510,78 @@ mod test {
         .is_err());
     }
 
-    #[tokio::test]
-    async fn volume_replace_mismatch_sv_bs() {
-        // A replacement VCR is provided with one target being
-        // different, but with the replacement volume having a sub_volume
-        // with a different block size.
+    #[test]
+    // A replacement VCR is provided with one target being different, but with
+    // the replacement volume having a sub_volume with a different block size.
+    // Test with 1, 2, and 3 sub_volumes.
+    // Test both with each sub_volume having the difference.
+    fn volume_replace_mismatch_sv_bs() {
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                volume_replace_mismatch_sv_bs_inner(sv, sv_changed);
+            }
+        }
+    }
+
+    fn volume_replace_mismatch_sv_bs_inner(sv_count: usize, sv_changed: usize) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let mut opts = generic_crucible_opts(vol_id);
+        let opts = generic_crucible_opts(vol_id);
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
+            sub_volumes,
             read_only_parent: None,
         };
 
-        opts.target[1] = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = opts.clone();
+                let replacement_gen = 3;
+                let mut replacement_block_size = block_size;
+
+                if i == sv_changed {
+                    replacement_opts.target[1] =
+                        "127.0.0.1:8888".parse().unwrap();
+                    replacement_block_size = 4096;
+                }
+                VolumeConstructionRequest::Region {
+                    block_size: replacement_block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: replacement_opts,
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
+
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size: 4096,
-                blocks_per_extent,
-                extent_count,
-                opts,
-                gen: 3,
-            }],
+            sub_volumes: replacement_sub_volumes,
             read_only_parent: None,
         };
 
         let log = csl();
+        info!(
+            log,
+            "replacement sub-vol mismatch block_size sv_count:{} sv_changed:{}",
+            sv_count,
+            sv_changed,
+        );
         assert!(Volume::compare_vcr_for_target_replacement(
             original,
             replacement,
@@ -4133,46 +4590,82 @@ mod test {
         .is_err());
     }
 
-    #[tokio::test]
-    async fn volume_replace_mismatch_sv_bpe() {
-        // A replacement VCR is provided with one target being
-        // different, but with the replacement volume having a sub_volume
-        // with a different blocks per extent.
+    #[test]
+    // A replacement VCR is provided with one target being different, but with
+    // the replacement volume having a sub_volume with a different blocks per
+    // extent.
+    // Test with 1, 2, and 3 sub_volumes.
+    // Test both with each sub_volume having the difference.
+    fn volume_replace_mismatch_sv_bpe() {
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                volume_replace_mismatch_sv_bpe_inner(sv, sv_changed);
+            }
+        }
+    }
+
+    fn volume_replace_mismatch_sv_bpe_inner(
+        sv_count: usize,
+        sv_changed: usize,
+    ) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let mut opts = generic_crucible_opts(vol_id);
+        let opts = generic_crucible_opts(vol_id);
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
+            sub_volumes,
             read_only_parent: None,
         };
 
-        opts.target[1] = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = opts.clone();
+                let replacement_gen = 3;
+                let mut replacement_bpe = blocks_per_extent;
+
+                if i == sv_changed {
+                    replacement_opts.target[1] =
+                        "127.0.0.1:8888".parse().unwrap();
+                    replacement_bpe += 2;
+                }
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent: replacement_bpe,
+                    extent_count,
+                    opts: replacement_opts,
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent: blocks_per_extent + 2,
-                extent_count,
-                opts,
-                gen: 3,
-            }],
+            sub_volumes: replacement_sub_volumes,
             read_only_parent: None,
         };
 
         let log = csl();
+        info!(
+            log,
+            "subvolume mismatch in blocks_per_extent sv_count:{} sv_changed:{}",
+            sv_count,
+            sv_changed,
+        );
         assert!(Volume::compare_vcr_for_target_replacement(
             original,
             replacement,
@@ -4181,41 +4674,67 @@ mod test {
         .is_err());
     }
 
-    #[tokio::test]
-    async fn volume_replace_mismatch_sv_ec() {
-        // A replacement VCR is provided with one target being
-        // different, but with the replacement volume having a sub_volume
-        // with a different extent count.
+    #[test]
+    // A replacement VCR is provided with one target being different, but with
+    // the replacement volume having a sub_volume with a different extent count.
+    // Test with 1, 2, and 3 sub_volumes.
+    // Test both with each sub_volume having the difference.
+    fn volume_replace_mismatch_sv_ec() {
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                volume_replace_mismatch_sv_ec_inner(sv, sv_changed);
+            }
+        }
+    }
+    fn volume_replace_mismatch_sv_ec_inner(sv_count: usize, sv_changed: usize) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let mut opts = generic_crucible_opts(vol_id);
+        let opts = generic_crucible_opts(vol_id);
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            }],
+            sub_volumes,
             read_only_parent: None,
         };
 
-        opts.target[1] = "127.0.0.1:8888".parse().unwrap();
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = opts.clone();
+                let replacement_gen = 3;
+                let mut replacement_ec = extent_count;
+
+                if i == sv_changed {
+                    replacement_opts.target[1] =
+                        "127.0.0.1:8888".parse().unwrap();
+                    replacement_ec += 2;
+                }
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count: replacement_ec,
+                    opts: replacement_opts,
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
+
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count: extent_count + 2,
-                opts,
-                gen: 3,
-            }],
+            sub_volumes: replacement_sub_volumes,
             read_only_parent: None,
         };
 
@@ -4228,6 +4747,9 @@ mod test {
     // We create two Volumes with the provided information, and use o_opts
     // for one Volume and n_opts for the other.  We return the result of
     // the compare_vcr_for_target_replacement function.
+    // sv_count: The number of sub_volumes to create.
+    // sv_changed: The index for which sub_volume we put the new opts..
+    #[allow(clippy::too_many_arguments)]
     fn test_volume_replace_opts(
         id: Uuid,
         block_size: u64,
@@ -4235,30 +4757,48 @@ mod test {
         extent_count: u32,
         o_opts: CrucibleOpts,
         n_opts: CrucibleOpts,
+        sv_count: usize,
+        sv_changed: usize,
     ) -> Result<(SocketAddr, SocketAddr), crucible_common::CrucibleError> {
+        assert!(sv_count > sv_changed);
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            o_opts.clone(),
+            2,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: o_opts,
-                gen: 2,
-            }],
+            sub_volumes,
             read_only_parent: None,
         };
+
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = o_opts.clone();
+                let replacement_gen = 3;
+
+                if i == sv_changed {
+                    replacement_opts = n_opts.clone();
+                }
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: replacement_opts,
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
 
         let replacement = VolumeConstructionRequest::Volume {
             id,
             block_size,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: n_opts,
-                gen: 3,
-            }],
+            sub_volumes: replacement_sub_volumes,
             read_only_parent: None,
         };
 
@@ -4291,15 +4831,21 @@ mod test {
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         n_opts.id = Uuid::new_v4();
 
-        assert!(test_volume_replace_opts(
-            vol_id,
-            512,
-            blocks_per_extent,
-            extent_count,
-            o_opts,
-            n_opts
-        )
-        .is_err());
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                assert!(test_volume_replace_opts(
+                    vol_id,
+                    512,
+                    blocks_per_extent,
+                    extent_count,
+                    o_opts.clone(),
+                    n_opts.clone(),
+                    sv,
+                    sv_changed,
+                )
+                .is_err());
+            }
+        }
     }
 
     #[tokio::test]
@@ -4307,6 +4853,8 @@ mod test {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
         // with a different opts.lossy.
+        // We test with 1 to 3 sub_volumes and each possible sub_volume having
+        // the change
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
@@ -4317,15 +4865,21 @@ mod test {
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         n_opts.lossy = true;
 
-        assert!(test_volume_replace_opts(
-            vol_id,
-            512,
-            blocks_per_extent,
-            extent_count,
-            o_opts,
-            n_opts
-        )
-        .is_err());
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                assert!(test_volume_replace_opts(
+                    vol_id,
+                    512,
+                    blocks_per_extent,
+                    extent_count,
+                    o_opts.clone(),
+                    n_opts.clone(),
+                    sv,
+                    sv_changed,
+                )
+                .is_err());
+            }
+        }
     }
 
     #[tokio::test]
@@ -4333,6 +4887,8 @@ mod test {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
         // with a different opts.flush_timeout.
+        // We test with 1 to 3 sub_volumes and each possible sub_volume having
+        // the change
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
@@ -4343,15 +4899,21 @@ mod test {
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         n_opts.flush_timeout = Some(1.23459);
 
-        assert!(test_volume_replace_opts(
-            vol_id,
-            512,
-            blocks_per_extent,
-            extent_count,
-            o_opts,
-            n_opts
-        )
-        .is_err());
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                assert!(test_volume_replace_opts(
+                    vol_id,
+                    512,
+                    blocks_per_extent,
+                    extent_count,
+                    o_opts.clone(),
+                    n_opts.clone(),
+                    sv,
+                    sv_changed,
+                )
+                .is_err());
+            }
+        }
     }
 
     #[tokio::test]
@@ -4359,6 +4921,8 @@ mod test {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
         // with a different opts.key.
+        // We test with 1 to 3 sub_volumes and each possible sub_volume having
+        // the change
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
@@ -4371,15 +4935,21 @@ mod test {
         let key_string = engine::general_purpose::STANDARD.encode(key_bytes);
         n_opts.key = Some(key_string);
 
-        assert!(test_volume_replace_opts(
-            vol_id,
-            512,
-            blocks_per_extent,
-            extent_count,
-            o_opts,
-            n_opts
-        )
-        .is_err());
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                assert!(test_volume_replace_opts(
+                    vol_id,
+                    512,
+                    blocks_per_extent,
+                    extent_count,
+                    o_opts.clone(),
+                    n_opts.clone(),
+                    sv,
+                    sv_changed,
+                )
+                .is_err());
+            }
+        }
     }
 
     #[tokio::test]
@@ -4387,6 +4957,8 @@ mod test {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
         // with a different opts.cert_pem.
+        // We test with 1 to 3 sub_volumes and each possible sub_volume having
+        // the change
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
@@ -4397,15 +4969,21 @@ mod test {
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         n_opts.cert_pem = Some("cert_pem".to_string());
 
-        assert!(test_volume_replace_opts(
-            vol_id,
-            512,
-            blocks_per_extent,
-            extent_count,
-            o_opts,
-            n_opts
-        )
-        .is_err());
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                assert!(test_volume_replace_opts(
+                    vol_id,
+                    512,
+                    blocks_per_extent,
+                    extent_count,
+                    o_opts.clone(),
+                    n_opts.clone(),
+                    sv,
+                    sv_changed,
+                )
+                .is_err());
+            }
+        }
     }
 
     #[tokio::test]
@@ -4413,6 +4991,8 @@ mod test {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
         // with a different opts.key_pem.
+        // We test with 1 to 3 sub_volumes and each possible sub_volume having
+        // the change
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
@@ -4423,15 +5003,21 @@ mod test {
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         n_opts.key_pem = Some("key_pem".to_string());
 
-        assert!(test_volume_replace_opts(
-            vol_id,
-            512,
-            blocks_per_extent,
-            extent_count,
-            o_opts,
-            n_opts
-        )
-        .is_err());
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                assert!(test_volume_replace_opts(
+                    vol_id,
+                    512,
+                    blocks_per_extent,
+                    extent_count,
+                    o_opts.clone(),
+                    n_opts.clone(),
+                    sv,
+                    sv_changed,
+                )
+                .is_err());
+            }
+        }
     }
 
     #[tokio::test]
@@ -4439,6 +5025,8 @@ mod test {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
         // with a different opts.root_cert.
+        // We test with 1 to 3 sub_volumes and each possible sub_volume having
+        // the change
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
@@ -4449,15 +5037,21 @@ mod test {
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         n_opts.root_cert_pem = Some("root_pem".to_string());
 
-        assert!(test_volume_replace_opts(
-            vol_id,
-            512,
-            blocks_per_extent,
-            extent_count,
-            o_opts,
-            n_opts
-        )
-        .is_err());
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                assert!(test_volume_replace_opts(
+                    vol_id,
+                    512,
+                    blocks_per_extent,
+                    extent_count,
+                    o_opts.clone(),
+                    n_opts.clone(),
+                    sv,
+                    sv_changed,
+                )
+                .is_err());
+            }
+        }
     }
 
     #[tokio::test]
@@ -4465,6 +5059,8 @@ mod test {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
         // with a different opts.control.
+        // We test with 1 to 3 sub_volumes and each possible sub_volume having
+        // the change
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
@@ -4475,15 +5071,21 @@ mod test {
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         n_opts.control = Some("127.0.0.1:8888".parse().unwrap());
 
-        assert!(test_volume_replace_opts(
-            vol_id,
-            512,
-            blocks_per_extent,
-            extent_count,
-            o_opts,
-            n_opts
-        )
-        .is_err());
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                assert!(test_volume_replace_opts(
+                    vol_id,
+                    512,
+                    blocks_per_extent,
+                    extent_count,
+                    o_opts.clone(),
+                    n_opts.clone(),
+                    sv,
+                    sv_changed,
+                )
+                .is_err());
+            }
+        }
     }
 
     #[tokio::test]
@@ -4491,6 +5093,8 @@ mod test {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
         // with a different opts.read_only.
+        // We test with 1 to 3 sub_volumes and each possible sub_volume having
+        // the change
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
@@ -4501,101 +5105,21 @@ mod test {
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         n_opts.read_only = true;
 
-        assert!(test_volume_replace_opts(
-            vol_id,
-            512,
-            blocks_per_extent,
-            extent_count,
-            o_opts,
-            n_opts
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn volume_replace_with_rop() {
-        let vol_id = Uuid::new_v4();
-        let original = VolumeConstructionRequest::Volume {
-            block_size: 512,
-            id: vol_id,
-            sub_volumes: vec![VolumeConstructionRequest::Region {
-                block_size: 512,
-                blocks_per_extent: 131072,
-                extent_count: 128,
-                gen: 3,
-                opts: CrucibleOpts {
-                    id: vol_id,
-                    target: vec![
-                        "[fd00:1122:3344:102::8]:19004".parse().unwrap(),
-                        "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
-                        "[fd00:1122:3344:104::8]:19000".parse().unwrap(),
-                    ],
-                    ..Default::default()
-                },
-            }],
-            read_only_parent: Some(Box::new(
-                VolumeConstructionRequest::Volume {
-                    block_size: 512,
-                    id: Uuid::new_v4(),
-                    sub_volumes: vec![VolumeConstructionRequest::Region {
-                        block_size: 512,
-                        blocks_per_extent: 131072,
-                        extent_count: 32,
-                        gen: 2,
-                        opts: CrucibleOpts {
-                            id: Uuid::new_v4(),
-                            target: vec![
-                                "[fd00:1122:3344:103::7]:19002"
-                                    .parse()
-                                    .unwrap(),
-                                "[fd00:1122:3344:101::7]:19002"
-                                    .parse()
-                                    .unwrap(),
-                                "[fd00:1122:3344:102::8]:19002"
-                                    .parse()
-                                    .unwrap(),
-                            ],
-                            ..Default::default()
-                        },
-                    }],
-                    read_only_parent: None,
-                },
-            )),
-        };
-
-        // Replace one of the subvolume targets and bump the gen number
-        let mut replacement = original.clone();
-        match &mut replacement {
-            VolumeConstructionRequest::Volume { sub_volumes, .. } => {
-                match &mut sub_volumes[0] {
-                    VolumeConstructionRequest::Region { opts, gen, .. } => {
-                        opts.target[1] =
-                            "[fd00:1122:3344:111::a]:20000".parse().unwrap();
-                        *gen += 1;
-                    }
-
-                    _ => {
-                        panic!("how?!");
-                    }
-                }
-            }
-
-            _ => {
-                panic!("how?!");
+        for sv in 1..4 {
+            for sv_changed in 0..sv {
+                assert!(test_volume_replace_opts(
+                    vol_id,
+                    512,
+                    blocks_per_extent,
+                    extent_count,
+                    o_opts.clone(),
+                    n_opts.clone(),
+                    sv,
+                    sv_changed,
+                )
+                .is_err());
             }
         }
-
-        let log = csl();
-        let result =
-            Volume::compare_vcr_for_update(original, replacement, &log)
-                .unwrap();
-        assert_eq!(
-            result,
-            Some((
-                "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
-                "[fd00:1122:3344:111::a]:20000".parse().unwrap(),
-            )),
-        );
     }
 
     /// Test that changes under a read-only parent work
