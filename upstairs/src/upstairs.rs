@@ -1140,6 +1140,15 @@ impl Upstairs {
                     done.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
+
+                let n = self.downstairs.active_client_count();
+                let required = if snapshot_details.is_some() { 3 } else { 2 };
+                if n < required {
+                    done.send_err(CrucibleError::IoError(format!(
+                        "too many inactive clients: need {required}, got {n}"
+                    )));
+                    return;
+                }
                 self.submit_flush(Some(done), snapshot_details, Some(io_guard));
             }
             BlockOp::ReplaceDownstairs { id, old, new, done } => {
@@ -1351,6 +1360,17 @@ impl Upstairs {
             return;
         }
 
+        let n = self.downstairs.active_client_count();
+        if n < 1 {
+            res.send_err((
+                data,
+                CrucibleError::IoError(format!(
+                    "too many inactive clients: need 1, got {n}"
+                )),
+            ));
+            return;
+        }
+
         /*
          * Get the next ID for the guest work struct we will make at the
          * end. This ID is also put into the IO struct we create that
@@ -1464,6 +1484,14 @@ impl Upstairs {
         }
         if self.cfg.read_only {
             res.send_err(CrucibleError::ModifyingReadOnlyRegion);
+            return None;
+        }
+
+        let n = self.downstairs.active_client_count();
+        if n < 2 {
+            res.send_err(CrucibleError::IoError(format!(
+                "too many inactive clients: need 2, got {n}"
+            )));
             return None;
         }
 
