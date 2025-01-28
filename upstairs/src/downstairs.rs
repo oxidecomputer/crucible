@@ -537,6 +537,14 @@ impl Downstairs {
                 _ => (),
             }
             self.ack_job(ds_id);
+        } else if ack_ready && job.work.is_write() {
+            // We already acked this job, but, we should update dtrace probes
+            Self::update_io_done_stats(
+                &self.stats,
+                job.work.clone(),
+                ds_id,
+                job.io_size(),
+            );
         }
 
         if complete {
@@ -558,45 +566,9 @@ impl Downstairs {
 
         // Fire DTrace probes and update stats
         let io_size = done.io_size();
-        match &done.work {
-            IOop::Read { .. } => {
-                cdt::gw__read__done!(|| (ds_id.0));
-                self.stats.add_read(io_size as i64);
-            }
-            IOop::Write { .. } => {
-                cdt::gw__write__done!(|| (ds_id.0));
-                self.stats.add_write(io_size as i64);
-            }
-            IOop::WriteUnwritten { .. } => {
-                cdt::gw__write__unwritten__done!(|| (ds_id.0));
-                // We don't include WriteUnwritten operation in the
-                // metrics for this guest.
-            }
-            IOop::Flush { .. } => {
-                cdt::gw__flush__done!(|| (ds_id.0));
-                self.stats.add_flush();
-            }
-            IOop::Barrier { .. } => {
-                cdt::gw__barrier__done!(|| (ds_id.0));
-                self.stats.add_barrier();
-            }
-            IOop::ExtentFlushClose { extent, .. } => {
-                cdt::gw__close__done!(|| (ds_id.0, extent.0));
-                self.stats.add_flush_close();
-            }
-            IOop::ExtentLiveRepair { extent, .. } => {
-                cdt::gw__repair__done!(|| (ds_id.0, extent.0));
-                self.stats.add_extent_repair();
-            }
-            IOop::ExtentLiveNoOp { .. } => {
-                cdt::gw__noop__done!(|| (ds_id.0));
-                self.stats.add_extent_noop();
-            }
-            IOop::ExtentLiveReopen { extent, .. } => {
-                cdt::gw__reopen__done!(|| (ds_id.0, extent.0));
-                self.stats.add_extent_reopen();
-            }
-        }
+        let work = done.work.clone();
+        Self::update_io_done_stats(&self.stats, work, ds_id, io_size);
+
         debug!(self.log, "[A] ack job {}", ds_id);
 
         if let Some(r) = &mut self.repair {
@@ -617,6 +589,59 @@ impl Downstairs {
             self.acked_ids.push(ds_id);
         } else {
             panic!("job {ds_id} not on gw_active list");
+        }
+    }
+
+    /// Update oximeter stats for a write operation.
+    pub fn update_write_done_metrics(&mut self, size: usize) {
+        self.stats.add_write(size as i64);
+    }
+
+    /// Update dtrace and oximeter metrics for a completed IO
+    pub fn update_io_done_stats(
+        stats: &DownstairsStatOuter,
+        work: IOop,
+        ds_id: JobId,
+        io_size: usize,
+    ) {
+        match work {
+            IOop::Read { .. } => {
+                cdt::gw__read__done!(|| (ds_id.0));
+                stats.add_read(io_size as i64);
+            }
+            IOop::Write { .. } => {
+                cdt::gw__write__done!(|| (ds_id.0));
+                // We already updated metrics right after the fast ack.
+            }
+            IOop::WriteUnwritten { .. } => {
+                cdt::gw__write__unwritten__done!(|| (ds_id.0));
+                // We don't include WriteUnwritten operation in the
+                // metrics for this guest.
+            }
+            IOop::Flush { .. } => {
+                cdt::gw__flush__done!(|| (ds_id.0));
+                stats.add_flush();
+            }
+            IOop::Barrier { .. } => {
+                cdt::gw__barrier__done!(|| (ds_id.0));
+                stats.add_barrier();
+            }
+            IOop::ExtentFlushClose { extent, .. } => {
+                cdt::gw__close__done!(|| (ds_id.0, extent.0));
+                stats.add_flush_close();
+            }
+            IOop::ExtentLiveRepair { extent, .. } => {
+                cdt::gw__repair__done!(|| (ds_id.0, extent.0));
+                stats.add_extent_repair();
+            }
+            IOop::ExtentLiveNoOp { .. } => {
+                cdt::gw__noop__done!(|| (ds_id.0));
+                stats.add_extent_noop();
+            }
+            IOop::ExtentLiveReopen { extent, .. } => {
+                cdt::gw__reopen__done!(|| (ds_id.0, extent.0));
+                stats.add_extent_reopen();
+            }
         }
     }
 
