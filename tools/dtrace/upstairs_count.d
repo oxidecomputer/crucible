@@ -78,7 +78,7 @@ crucible_upstairs*:::gw-barrier-done
 tick-1s
 /show > 20/
 {
-    printf("%4s %4s %4s %4s %5s %5s %4s %4s %4s %4s",
+    printf("%5s %5s %5s %5s %5s %5s %5s %5s %5s %5s",
         "F>", "F<", "W>", "W<", "R>", "R<", "WU>", "WU<", "B>", "B<");
     printf("\n");
     show = 0;
