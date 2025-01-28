@@ -78,7 +78,7 @@ crucible_upstairs*:::gw-barrier-done
 tick-1s
 /show > 20/
 {
-    printf("%4s %4s %4s %4s %5s %5s %4s %4s %4s %4s",
+    printf("%5s %5s %5s %5s %5s %5s %5s %5s %5s %5s",
         "F>", "F<", "W>", "W<", "R>", "R<", "WU>", "WU<", "B>", "B<");
     printf("\n");
     show = 0;
@@ -86,7 +86,7 @@ tick-1s
 
 tick-1s
 {
-    printa("%@4u %@4u %@4u %@4u %@5u %@5u %@4u %@4u %@4u %@4u",
+    printa("%@5u %@5u %@5u %@5u %@5u %@5u %@5u %@5u %@5u %@5u",
         @flush_start, @flush_done, @write_start, @write_done,
         @read_start, @read_done, @write_unwritten_start, @write_unwritten_done,
         @barrier_start, @barrier_done
