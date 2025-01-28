@@ -1487,6 +1487,11 @@ impl Upstairs {
         // Fast-ack, pretending to be done immediately operations
         res.send_ok(());
 
+        // Update Oximeter stats for this write.
+        if !is_write_unwritten {
+            self.downstairs.update_write_done_metrics(data.len());
+        }
+
         Some(DeferredWrite {
             ddef,
             impacted_blocks,
