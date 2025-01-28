@@ -86,7 +86,7 @@ tick-1s
 
 tick-1s
 {
-    printa("%@4u %@4u %@4u %@4u %@5u %@5u %@4u %@4u %@4u %@4u",
+    printa("%@5u %@5u %@5u %@5u %@5u %@5u %@5u %@5u %@5u %@5u",
         @flush_start, @flush_done, @write_start, @write_done,
         @read_start, @read_done, @write_unwritten_start, @write_unwritten_done,
         @barrier_start, @barrier_done
