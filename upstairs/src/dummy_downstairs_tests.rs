@@ -3191,7 +3191,7 @@ async fn read_with_one_fault() {
     h.await.unwrap(); // we have > 1x reply, so the read will return
     harness.ds3.ack_read().await;
 
-    // Take out DS1 next
+    // Take out DS2 next
     harness
         .guest
         .write(BlockIndex(0), write_buf.clone())
