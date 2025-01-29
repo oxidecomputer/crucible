@@ -596,7 +596,7 @@ dependencies = [
  "semver 1.0.24",
  "serde",
  "serde_json",
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -701,7 +701,7 @@ checksum = "72f3f22f1a586604e62efd23f78218f3ccdecf7a33c4500db2d37d85a24fe994"
 dependencies = [
  "nix 0.26.4",
  "terminfo",
- "thiserror 1.0.66",
+ "thiserror",
  "which",
  "winapi",
 ]
@@ -1002,7 +1002,7 @@ dependencies = [
  "chrono",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor 0.9.1",
+ "progenitor",
  "reqwest",
  "schemars",
  "serde",
@@ -1043,7 +1043,7 @@ dependencies = [
  "slog-term",
  "tempfile",
  "test-strategy",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
  "tokio-rustls 0.24.1",
  "toml 0.8.19",
@@ -1059,7 +1059,7 @@ dependencies = [
  "anyhow",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor 0.9.1",
+ "progenitor",
  "reqwest",
  "schemars",
  "serde",
@@ -1253,7 +1253,7 @@ dependencies = [
  "chrono",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor 0.9.1",
+ "progenitor",
  "reqwest",
  "schemars",
  "serde",
@@ -1287,7 +1287,7 @@ dependencies = [
  "libc",
  "num-derive",
  "num-traits",
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -1299,7 +1299,7 @@ dependencies = [
  "libc",
  "num-derive",
  "num-traits",
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -1562,7 +1562,7 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff4a5fefe330e8d7f31b16a318f9ce81000d8e35e69b93eae154d16d2278f70f"
 dependencies = [
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -1660,7 +1660,7 @@ dependencies = [
  "libdlpi-sys",
  "num_enum 0.5.11",
  "pretty-hex 0.2.1",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
 ]
 
@@ -1674,7 +1674,7 @@ dependencies = [
  "expectorate",
  "http 1.2.0",
  "omicron-workspace-hack",
- "progenitor 0.8.0",
+ "progenitor",
  "reqwest",
  "schemars",
  "serde",
@@ -1691,7 +1691,7 @@ dependencies = [
  "pretty-hex 0.4.1",
  "serde",
  "serde_json",
- "thiserror 1.0.66",
+ "thiserror",
  "zerocopy 0.7.32",
 ]
 
@@ -1792,7 +1792,7 @@ dependencies = [
  "anyhow",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor 0.9.1",
+ "progenitor",
  "reqwest",
  "schemars",
  "serde",
@@ -1808,7 +1808,7 @@ checksum = "71734e3eb68cd4df338d04dffdcc024f89eb0b238150cc95b826fbfad756452b"
 dependencies = [
  "pest",
  "pest_derive",
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -2119,7 +2119,7 @@ dependencies = [
  "chrono",
  "gateway-messages",
  "omicron-workspace-hack",
- "progenitor 0.8.0",
+ "progenitor",
  "rand 0.8.5",
  "reqwest",
  "schemars",
@@ -2327,7 +2327,7 @@ dependencies = [
  "ipnet",
  "once_cell",
  "rand 0.8.5",
- "thiserror 1.0.66",
+ "thiserror",
  "tinyvec",
  "tokio",
  "tracing",
@@ -2350,7 +2350,7 @@ dependencies = [
  "rand 0.8.5",
  "resolv-conf",
  "smallvec",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
  "tracing",
 ]
@@ -2445,9 +2445,9 @@ checksum = "21dec9db110f5f872ed9699c3ecf50cf16f423502706ba5c72462e28d3157573"
 
 [[package]]
 name = "httparse"
-version = "1.8.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d897f394bad6a705d5f4104762e116a75639e470d80901eed05a860a95cb1904"
+checksum = "f2d708df4e7140240a16cd6ab0ab65c972d7433ab77819ea693fde9c43811e2a"
 
 [[package]]
 name = "httpdate"
@@ -2514,9 +2514,9 @@ checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
 
 [[package]]
 name = "hyper"
-version = "1.4.1"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50dfd22e0e76d0f662d429a5f80fcaf3855009297eab6a0a9f8543834744ba05"
+checksum = "cc2b571658e38e0c01b1fdca3bbbe93c00d3d71693ff2770043f8c29bc7d6f80"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -2677,7 +2677,7 @@ dependencies = [
  "serde",
  "slog",
  "smf",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
  "uuid",
  "whoami",
@@ -2766,7 +2766,7 @@ dependencies = [
  "omicron-workspace-hack",
  "reqwest",
  "slog",
- "thiserror 1.0.66",
+ "thiserror",
  "uuid",
 ]
 
@@ -2921,7 +2921,7 @@ dependencies = [
  "rand 0.8.5",
  "rusty-doors",
  "socket2",
- "thiserror 1.0.66",
+ "thiserror",
  "tracing",
  "winnow 0.6.18",
 ]
@@ -3090,7 +3090,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "percent-encoding",
- "progenitor 0.8.0",
+ "progenitor",
  "reqwest",
  "schemars",
  "serde",
@@ -3229,7 +3229,7 @@ dependencies = [
  "omicron-uuid-kinds",
  "omicron-workspace-hack",
  "oxnet",
- "progenitor 0.8.0",
+ "progenitor",
  "regress 0.9.1",
  "reqwest",
  "schemars",
@@ -3254,7 +3254,7 @@ dependencies = [
  "serde_json",
  "sled-hardware-types",
  "strum",
- "thiserror 1.0.66",
+ "thiserror",
  "uuid",
 ]
 
@@ -3299,7 +3299,7 @@ dependencies = [
  "slog-error-chain",
  "steno",
  "strum",
- "thiserror 1.0.66",
+ "thiserror",
  "update-engine",
  "uuid",
 ]
@@ -3596,8 +3596,8 @@ dependencies = [
  "once_cell",
  "oxnet",
  "parse-display",
- "progenitor 0.8.0",
- "progenitor-client 0.8.0",
+ "progenitor",
+ "progenitor-client",
  "rand 0.8.5",
  "regress 0.9.1",
  "reqwest",
@@ -3610,7 +3610,7 @@ dependencies = [
  "slog",
  "slog-error-chain",
  "strum",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
  "uuid",
 ]
@@ -3626,7 +3626,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_with",
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -3670,7 +3670,7 @@ dependencies = [
  "serde_json",
  "slog",
  "tar",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
  "toml 0.7.8",
  "topological-sort",
@@ -3768,7 +3768,7 @@ dependencies = [
  "js-sys",
  "once_cell",
  "pin-project-lite",
- "thiserror 1.0.66",
+ "thiserror",
  "urlencoding",
 ]
 
@@ -3783,7 +3783,7 @@ dependencies = [
  "js-sys",
  "once_cell",
  "pin-project-lite",
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -3827,7 +3827,7 @@ dependencies = [
  "ordered-float 4.2.0",
  "percent-encoding",
  "rand 0.8.5",
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -3870,7 +3870,7 @@ dependencies = [
  "oxide-vpc",
  "postcard",
  "serde",
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -3964,7 +3964,7 @@ dependencies = [
  "serde",
  "slog",
  "slog-dtrace",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
  "uuid",
 ]
@@ -4018,7 +4018,7 @@ dependencies = [
  "schemars",
  "serde",
  "strum",
- "thiserror 1.0.66",
+ "thiserror",
  "uuid",
 ]
 
@@ -4140,7 +4140,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f200d8d83c44a45b21764d1916299752ca035d15ecd46faca3e9a2a2bf6ad06"
 dependencies = [
  "memchr",
- "thiserror 1.0.66",
+ "thiserror",
  "ucd-trie",
 ]
 
@@ -4379,20 +4379,9 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "293df5b79211fbf0c1ebad6513ba451d267e9c15f5f19ee5d3da775e2dd27331"
 dependencies = [
- "progenitor-client 0.8.0",
- "progenitor-impl 0.8.0",
- "progenitor-macro 0.8.0",
-]
-
-[[package]]
-name = "progenitor"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88f54bd2506c3e7b6e45b6ab16500abef551689021264f3be260ef7e295ac327"
-dependencies = [
- "progenitor-client 0.9.1",
- "progenitor-impl 0.9.1",
- "progenitor-macro 0.9.1",
+ "progenitor-client",
+ "progenitor-impl",
+ "progenitor-macro",
 ]
 
 [[package]]
@@ -4400,21 +4389,6 @@ name = "progenitor-client"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4a5db54eac3cae7007a0785854bc3e89fd418cca7dfc2207b99b43979154c1b"
-dependencies = [
- "bytes",
- "futures-core",
- "percent-encoding",
- "reqwest",
- "serde",
- "serde_json",
- "serde_urlencoded",
-]
-
-[[package]]
-name = "progenitor-client"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdae8df95f0b2a7d6159a9c43b7380016b8d3b0fc1ece46871ecd2e0087cfaf6"
 dependencies = [
  "bytes",
  "futures-core",
@@ -4442,30 +4416,8 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.96",
- "thiserror 1.0.66",
- "typify 0.2.0",
- "unicode-ident",
-]
-
-[[package]]
-name = "progenitor-impl"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37adc80a94c9cae890e82deeeecc9d8f2a5cb153256caaf1bf0f03611e537214"
-dependencies = [
- "heck 0.5.0",
- "http 1.2.0",
- "indexmap 2.7.0",
- "openapiv3",
- "proc-macro2",
- "quote",
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "syn 2.0.96",
- "thiserror 2.0.11",
- "typify 0.3.0",
+ "thiserror",
+ "typify",
  "unicode-ident",
 ]
 
@@ -4477,25 +4429,7 @@ checksum = "d99a5a259e2d65a4933054aa51717c70b6aba0522695731ac354a522124efc9b"
 dependencies = [
  "openapiv3",
  "proc-macro2",
- "progenitor-impl 0.8.0",
- "quote",
- "schemars",
- "serde",
- "serde_json",
- "serde_tokenstream",
- "serde_yaml",
- "syn 2.0.96",
-]
-
-[[package]]
-name = "progenitor-macro"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc3b2b9f0d5ba58375c5e8e89d5dff949108e234c1d9f22a3336d2be4daaf292"
-dependencies = [
- "openapiv3",
- "proc-macro2",
- "progenitor-impl 0.9.1",
+ "progenitor-impl",
  "quote",
  "schemars",
  "serde",
@@ -4564,7 +4498,7 @@ dependencies = [
  "rustc-hash",
  "rustls 0.23.13",
  "socket2",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
  "tracing",
 ]
@@ -4581,7 +4515,7 @@ dependencies = [
  "rustc-hash",
  "rustls 0.23.13",
  "slab",
- "thiserror 1.0.66",
+ "thiserror",
  "tinyvec",
  "tracing",
 ]
@@ -4814,7 +4748,7 @@ checksum = "a18479200779601e498ada4e8c1e1f50e3ee19deb0259c25825a98b5603b2cb4"
 dependencies = [
  "getrandom",
  "libredox",
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -4832,7 +4766,7 @@ dependencies = [
  "strip-ansi-escapes",
  "strum",
  "strum_macros 0.26.4",
- "thiserror 1.0.66",
+ "thiserror",
  "unicode-segmentation",
  "unicode-width",
 ]
@@ -4904,7 +4838,7 @@ dependencies = [
  "crucible-common",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor 0.9.1",
+ "progenitor",
  "reqwest",
  "schemars",
  "serde",
@@ -5742,7 +5676,7 @@ version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a491bfc47dffa70a3c267bc379e9de9f4b0a7195e474a94498189b177f8d18c"
 dependencies = [
- "thiserror 1.0.66",
+ "thiserror",
 ]
 
 [[package]]
@@ -5820,7 +5754,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
  "uuid",
 ]
@@ -6087,16 +6021,7 @@ version = "1.0.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d171f59dbaa811dbbb1aee1e73db92ec2b122911a48e1390dfe327a821ddede"
 dependencies = [
- "thiserror-impl 1.0.66",
-]
-
-[[package]]
-name = "thiserror"
-version = "2.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d452f284b73e6d76dd36758a0c8684b1d5be31f92b89d07fd5822175732206fc"
-dependencies = [
- "thiserror-impl 2.0.11",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -6104,17 +6029,6 @@ name = "thiserror-impl"
 version = "1.0.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b08be0f17bd307950653ce45db00cd31200d82b624b36e181337d9c7d92765b5"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.96",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "2.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26afc1baea8a989337eeb52b6e72a039780ce45c3edfcc9c5b9d112feeb173c2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6484,11 +6398,13 @@ checksum = "3528ecfd12c466c6f163363caf2d02a71161dd5e1cc6ae7b34207ea2d42d81ed"
 
 [[package]]
 name = "twox-hash"
-version = "2.1.0"
+version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7b17f197b3050ba473acf9181f7b1d3b66d1cf7356c6cc57886662276e65908"
+checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
+ "cfg-if",
  "rand 0.8.5",
+ "static_assertions",
 ]
 
 [[package]]
@@ -6503,18 +6419,8 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4c644dda9862f0fef3a570d8ddb3c2cfb1d5ac824a1f2ddfa7bc8f071a5ad8a"
 dependencies = [
- "typify-impl 0.2.0",
- "typify-macro 0.2.0",
-]
-
-[[package]]
-name = "typify"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e03ba3643450cfd95a1aca2e1938fef63c1c1994489337998aff4ad771f21ef8"
-dependencies = [
- "typify-impl 0.3.0",
- "typify-macro 0.3.0",
+ "typify-impl",
+ "typify-macro",
 ]
 
 [[package]]
@@ -6533,27 +6439,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.96",
- "thiserror 1.0.66",
- "unicode-ident",
-]
-
-[[package]]
-name = "typify-impl"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bce48219a2f3154aaa2c56cbf027728b24a3c8fe0a47ed6399781de2b3f3eeaf"
-dependencies = [
- "heck 0.5.0",
- "log",
- "proc-macro2",
- "quote",
- "regress 0.10.1",
- "schemars",
- "semver 1.0.24",
- "serde",
- "serde_json",
- "syn 2.0.96",
- "thiserror 2.0.11",
+ "thiserror",
  "unicode-ident",
 ]
 
@@ -6571,24 +6457,7 @@ dependencies = [
  "serde_json",
  "serde_tokenstream",
  "syn 2.0.96",
- "typify-impl 0.2.0",
-]
-
-[[package]]
-name = "typify-macro"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68b5780d745920ed73c5b7447496a9b5c42ed2681a9b70859377aec423ecf02b"
-dependencies = [
- "proc-macro2",
- "quote",
- "schemars",
- "semver 1.0.24",
- "serde",
- "serde_json",
- "serde_tokenstream",
- "syn 2.0.96",
- "typify-impl 0.3.0",
+ "typify-impl",
 ]
 
 [[package]]
@@ -6765,7 +6634,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.96",
- "thiserror 1.0.66",
+ "thiserror",
  "thread-id",
  "version_check",
 ]
@@ -7451,7 +7320,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a62a428a79ea2224ce8ab05d6d8a21bdd7b4b68a8dbc1230511677a56e72ef22"
 dependencies = [
  "itertools 0.10.5",
- "thiserror 1.0.66",
+ "thiserror",
  "tokio",
  "zone_cfg_derive",
 ]

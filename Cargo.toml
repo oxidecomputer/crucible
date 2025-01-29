@@ -71,8 +71,6 @@ openapiv3 = "2.0.0"
 opentelemetry = "0.24.0"
 opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
-progenitor = "0.9.1"
-progenitor-client = "0.9.1"
 proptest = "1.5.0"
 rayon = "1.10.0"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
@@ -101,7 +99,7 @@ strum_macros = "0.26"
 tempfile = "3"
 test-strategy = "0.4.0"
 thiserror = "1"
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.36", features = ["full"] }
 tokio-rustls = { version = "0.24.1" }
 tokio-test = "*"
 tokio-util = { version = "0.7", features = ["codec"]}
@@ -109,7 +107,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-opentelemetry = "0.22.0"
 tracing-subscriber = "0.3.18"
-twox-hash = "2.1.0"
+twox-hash = "1.6.3"
 usdt = "0.5.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
 
@@ -122,6 +120,8 @@ omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", branch 
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+progenitor = "0.8.0"
+progenitor-client = "0.8.0"
 
 # local path
 crucible = { path = "./upstairs" }
