@@ -130,6 +130,8 @@ async fn notify_task_nexus(
     mut rx_low: mpsc::Receiver<(DateTime<Utc>, NotifyRequest)>,
     log: Logger,
 ) {
+    info!(log, "notify_task started");
+
     let reqwest_client = reqwest::ClientBuilder::new()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(15))
