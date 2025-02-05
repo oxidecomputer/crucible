@@ -324,6 +324,7 @@ async fn bulk_write(
 
     Ok(HttpResponseUpdatedNoContent())
 }
+
 #[derive(Deserialize, JsonSchema)]
 struct BulkReadRequest {
     pub offset: u64,

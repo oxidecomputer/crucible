@@ -19,6 +19,12 @@ use nexus_client::types::{
 use omicron_uuid_kinds::{GenericUuid, TypedUuid};
 
 #[derive(Debug)]
+pub(crate) enum NotifyQos {
+    High,
+    Low,
+}
+
+#[derive(Debug)]
 pub(crate) enum NotifyRequest {
     ClientTaskStopped {
         upstairs_id: Uuid,
@@ -65,8 +71,24 @@ pub(crate) enum NotifyRequest {
     },
 }
 
+impl NotifyRequest {
+    pub(crate) fn qos(&self) -> NotifyQos {
+        match &self {
+            NotifyRequest::LiveRepairStart { .. }
+            | NotifyRequest::LiveRepairFinish { .. }
+            | NotifyRequest::ReconcileStart { .. }
+            | NotifyRequest::ReconcileFinish { .. } => NotifyQos::High,
+
+            NotifyRequest::ClientTaskStopped { .. }
+            | NotifyRequest::LiveRepairProgress { .. }
+            | NotifyRequest::ReconcileProgress { .. } => NotifyQos::Low,
+        }
+    }
+}
+
 pub(crate) struct NotifyQueue {
-    tx: mpsc::Sender<(DateTime<Utc>, NotifyRequest)>,
+    tx_high: mpsc::Sender<(DateTime<Utc>, NotifyRequest)>,
+    tx_low: mpsc::Sender<(DateTime<Utc>, NotifyRequest)>,
     log: Logger,
 }
 
@@ -74,25 +96,38 @@ impl NotifyQueue {
     /// Insert a time-stamped request into the queue
     pub fn send(&self, r: NotifyRequest) {
         let now = Utc::now();
-        if let Err(r) = self.tx.try_send((now, r)) {
-            warn!(self.log, "could not send notify {r:?}; queue is full");
+        let qos = r.qos();
+        let queue = match &qos {
+            NotifyQos::High => &self.tx_high,
+            NotifyQos::Low => &self.tx_low,
+        };
+
+        if let Err(e) = queue.try_send((now, r)) {
+            warn!(self.log, "could not send {qos:?} notify: {e}",);
         }
     }
 }
 
 pub(crate) fn spawn_notify_task(addr: Ipv6Addr, log: &Logger) -> NotifyQueue {
-    let (tx, rx) = mpsc::channel(128);
+    let (tx_high, rx_high) = mpsc::channel(128);
+    let (tx_low, rx_low) = mpsc::channel(128);
     let task_log = log.new(slog::o!("job" => "notify"));
-    tokio::spawn(async move { notify_task_nexus(addr, rx, task_log).await });
+
+    tokio::spawn(async move {
+        notify_task_nexus(addr, rx_high, rx_low, task_log).await
+    });
+
     NotifyQueue {
-        tx,
+        tx_high,
+        tx_low,
         log: log.new(o!("job" => "notify_queue")),
     }
 }
 
 async fn notify_task_nexus(
     addr: Ipv6Addr,
-    mut rx: mpsc::Receiver<(DateTime<Utc>, NotifyRequest)>,
+    mut rx_high: mpsc::Receiver<(DateTime<Utc>, NotifyRequest)>,
+    mut rx_low: mpsc::Receiver<(DateTime<Utc>, NotifyRequest)>,
     log: Logger,
 ) {
     let reqwest_client = reqwest::ClientBuilder::new()
@@ -100,7 +135,20 @@ async fn notify_task_nexus(
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap();
-    while let Some((time, m)) = rx.recv().await {
+
+    loop {
+        let maybe_message = tokio::select! {
+            biased;
+
+            i = rx_high.recv() => i,
+            i = rx_low.recv() => i,
+        };
+
+        let Some((time, m)) = maybe_message else {
+            error!(log, "one of the notify channels was closed!");
+            break;
+        };
+
         debug!(log, "notify {m:?}");
         let client = reqwest_client.clone();
         let Some(nexus_client) = get_nexus_client(&log, client, addr).await
@@ -114,6 +162,7 @@ async fn notify_task_nexus(
             );
             continue;
         };
+
         let (r, s) = match m {
             NotifyRequest::ClientTaskStopped {
                 upstairs_id,
@@ -305,6 +354,7 @@ async fn notify_task_nexus(
                 )
             }
         };
+
         match r {
             Ok(_) => {
                 info!(log, "notified Nexus of {s}");
@@ -315,6 +365,7 @@ async fn notify_task_nexus(
             }
         }
     }
+
     info!(log, "notify_task exiting");
 }
 
