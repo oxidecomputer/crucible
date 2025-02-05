@@ -148,26 +148,22 @@ async fn notify_task_nexus(
         .unwrap();
 
     loop {
-        let r = {
-            if stored_notification.is_some() {
-                stored_notification.take()
-            } else {
-                tokio::select! {
-                    biased;
+        let r = tokio::select! {
+            biased;
 
-                    i = rx_high.recv() => i.map(|message| Notification {
-                        message,
-                        qos: NotifyQos::High,
-                        retries: 0,
-                    }),
+            Some(n) = async { stored_notification.take() } => Some(n),
 
-                    i = rx_low.recv() => i.map(|message| Notification {
-                        message,
-                        qos: NotifyQos::Low,
-                        retries: 0,
-                    }),
-                }
-            }
+            i = rx_high.recv() => i.map(|message| Notification {
+                message,
+                qos: NotifyQos::High,
+                retries: 0,
+            }),
+
+            i = rx_low.recv() => i.map(|message| Notification {
+                message,
+                qos: NotifyQos::Low,
+                retries: 0,
+            }),
         };
 
         let Some(Notification {
@@ -208,8 +204,8 @@ async fn notify_task_nexus(
                         DownstairsClientStoppedReason::ConnectionTimeout
                     }
                     ClientRunResult::ConnectionFailed(_) => {
-                        // skip this notification, it's too noisy during connection
-                        // retries
+                        // skip this notification, it's too noisy during
+                        // connection retries
                         //DownstairsClientStoppedReason::ConnectionFailed
                         continue;
                     }
