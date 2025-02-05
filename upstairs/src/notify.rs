@@ -125,7 +125,7 @@ pub(crate) fn spawn_notify_task(addr: Ipv6Addr, log: &Logger) -> NotifyQueue {
 }
 
 struct Notification {
-    maybe_message: Option<(DateTime<Utc>, NotifyRequest)>,
+    message: (DateTime<Utc>, NotifyRequest),
     qos: NotifyQos,
     retries: usize,
 }
@@ -139,7 +139,7 @@ async fn notify_task_nexus(
     info!(log, "notify_task started");
 
     // Store high QoS messages if they can't be sent
-    let mut stored_notification = None;
+    let mut stored_notification: Option<Notification> = None;
 
     let reqwest_client = reqwest::ClientBuilder::new()
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -148,33 +148,34 @@ async fn notify_task_nexus(
         .unwrap();
 
     loop {
-        let Notification {
-            maybe_message,
-            qos,
-            retries,
-        } = {
-            if let Some(notification) = stored_notification.take() {
-                notification
+        let r = {
+            if stored_notification.is_some() {
+                stored_notification.take()
             } else {
                 tokio::select! {
                     biased;
 
-                    i = rx_high.recv() => Notification {
-                        maybe_message: i,
+                    i = rx_high.recv() => i.map(|message| Notification {
+                        message,
                         qos: NotifyQos::High,
                         retries: 0,
-                    },
+                    }),
 
-                    i = rx_low.recv() => Notification {
-                        maybe_message: i,
+                    i = rx_low.recv() => i.map(|message| Notification {
+                        message,
                         qos: NotifyQos::Low,
                         retries: 0,
-                    },
+                    }),
                 }
             }
         };
 
-        let Some((time, m)) = maybe_message else {
+        let Some(Notification {
+            message: (time, m),
+            qos,
+            retries,
+        }) = r
+        else {
             error!(log, "one of the notify channels was closed!");
             break;
         };
@@ -395,7 +396,7 @@ async fn notify_task_nexus(
                         warn!(log, "retries > 3, dropping {m:?}");
                     } else {
                         stored_notification = Some(Notification {
-                            maybe_message: Some((time, m)),
+                            message: (time, m),
                             qos,
                             retries: retries + 1,
                         });
