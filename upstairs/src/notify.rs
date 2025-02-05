@@ -148,7 +148,11 @@ async fn notify_task_nexus(
         .unwrap();
 
     loop {
-        let Notification { maybe_message, qos, retries } = {
+        let Notification {
+            maybe_message,
+            qos,
+            retries,
+        } = {
             if let Some(notification) = stored_notification.take() {
                 notification
             } else {
