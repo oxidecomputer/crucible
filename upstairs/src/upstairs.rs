@@ -32,7 +32,6 @@ use std::{
 };
 
 use bytes::BytesMut;
-use futures::future::{pending, Either};
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     sync::mpsc,
@@ -42,9 +41,6 @@ use uuid::Uuid;
 
 /// How often to log stats for DTrace
 const STAT_INTERVAL: Duration = Duration::from_secs(1);
-
-/// How often to do live-repair status checking
-const REPAIR_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Minimum IO size (in bytes) before encryption / decryption is done off-thread
 const MIN_DEFER_SIZE_BYTES: u64 = 8192;
@@ -96,7 +92,6 @@ pub struct UpCounters {
     action_deferred_message: u64,
     action_flush_check: u64,
     action_stat_check: u64,
-    action_repair_check: u64,
     action_control_check: u64,
     action_noop: u64,
 }
@@ -111,7 +106,6 @@ impl UpCounters {
             action_deferred_message: 0,
             action_flush_check: 0,
             action_stat_check: 0,
-            action_repair_check: 0,
             action_control_check: 0,
             action_noop: 0,
         }
@@ -230,9 +224,6 @@ pub(crate) struct Upstairs {
     /// Logger used by the upstairs
     pub(crate) log: Logger,
 
-    /// Next time to check for repairs
-    repair_check_deadline: Option<Instant>,
-
     /// Next time to trigger an automatic flush
     flush_deadline: Instant,
 
@@ -274,7 +265,6 @@ pub(crate) enum UpstairsAction {
 
     FlushCheck,
     StatUpdate,
-    RepairCheck,
     Control(ControlRequest),
 
     /// The guest connection has been dropped
@@ -427,7 +417,6 @@ impl Upstairs {
         Upstairs {
             state: UpstairsState::Initializing,
             cfg,
-            repair_check_deadline: None,
             flush_deadline: now + flush_interval,
             stat_deadline: now + STAT_INTERVAL,
             flush_interval,
@@ -449,7 +438,10 @@ impl Upstairs {
 
     /// Build an Upstairs for simple tests
     #[cfg(test)]
-    pub fn test_default(ddef: Option<RegionDefinition>) -> Self {
+    pub fn test_default(
+        ddef: Option<RegionDefinition>,
+        read_only: bool,
+    ) -> Self {
         let opts = CrucibleOpts {
             id: Uuid::new_v4(),
             target: vec![],
@@ -460,7 +452,7 @@ impl Upstairs {
             key_pem: None,
             root_cert_pem: None,
             control: None,
-            read_only: false,
+            read_only,
         };
 
         let log = crucible_common::build_logger();
@@ -499,12 +491,6 @@ impl Upstairs {
             }
             d = self.guest.recv(), if !self.guest_dropped => {
                 d
-            }
-            _ = self.repair_check_deadline
-                .map(|r| Either::Left(sleep_until(r)))
-                .unwrap_or(Either::Right(pending()))
-            => {
-                UpstairsAction::RepairCheck
             }
             d = self.deferred_ops.next(), if !self.deferred_ops.is_empty()
             => {
@@ -584,13 +570,26 @@ impl Upstairs {
                 self.on_client_message(m);
             }
             UpstairsAction::FlushCheck => {
-                self.counters.action_flush_check += 1;
-                cdt::up__action_flush_check!(|| (self
-                    .counters
-                    .action_flush_check));
-                if self.need_flush {
-                    let io_guard = self.try_acquire_io(0);
-                    self.submit_flush(None, None, io_guard);
+                if !has_jobs {
+                    self.counters.action_flush_check += 1;
+                    cdt::up__action_flush_check!(|| (self
+                        .counters
+                        .action_flush_check));
+                    if self.need_flush {
+                        let io_guard = self.try_acquire_io(0);
+                        self.submit_flush(None, None, io_guard);
+                    }
+                } else {
+                    // The flush timer is reset after every event, so getting
+                    // here indicates that we didn't see _any_ events for 500 ms
+                    // despite jobs being pending.
+                    //
+                    // This is surprising, and may indicate network issues or
+                    // other problems.
+                    warn!(
+                        self.log,
+                        "flush check fired despite having jobs; resetting it"
+                    );
                 }
                 self.flush_deadline = Instant::now() + self.flush_interval;
             }
@@ -601,13 +600,6 @@ impl Upstairs {
                     .action_stat_check));
                 self.on_stat_update();
                 self.stat_deadline = Instant::now() + STAT_INTERVAL;
-            }
-            UpstairsAction::RepairCheck => {
-                self.counters.action_repair_check += 1;
-                cdt::up__action_repair_check!(|| (self
-                    .counters
-                    .action_repair_check));
-                self.on_repair_check();
             }
             UpstairsAction::Control(c) => {
                 self.counters.action_control_check += 1;
@@ -621,6 +613,9 @@ impl Upstairs {
                 cdt::up__action_noop!(|| (self.counters.action_noop));
             }
         }
+
+        // Check whether we need to start live-repair
+        self.check_live_repair_start();
 
         // Check whether we need to mark an offline Downstairs as faulted
         // because too many jobs have piled up.
@@ -901,72 +896,32 @@ impl Upstairs {
     /// the [DsState::Connecting] state with the negotiation state of
     /// [NegotiationState::LiveRepairReady], indicating it needs to be repaired.
     /// If a Downstairs needs to be repaired, try to start repairing it. When
-    /// starting the repair fails, this function will schedule a task to retry
-    /// the repair by setting [Self::repair_check_deadline].
+    /// starting the repair fails, we will retry on the next event.
     ///
     /// If this Upstairs is [UpstairsConfig::read_only], this function will move
     /// any Downstairs from
     /// `DsState::Connecting { state:  NegotiationState::LiveRepairReady, .. }`
     /// back to [DsState::Active] without actually performing any repair.
-    pub(crate) fn on_repair_check(&mut self) {
-        info!(self.log, "Checking if live repair is needed");
+    pub(crate) fn check_live_repair_start(&mut self) {
         if !matches!(self.state, UpstairsState::Active) {
-            info!(self.log, "inactive, no live repair needed");
-            self.repair_check_deadline = None;
             return;
         }
 
         if self.cfg.read_only {
-            info!(self.log, "read-only, no live repair needed");
             // Repair can't happen on a read-only downstairs, so short circuit
             // here. There's no state drift to repair anyway, this read-only
             // Upstairs wouldn't have caused any modifications.
             for c in self.downstairs.clients.iter_mut() {
                 c.skip_live_repair(&self.state);
             }
-            self.repair_check_deadline = None;
             return;
         }
 
-        // Verify that all downstairs and the upstairs are in the proper state
-        // before we begin a live repair.
-        let repair_in_progress = self.downstairs.live_repair_in_progress();
-
-        let any_in_repair_ready = self.downstairs.clients.iter().any(|c| {
-            matches!(
-                c.state(),
-                DsState::Connecting {
-                    state: NegotiationState::LiveRepairReady,
-                    ..
-                }
-            )
-        });
-
-        if repair_in_progress {
-            info!(self.log, "Live Repair already running");
-            // Queue up a later check if we need it
-            if any_in_repair_ready {
-                self.repair_check_deadline =
-                    Some(Instant::now() + REPAIR_CHECK_INTERVAL);
-            } else {
-                self.repair_check_deadline = None;
-            }
-        } else if !any_in_repair_ready {
-            self.repair_check_deadline = None;
-            info!(self.log, "No Live Repair required at this time");
-        } else if !self.downstairs.start_live_repair(
+        // Try to start live-repair
+        self.downstairs.check_live_repair_start(
             &self.state,
             self.ddef.get_def().unwrap().extent_count(),
-        ) {
-            // It's hard to hit this condition; we need a Downstairs to be in
-            // LiveRepairReady, but for no other downstairs to be in Active.
-            warn!(self.log, "Could not start live repair, trying again later");
-            self.repair_check_deadline =
-                Some(Instant::now() + REPAIR_CHECK_INTERVAL);
-        } else {
-            // We started the repair in the call to start_live_repair above
-            self.repair_check_deadline = None;
-        }
+        );
     }
 
     /// Returns `true` if we're ready to accept guest IO
@@ -1185,6 +1140,15 @@ impl Upstairs {
                     done.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
+
+                let n = self.downstairs.active_client_count();
+                let required = if snapshot_details.is_some() { 3 } else { 2 };
+                if n < required {
+                    done.send_err(CrucibleError::IoError(format!(
+                        "too many inactive clients: need {required}, got {n}"
+                    )));
+                    return;
+                }
                 self.submit_flush(Some(done), snapshot_details, Some(io_guard));
             }
             BlockOp::ReplaceDownstairs { id, old, new, done } => {
@@ -1396,6 +1360,17 @@ impl Upstairs {
             return;
         }
 
+        let n = self.downstairs.active_client_count();
+        if n < 1 {
+            res.send_err((
+                data,
+                CrucibleError::IoError(format!(
+                    "too many inactive clients: need 1, got {n}"
+                )),
+            ));
+            return;
+        }
+
         /*
          * Get the next ID for the guest work struct we will make at the
          * end. This ID is also put into the IO struct we create that
@@ -1512,6 +1487,14 @@ impl Upstairs {
             return None;
         }
 
+        let n = self.downstairs.active_client_count();
+        if n < 2 {
+            res.send_err(CrucibleError::IoError(format!(
+                "too many inactive clients: need 2, got {n}"
+            )));
+            return None;
+        }
+
         /*
          * Verify IO is in range for our region
          */
@@ -1531,6 +1514,11 @@ impl Upstairs {
 
         // Fast-ack, pretending to be done immediately operations
         res.send_ok(());
+
+        // Update Oximeter stats for this write.
+        if !is_write_unwritten {
+            self.downstairs.update_write_done_metrics(data.len());
+        }
 
         Some(DeferredWrite {
             ddef,
@@ -1717,7 +1705,6 @@ impl Upstairs {
             | Message::ReadOnlyMismatch { .. }
             | Message::YouAreNowActive { .. }
             | Message::RegionInfo { .. }
-            | Message::LastFlushAck { .. }
             | Message::ExtentVersions { .. } => {
                 // negotiation and initial reconciliation
                 let r = self.downstairs.clients[client_id]
@@ -1756,19 +1743,25 @@ impl Upstairs {
                     Ok(NegotiationResult::WaitQuorum) => {
                         // Copy the region definition into the Downstairs
                         self.downstairs.set_ddef(self.ddef.get_def().unwrap());
-                        // See if we have a quorum
-                        if self.connect_region_set() {
-                            // We connected normally, so there's no need
-                            // to check for live-repair.
-                            self.repair_check_deadline = None;
+                        // If we are RO, then we have a different path than
+                        // if we are RW
+                        if self.cfg.read_only {
+                            self.connect_ro_region_set();
+                        } else {
+                            // See if we have a quorum
+                            self.connect_region_set();
                         }
                     }
                     Ok(NegotiationResult::Replay) => {
                         self.downstairs.replay_jobs(client_id);
                     }
                     Ok(NegotiationResult::LiveRepair) => {
-                        // Immediately check for live-repair
-                        self.repair_check_deadline = Some(Instant::now());
+                        // We will immediately check for live-repair as part of
+                        // invariant maintenance.
+                        info!(
+                            self.log,
+                            "client {client_id} is ready for live-repair"
+                        );
                     }
                 }
             }
@@ -1830,6 +1823,33 @@ impl Upstairs {
                 panic!("invalid response {m:?}")
             }
         }
+    }
+
+    /// Activate a read only upstairs, or add an additional downstairs to
+    /// an already active upstairs.
+    ///
+    /// A single downstairs completing negotiation can activate a read only
+    /// upstairs.  When additional read only downstairs complete negotiation,
+    /// then can join the already active upstairs region set.
+    ///
+    /// # Panics
+    /// If the upstairs is not read only.
+    /// If there is not at least one downstairs in WaitQuorum.
+    fn connect_ro_region_set(&mut self) {
+        assert!(self.cfg.read_only);
+        let one_ready = self.downstairs.clients.iter().any(|c| {
+            matches!(
+                c.state(),
+                DsState::Connecting {
+                    state: NegotiationState::WaitQuorum,
+                    ..
+                }
+            )
+        });
+        // We only call this when some downstairs has entered WaitQuorum
+        assert!(one_ready);
+
+        self.on_reconciliation_skipped()
     }
 
     /// Checks whether we can connect all three regions
@@ -1958,6 +1978,57 @@ impl Upstairs {
                 self.on_reconciliation_done(false);
                 info!(self.log, "Set Active after no reconciliation");
                 true
+            }
+        }
+    }
+
+    /// Called when reconciliation is skipped for a read only upstairs.
+    ///
+    /// Read only upstairs don't have any reconciliation to do. If we are the
+    /// first downstairs to join, then activate the upstairs.  Otherwise just
+    /// move downstairs in WaitQuorum to Active.
+    ///
+    /// # Panics
+    /// If this upstairs is not read only.
+    fn on_reconciliation_skipped(&mut self) {
+        assert!(self.cfg.read_only);
+
+        info!(self.log, "Reconciliation skipped");
+        match &self.state {
+            UpstairsState::GoActive(..) => {
+                // If we are not active yet (this is the first downstairs) then
+                // go ahead and set ourselves active.
+                info!(self.log, "Set Downstairs and Upstairs active");
+                self.downstairs.on_reconciliation_skipped(true);
+
+                // Swap out the state for UpstairsState::Active
+                let UpstairsState::GoActive(res) =
+                    std::mem::replace(&mut self.state, UpstairsState::Active)
+                else {
+                    unreachable!(); // We just matched!
+                };
+
+                res.send_ok(());
+                info!(
+                    self.log,
+                    "{} is now active with session: {}",
+                    self.cfg.upstairs_id,
+                    self.cfg.session_id
+                );
+                self.stats.add_activation();
+            }
+            UpstairsState::Active => {
+                // The upstairs is already active. Bring this downstairs into
+                // the active region set.
+                info!(self.log, "Added downstairs to the active Upstairs");
+                self.downstairs.on_reconciliation_skipped(false);
+            }
+            _ => {
+                warn!(
+                    self.log,
+                    "Invalid upstairs state {:?} for connecting when read only",
+                    self.state
+                );
             }
         }
     }
@@ -2166,7 +2237,7 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
         for c in up.downstairs.clients.iter_mut() {
             // Give all downstairs a repair address
             c.repair_addr = Some("0.0.0.0:1".parse().unwrap());
@@ -2188,12 +2259,8 @@ pub(crate) mod test {
         // Move our downstairs client fail_id to LiveRepair.
         to_live_repair_ready(&mut up, or_ds);
 
-        // Start repairing the downstairs; this also enqueues the jobs
-        up.apply(UpstairsAction::RepairCheck);
-
         // Assert that the repair started
-        up.on_repair_check();
-        assert!(up.repair_check_deadline.is_none());
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
 
         // The first thing that should happen after we start repair_extent
@@ -2234,7 +2301,7 @@ pub(crate) mod test {
     #[test]
     fn reconcile_not_ready() {
         // Verify reconcile returns false when a downstairs is not ready
-        let mut up = Upstairs::test_default(None);
+        let mut up = Upstairs::test_default(None, false);
         for cid in [ClientId::new(0), ClientId::new(1)] {
             for state in [
                 NegotiationState::WaitActive,
@@ -2252,10 +2319,70 @@ pub(crate) mod test {
                 );
             }
         }
+        let (_rx, done) = BlockOpWaiter::pair();
+        up.state = UpstairsState::GoActive(done);
 
         let res = up.connect_region_set();
         assert!(!res);
         assert!(!matches!(&up.state, &UpstairsState::Active))
+    }
+
+    #[test]
+    fn reconcile_ro_ready_with_one() {
+        // Verify we can activate with just one downstairs ready on a read only
+        // upstairs.
+        for cid in ClientId::iter() {
+            let mut up = Upstairs::test_default(None, true);
+            for state in [
+                NegotiationState::WaitActive,
+                NegotiationState::WaitForPromote,
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
+            ] {
+                up.ds_transition(
+                    cid,
+                    DsState::Connecting {
+                        mode: ConnectionMode::New,
+                        state,
+                    },
+                );
+            }
+            let (_rx, done) = BlockOpWaiter::pair();
+            up.state = UpstairsState::GoActive(done);
+
+            up.connect_ro_region_set();
+            assert!(matches!(&up.state, &UpstairsState::Active));
+        }
+    }
+
+    #[test]
+    fn reconcile_ro_ready_with_two() {
+        // Verify we can activate when 2/3 downstairs are ready in a read
+        // only upstairs.
+        let mut up = Upstairs::test_default(None, true);
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            for state in [
+                NegotiationState::WaitActive,
+                NegotiationState::WaitForPromote,
+                NegotiationState::WaitForRegionInfo,
+                NegotiationState::GetExtentVersions,
+                NegotiationState::WaitQuorum,
+            ] {
+                up.ds_transition(
+                    cid,
+                    DsState::Connecting {
+                        mode: ConnectionMode::New,
+                        state,
+                    },
+                );
+            }
+        }
+        let (_rx, done) = BlockOpWaiter::pair();
+        up.state = UpstairsState::GoActive(done);
+
+        up.connect_ro_region_set();
+        assert!(matches!(&up.state, &UpstairsState::Active));
     }
 
     #[tokio::test]
@@ -2266,7 +2393,7 @@ pub(crate) mod test {
         // we are deactivating.
         // TODO: This test should change when we support this behavior.
 
-        let mut up = Upstairs::test_default(None);
+        let mut up = Upstairs::test_default(None, false);
 
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
@@ -2303,7 +2430,7 @@ pub(crate) mod test {
         // Verify after all three downstairs are deactivated, we can
         // transition the upstairs back to init.
 
-        let mut up = Upstairs::test_default(None);
+        let mut up = Upstairs::test_default(None, false);
         up.force_active().unwrap();
 
         // The deactivate message should happen immediately
@@ -3474,19 +3601,17 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
 
         // Before we are active, we have no need to repair or check for future
         // repairs.
-        up.on_repair_check();
-        assert!(up.repair_check_deadline.is_none());
+        up.check_live_repair_start();
         assert!(!up.downstairs.live_repair_in_progress());
 
         up.force_active().unwrap();
 
         // No need to repair or check for future repairs here either
-        up.on_repair_check();
-        assert!(up.repair_check_deadline.is_none());
+        up.check_live_repair_start();
         assert!(!up.downstairs.live_repair_in_progress());
 
         // No downstairs should change state.
@@ -3504,41 +3629,15 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
         up.force_active().unwrap();
 
         // Force client 1 into LiveRepairReady
         to_live_repair_ready(&mut up, ClientId::new(1));
-        up.on_repair_check();
-        assert!(up.repair_check_deadline.is_none());
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some());
-    }
-
-    #[test]
-    fn test_check_for_repair_do_two_repair() {
-        // No repair needed here.
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(3));
-        ddef.set_extent_count(4);
-
-        let mut up = Upstairs::test_default(Some(ddef));
-        up.force_active().unwrap();
-
-        // Force clients 1 and 2 into LiveRepairReady
-        for i in [1, 2].into_iter().map(ClientId::new) {
-            to_live_repair_ready(&mut up, i);
-        }
-        up.on_repair_check();
-        assert!(up.repair_check_deadline.is_none());
-        assert!(up.downstairs.live_repair_in_progress());
-
-        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
-        assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
-        assert_eq!(up.ds_state(ClientId::new(2)), DsState::LiveRepair);
-        assert!(up.downstairs.repair().is_some())
     }
 
     #[test]
@@ -3549,24 +3648,22 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
         up.force_active().unwrap();
         to_live_repair_ready(&mut up, ClientId::new(1));
         up.ds_transition(ClientId::new(1), DsState::LiveRepair);
 
         // Start the live-repair
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
-        assert!(up.repair_check_deadline.is_none());
 
         // Pretend that DS 0 faulted then came back through to LiveRepairReady;
         // we won't halt the existing repair, but will configure
         // repair_check_deadline to check again in the future.
         to_live_repair_ready(&mut up, ClientId::new(0));
 
-        up.on_repair_check();
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
-        assert!(up.repair_check_deadline.is_some());
     }
 
     #[test]
@@ -3576,17 +3673,15 @@ pub(crate) mod test {
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let mut up = Upstairs::test_default(Some(ddef));
+        let mut up = Upstairs::test_default(Some(ddef), false);
         up.force_active().unwrap();
         to_live_repair_ready(&mut up, ClientId::new(1));
 
-        up.on_repair_check();
-        assert!(up.repair_check_deadline.is_none());
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
 
         // Checking again is idempotent
-        up.on_repair_check();
-        assert!(up.repair_check_deadline.is_none());
+        up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
     }
 

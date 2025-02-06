@@ -7,15 +7,57 @@ use super::*;
  * that need repair.
  */
 
-/**
- * This information is collected from each downstairs region in the same
- * region set.  It is used to find differences between them.
- */
+/// Information collected from each Downstairs region in the same region set
 #[derive(Debug, Clone)]
-pub struct RegionMetadata {
-    pub generation: Vec<u64>,
-    pub flush_numbers: Vec<u64>,
-    pub dirty: Vec<bool>,
+pub struct RegionMetadata(Vec<ExtentMetadata>);
+
+impl RegionMetadata {
+    pub fn new(
+        generation: &[u64],
+        flush_numbers: &[u64],
+        dirty: &[bool],
+    ) -> Self {
+        assert_eq!(generation.len(), flush_numbers.len());
+        assert_eq!(generation.len(), dirty.len());
+        Self(
+            generation
+                .iter()
+                .enumerate()
+                .map(|(i, g)| ExtentMetadata {
+                    gen: *g,
+                    flush: flush_numbers[i],
+                    dirty: dirty[i],
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &ExtentMetadata> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn get(&self, i: usize) -> Option<ExtentMetadata> {
+        self.0.get(i).cloned()
+    }
+}
+
+/// Extent metadata for a single extent
+///
+/// Note that fields are ordered in reconciliation priority order, so sorting
+/// works to pick the highest-priority extent.
+#[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+pub(crate) struct ExtentMetadata {
+    pub gen: u64,
+    pub flush: u64,
+    pub dirty: bool,
 }
 
 /**
@@ -56,98 +98,20 @@ impl DownstairsMend {
          * Sanity check that all fields of the RegionMetadata struct have the
          * same length.  Pick one vec as the standard and compare.
          */
-        let match_len = c0.generation.len();
+        assert_eq!(c0.len(), c1.len());
+        assert_eq!(c1.len(), c2.len());
 
-        if match_len != c1.generation.len() || match_len != c2.generation.len()
-        {
-            panic!(
-                "Downstairs: vec len mismatch for generation: {} {} {}",
-                c0.generation.len(),
-                c1.generation.len(),
-                c2.generation.len()
-            );
-        }
-
-        if match_len != c0.flush_numbers.len()
-            || match_len != c1.flush_numbers.len()
-            || match_len != c2.flush_numbers.len()
-        {
-            panic!(
-                "Downstairs: vec len mismatch for flush_number: {} {} {}",
-                c0.flush_numbers.len(),
-                c1.flush_numbers.len(),
-                c2.flush_numbers.len()
-            );
-        }
-
-        if match_len != c0.dirty.len()
-            || match_len != c1.dirty.len()
-            || match_len != c2.dirty.len()
-        {
-            panic!(
-                "Downstairs: vec len mismatch for dirty: {} {} {}",
-                c0.dirty.len(),
-                c1.dirty.len(),
-                c2.dirty.len()
-            );
-        }
-
-        /*
-         * As we walk the extents in our RegionMetadata vec, keep track
-         * of which extents we did not find a dirty bit set so we can
-         * continue to check for differences in gen/flush but only for
-         * extents we don't already know are a mismatch.
-         */
-        let mut to_check = Vec::new();
-
-        /*
-         * Any dirty bit set means that extent needs repair.
-         * Pick our source extent, and from that we decide which of the other
-         * two extents also need repair.
-         */
-        for (i, dirty0) in c0.dirty.iter().enumerate() {
-            if *dirty0 || c1.dirty[i] || c2.dirty[i] {
-                info!(log, "Extents {} dirty", i);
-                let log_mrl = log.new(o!("mrl" => "dirty".to_string()));
-                let ef = make_repair_list(i, c0, c1, c2, log_mrl);
+        for i in 0..c0.len() {
+            let m0 = c0.get(i).unwrap();
+            let m1 = c1.get(i).unwrap();
+            let m2 = c2.get(i).unwrap();
+            if m0.dirty || m1.dirty || m2.dirty || m0 != m1 || m1 != m2 {
+                info!(
+                    log,
+                    "extent {i} needs reconciliation: {m0:?} {m1:?} {m2:?}"
+                );
+                let ef = make_repair_list(i, c0, c1, c2, &log);
                 dsm.mend.insert(ExtentId(i as u32), ef);
-            } else {
-                to_check.push(i);
-            }
-        }
-
-        /*
-         * Find the index for any flush numbers that don't agree and
-         * add that to our to fix list.  If an index is okay, then add
-         * it to the final check for generation number.
-         */
-        let mut second_check = Vec::new();
-        for i in to_check.iter() {
-            if c0.flush_numbers[*i] != c1.flush_numbers[*i]
-                || c1.flush_numbers[*i] != c2.flush_numbers[*i]
-            {
-                info!(log, "Extent {} has flush number mismatch", i);
-                let log_mrl =
-                    log.new(o!("mrl" => "flush_mismatch".to_string()));
-                let ef = make_repair_list(*i, c0, c1, c2, log_mrl);
-                dsm.mend.insert(ExtentId(*i as u32), ef);
-            } else {
-                second_check.push(*i);
-            }
-        }
-
-        /*
-         * Walk all remaining indexes and add to the to_fix list
-         * any that are not all the same.
-         */
-        for i in second_check.iter() {
-            if c0.generation[*i] != c1.generation[*i]
-                || c1.generation[*i] != c2.generation[*i]
-            {
-                info!(log, "generation number mismatch {}", i);
-                let log_mrl = log.new(o!("mrl" => "gen_mismatch".to_string()));
-                let ef = make_repair_list(*i, c0, c1, c2, log_mrl);
-                dsm.mend.insert(ExtentId(*i as u32), ef);
             }
         }
 
@@ -169,29 +133,24 @@ fn make_repair_list(
     c0: &RegionMetadata,
     c1: &RegionMetadata,
     c2: &RegionMetadata,
-    log: Logger,
+    log: &Logger,
 ) -> ExtentFix {
-    let source = find_source(i, c0, c1, c2, &log);
-    let dest = find_dest(i, source, c0, c1, c2, &log);
+    let source = find_source(i, c0, c1, c2, log);
+    let dest = find_dest(i, source, c0, c1, c2, log);
 
     ExtentFix { source, dest }
 }
 
-/*
- * Given the index of an extent that has a mismatch, return the client ID
- * (0, 1, or 2) for the extent that should be the source of the repair
- * This requires that you have a mismatch at the provided extent, or the
- * dirty bit is set somewhere.
- *
- * Source selection is done by filtering the extent info in this order, until
- * we have a single extent remaining:
- *
- * Highest generation number.
- * Highest flush number.
- * Dirty bit set.
- *
- * If there is still a tie at the end, then just pick one.
- */
+/// Find the client ID which should be the source for reconciliation
+///
+/// This function chooses the source with the
+///
+/// - Highest generation number
+/// - Highest flush number (if generation numbers are equal)
+/// - Dirty bit set (if generation and flush numbers are equal)
+///
+/// If there is still a tie at the end, then the numerically lowest `ClientId`
+/// is chosen.
 fn find_source(
     i: usize,
     c0: &RegionMetadata,
@@ -199,126 +158,22 @@ fn find_source(
     c2: &RegionMetadata,
     log: &Logger,
 ) -> ClientId {
-    /*
-     * All three client IDs are candidates for the max generation number,
-     * remove a client ID as we find it has a lower value than the others.
-     */
-    let mut max_gen =
-        vec![ClientId::new(0), ClientId::new(1), ClientId::new(2)];
+    let vs = [c0, c1, c2].map(|c| c.get(i).unwrap());
 
-    info!(log, "First source client ID for extent {}", i);
+    let (i, _v) = vs
+        .iter()
+        .enumerate()
+        .rev() // pick the lowest ClientId
+        .max_by_key(|(_i, v)| **v) // ExtentMetadata has priority-sorted fields
+        .unwrap();
+    let out = ClientId::new(i as u8);
 
-    let gen0 = c0.generation[i];
-    let gen1 = c1.generation[i];
-    let gen2 = c2.generation[i];
-
-    info!(log, "extent:{}  gens: {} {} {}", i, gen0, gen1, gen2);
-
-    if gen0 != gen1 || gen1 != gen2 {
-        /*
-         * We know at least one of the generation numbers is greater,
-         * so this first check will see if one is the largest.
-         */
-        if gen0 > gen1 && gen0 > gen2 {
-            return ClientId::new(0);
-        } else if gen1 > gen0 && gen1 > gen2 {
-            return ClientId::new(1);
-        } else if gen2 > gen0 && gen2 > gen1 {
-            return ClientId::new(2);
-        }
-
-        /*
-         * If we are here, then two gen numbers match, and we need to take
-         * the third lower generation number off the list for comparison
-         * before we move on to try to break the tie with flush numbers.
-         */
-        if gen0 == gen1 {
-            max_gen.remove(2);
-        } else if gen0 == gen2 {
-            max_gen.remove(1);
-        } else {
-            assert_eq!(gen1, gen2);
-            max_gen.remove(0);
-        }
-    }
-
-    /*
-     * Our generation numbers did not break the tie, either they are all
-     * the same, or we have just two that are the same and have removed
-     * the lower one.  Now look for a flush number that is greater.
-     *
-     * Put the three downstairs RegionMetadata structs into an array with the
-     * index being the client ID.  We use the max_gen vec to see if any
-     * of the remaining client IDs have a higher flush number.
-     */
-    let rec = ClientData([c0, c1, c2]);
-
-    info!(
-        log,
-        "extent:{}  flush: {} {} {} scs: {:?}",
-        i,
-        c0.flush_numbers[i],
-        c1.flush_numbers[i],
-        c2.flush_numbers[i],
-        max_gen,
-    );
-
-    let mut max = 0;
-    let mut max_flush = Vec::new();
-
-    for sc in max_gen.iter() {
-        if rec[*sc].flush_numbers[i] > max {
-            max = rec[*sc].flush_numbers[i];
-        }
-    }
-    for sc in max_gen.iter() {
-        if rec[*sc].flush_numbers[i] == max {
-            max_flush.push(*sc);
-        }
-    }
-
-    info!(log, "max_flush now has: {:?}", max_flush);
-    if max_flush.len() == 1 {
-        return max_flush[0];
-    }
-
-    /*
-     * To get here we have at least two (and possibly three) extents where
-     * the gen and flush are the same.  All that remains to break the tie is
-     * an extent with the dirty bit set.
-     */
-    info!(
-        log,
-        "extent:{}  dirty: {} {} {}", i, c0.dirty[i], c1.dirty[i], c2.dirty[i],
-    );
-    for sc in max_flush.iter() {
-        if rec[*sc].dirty[i] {
-            return *sc;
-        }
-    }
-
-    /*
-     * To get here, the mismatch has to be a dirty bit set on an extent
-     * that had lower gen or flush numbers and is no longer under
-     * consideration, with the remaining two client extents having
-     * matching gen and flush numbers.
-     */
-    info!(log, "No maxes found, left with: {:?}", max_flush);
-    assert_eq!(max_flush.len(), 2);
-
-    /*
-     * Note that by always returning the lowest element in the vec, we
-     * are biasing the repair to select it.  It is also expected in the
-     * tests, so if you change it here, you will have to change it
-     * there as well.
-     */
-    max_flush[0]
+    info!(log, "extent:{i} {vs:?} => {out}",);
+    out
 }
 
-/*
- * Given the source for data from an extent mismatch, figure out which
- * of the remaining extents need updating.
- */
+/// Given the source for data from an extent mismatch, figure out which
+/// of the remaining extents need updating.
 fn find_dest(
     i: usize,
     source: ClientId,
@@ -327,49 +182,20 @@ fn find_dest(
     c2: &RegionMetadata,
     log: &Logger,
 ) -> Vec<ClientId> {
-    let mut dest: Vec<ClientId> = Vec::new();
+    let c = ClientData::from_fn(|cid| {
+        [c0, c1, c2][cid.get() as usize].get(i).unwrap()
+    });
+    let s = c[source];
 
-    /*
-     * Put the three downstairs RegionMetadata structs into an array with the
-     * index being the client ID.
-     */
-    let rec = ClientData([c0, c1, c2]);
+    let out = ClientId::iter()
+        .filter(|&i| i != source && (s.dirty || c[i] != s))
+        .collect::<Vec<_>>();
 
     info!(
         log,
-        "find dest for source {} for extent at index {}", source, i
+        "found dest for source {source} for extent at index {i} => {out:?}"
     );
-
-    let to_check = match source.get() {
-        0 => vec![ClientId::new(1), ClientId::new(2)],
-        1 => vec![ClientId::new(0), ClientId::new(2)],
-        2 => vec![ClientId::new(0), ClientId::new(1)],
-        _ => panic!("invalid client ID"),
-    };
-
-    for dc in to_check.iter() {
-        if rec[source].generation[i] != rec[*dc].generation[i] {
-            dest.push(*dc);
-            info!(log, "source {}, add dest {} gen", source, dc);
-            continue;
-        }
-        if rec[source].flush_numbers[i] != rec[*dc].flush_numbers[i] {
-            dest.push(*dc);
-            info!(log, "source {}, add dest {} flush", source, dc);
-            continue;
-        }
-        if rec[source].dirty[i] {
-            dest.push(*dc);
-            info!(log, "source {}, add dest {} source flush", source, dc);
-            continue;
-        }
-        if rec[*dc].dirty[i] {
-            dest.push(*dc);
-            info!(log, "source {}, add dest {} dc flush", source, dc);
-            continue;
-        }
-    }
-    dest
+    out
 }
 
 #[cfg(test)]
@@ -385,11 +211,8 @@ mod test {
     fn reconcile_one() {
         // Verify simple reconcile
 
-        let dsr = RegionMetadata {
-            generation: vec![1, 1, 1],
-            flush_numbers: vec![3, 3, 3],
-            dirty: vec![false, false, false],
-        };
+        let dsr =
+            RegionMetadata::new(&[1, 1, 1], &[3, 3, 3], &[false, false, false]);
         let to_fix = DownstairsMend::new(&dsr, &dsr, &dsr, csl());
         assert!(to_fix.is_none());
     }
@@ -399,16 +222,16 @@ mod test {
     fn reconcile_gen_length_bad() {
         // Verify reconcile fails when generation vec length does
         // not agree between downstairs.
-        let dsr = RegionMetadata {
-            generation: vec![1, 1, 1],
-            flush_numbers: vec![3, 3, 3, 3],
-            dirty: vec![false, false, false, false],
-        };
-        let dsr_long = RegionMetadata {
-            generation: vec![1, 1, 1, 1],
-            flush_numbers: vec![3, 3, 3, 3],
-            dirty: vec![false, false, false, false],
-        };
+        let dsr = RegionMetadata::new(
+            &[1, 1, 1],
+            &[3, 3, 3, 3],
+            &[false, false, false, false],
+        );
+        let dsr_long = RegionMetadata::new(
+            &[1, 1, 1, 1],
+            &[3, 3, 3, 3],
+            &[false, false, false, false],
+        );
         let _fix = DownstairsMend::new(&dsr, &dsr, &dsr_long, csl());
     }
 
@@ -417,17 +240,17 @@ mod test {
     fn reconcile_flush_length_bad() {
         // Verify reconcile fails when flush vec length does not
         // agree between downstairs.
-        let d1 = RegionMetadata {
-            generation: vec![0, 0, 0, 1],
-            flush_numbers: vec![0, 0, 0, 0],
-            dirty: vec![false, false, false, false],
-        };
+        let d1 = RegionMetadata::new(
+            &[0, 0, 0, 1],
+            &[0, 0, 0, 0],
+            &[false, false, false, false],
+        );
 
-        let d2 = RegionMetadata {
-            generation: vec![0, 0, 0, 1],
-            flush_numbers: vec![0, 0, 0],
-            dirty: vec![false, false, false, false],
-        };
+        let d2 = RegionMetadata::new(
+            &[0, 0, 0, 1],
+            &[0, 0, 0],
+            &[false, false, false, false],
+        );
         let _fix = DownstairsMend::new(&d1, &d1, &d2, csl());
     }
 
@@ -436,17 +259,17 @@ mod test {
     fn reconcile_dirty_length_bad() {
         // Verify reconcile fails when dirty vec length does not
         // agree between downstairs.
-        let d1 = RegionMetadata {
-            generation: vec![0, 0, 0, 1],
-            flush_numbers: vec![0, 0, 0, 0],
-            dirty: vec![false, false, false],
-        };
+        let d1 = RegionMetadata::new(
+            &[0, 0, 0, 1],
+            &[0, 0, 0, 0],
+            &[false, false, false],
+        );
 
-        let d2 = RegionMetadata {
-            generation: vec![0, 0, 0, 1],
-            flush_numbers: vec![0, 0, 0, 0],
-            dirty: vec![false, false, false, false],
-        };
+        let d2 = RegionMetadata::new(
+            &[0, 0, 0, 1],
+            &[0, 0, 0, 0],
+            &[false, false, false, false],
+        );
         let _fix = DownstairsMend::new(&d1, &d2, &d1, csl());
     }
 
@@ -454,11 +277,11 @@ mod test {
     #[should_panic]
     fn reconcile_length_mismatch() {
         // Verify reconcile fails when the length of the fields don't agree.
-        let d1 = RegionMetadata {
-            generation: vec![0, 0, 0, 1],
-            flush_numbers: vec![0, 0, 0],
-            dirty: vec![false, false, false],
-        };
+        let d1 = RegionMetadata::new(
+            &[0, 0, 0, 1],
+            &[0, 0, 0],
+            &[false, false, false],
+        );
         let _fix = DownstairsMend::new(&d1, &d1, &d1, csl());
     }
 
@@ -466,11 +289,11 @@ mod test {
     fn reconcile_to_repair() {
         // Verify reconcile to_repair returns None when no mismatch
 
-        let dsr = RegionMetadata {
-            generation: vec![1, 2, 3, 0],
-            flush_numbers: vec![4, 5, 4, 0],
-            dirty: vec![false, false, false, false],
-        };
+        let dsr = RegionMetadata::new(
+            &[1, 2, 3, 0],
+            &[4, 5, 4, 0],
+            &[false, false, false, false],
+        );
 
         let fix = DownstairsMend::new(&dsr, &dsr, &dsr, csl());
         assert!(fix.is_none());
@@ -486,23 +309,23 @@ mod test {
         let generation = vec![9, 8, 7, 7];
         let flush_numbers = vec![2, 1, 2, 1];
 
-        let d1 = RegionMetadata {
-            generation: generation.clone(),
-            flush_numbers: flush_numbers.clone(),
-            dirty: vec![false, false, false, false],
-        };
+        let d1 = RegionMetadata::new(
+            &generation,
+            &flush_numbers,
+            &[false, false, false, false],
+        );
 
-        let d2 = RegionMetadata {
-            generation: generation.clone(),
-            flush_numbers,
-            dirty: vec![false, false, true, false],
-        };
+        let d2 = RegionMetadata::new(
+            &generation,
+            &flush_numbers,
+            &[false, false, true, false],
+        );
 
-        let d3 = RegionMetadata {
-            generation,
-            flush_numbers: vec![2, 1, 3, 1],
-            dirty: vec![false, false, true, false],
-        };
+        let d3 = RegionMetadata::new(
+            &generation,
+            &[2, 1, 3, 1],
+            &[false, false, true, false],
+        );
         let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
 
         // Extent 2 has the mismatch
@@ -529,17 +352,17 @@ mod test {
         // Build the common elements to share.
         let flush_numbers = vec![2, 1, 2, 1];
 
-        let d1 = RegionMetadata {
-            generation: vec![9, 8, 7, 7],
-            flush_numbers: flush_numbers.clone(),
-            dirty: vec![false, false, false, false],
-        };
+        let d1 = RegionMetadata::new(
+            &[9, 8, 7, 7],
+            &flush_numbers,
+            &[false, false, false, false],
+        );
 
-        let d2 = RegionMetadata {
-            generation: vec![9, 7, 7, 7],
-            flush_numbers,
-            dirty: vec![false, true, false, false],
-        };
+        let d2 = RegionMetadata::new(
+            &[9, 7, 7, 7],
+            &flush_numbers,
+            &[false, true, false, false],
+        );
         let mut fix = DownstairsMend::new(&d1, &d1, &d2, csl()).unwrap();
 
         // Extent 1 has the mismatch, so we should find in the HM.
@@ -561,17 +384,17 @@ mod test {
         let generation = vec![9, 8, 7, 7];
         let flush_numbers = vec![2, 1, 2, 1];
 
-        let d1 = RegionMetadata {
-            generation: generation.clone(),
-            flush_numbers: flush_numbers.clone(),
-            dirty: vec![false, false, false, false],
-        };
+        let d1 = RegionMetadata::new(
+            &generation,
+            &flush_numbers,
+            &[false, false, false, false],
+        );
 
-        let d2 = RegionMetadata {
-            generation,
-            flush_numbers,
-            dirty: vec![false, false, true, false],
-        };
+        let d2 = RegionMetadata::new(
+            &generation,
+            &flush_numbers,
+            &[false, false, true, false],
+        );
         let mut fix = DownstairsMend::new(&d1, &d2, &d1, csl()).unwrap();
 
         // Extent 2 has the mismatch
@@ -595,11 +418,11 @@ mod test {
         // This test also has two extents with a mismatch, so we verify
         // that as well.
         //
-        let d1 = RegionMetadata {
-            generation: vec![9, 8, 7, 7],
-            flush_numbers: vec![2, 1, 2, 1],
-            dirty: vec![true, false, false, true],
-        };
+        let d1 = RegionMetadata::new(
+            &[9, 8, 7, 7],
+            &[2, 1, 2, 1],
+            &[true, false, false, true],
+        );
         let mut fix = DownstairsMend::new(&d1, &d1, &d1, csl()).unwrap();
 
         // Extents 0 and 3 have the mismatch
@@ -628,17 +451,8 @@ mod test {
         let flush_numbers = vec![2, 1, 2, 1];
         let dirty = vec![false, false, false, false];
 
-        let d1 = RegionMetadata {
-            generation: vec![9, 8, 7, 0],
-            flush_numbers: flush_numbers.clone(),
-            dirty: dirty.clone(),
-        };
-
-        let d2 = RegionMetadata {
-            generation: vec![8, 8, 7, 0],
-            flush_numbers,
-            dirty,
-        };
+        let d1 = RegionMetadata::new(&[9, 8, 7, 0], &flush_numbers, &dirty);
+        let d2 = RegionMetadata::new(&[8, 8, 7, 0], &flush_numbers, &dirty);
 
         let mut fix = DownstairsMend::new(&d1, &d2, &d2, csl()).unwrap();
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -659,17 +473,8 @@ mod test {
         let flush_numbers = vec![2, 1, 2, 3];
         let dirty = vec![false, false, false, false];
 
-        let d1 = RegionMetadata {
-            generation: vec![9, 8, 7, 0],
-            flush_numbers: flush_numbers.clone(),
-            dirty: dirty.clone(),
-        };
-
-        let d2 = RegionMetadata {
-            generation: vec![8, 8, 7, 0],
-            flush_numbers,
-            dirty,
-        };
+        let d1 = RegionMetadata::new(&[9, 8, 7, 0], &flush_numbers, &dirty);
+        let d2 = RegionMetadata::new(&[8, 8, 7, 0], &flush_numbers, &dirty);
 
         let mut fix = DownstairsMend::new(&d1, &d2, &d1, csl()).unwrap();
 
@@ -697,23 +502,9 @@ mod test {
         let flush_numbers = vec![2, 1, 2, 3];
         let dirty = vec![false, false, false, false];
 
-        let d1 = RegionMetadata {
-            generation: vec![7, 8, 7, 5],
-            flush_numbers: flush_numbers.clone(),
-            dirty: dirty.clone(),
-        };
-
-        let d2 = RegionMetadata {
-            generation: vec![8, 9, 7, 4],
-            flush_numbers: flush_numbers.clone(),
-            dirty: dirty.clone(),
-        };
-
-        let d3 = RegionMetadata {
-            generation: vec![8, 10, 7, 3],
-            flush_numbers,
-            dirty,
-        };
+        let d1 = RegionMetadata::new(&[7, 8, 7, 5], &flush_numbers, &dirty);
+        let d2 = RegionMetadata::new(&[8, 9, 7, 4], &flush_numbers, &dirty);
+        let d3 = RegionMetadata::new(&[8, 10, 7, 3], &flush_numbers, &dirty);
 
         let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
 
@@ -752,17 +543,8 @@ mod test {
         let generation = vec![9, 8, 7, 7];
         let dirty = vec![false, false, false, false];
 
-        let d1 = RegionMetadata {
-            generation: generation.clone(),
-            flush_numbers: vec![1, 1, 2, 1],
-            dirty: dirty.clone(),
-        };
-
-        let d2 = RegionMetadata {
-            generation,
-            flush_numbers: vec![2, 1, 2, 1],
-            dirty,
-        };
+        let d1 = RegionMetadata::new(&generation, &[1, 1, 2, 1], &dirty);
+        let d2 = RegionMetadata::new(&generation, &[2, 1, 2, 1], &dirty);
 
         let mut fix = DownstairsMend::new(&d1, &d2, &d2, csl()).unwrap();
 
@@ -788,23 +570,9 @@ mod test {
         let generation = vec![9, 8, 7, 7, 6, 5];
         let dirty = vec![false, false, false, false, false, false];
 
-        let d1 = RegionMetadata {
-            generation: generation.clone(),
-            flush_numbers: vec![1, 2, 3, 3, 1, 2],
-            dirty: dirty.clone(),
-        };
-
-        let d2 = RegionMetadata {
-            generation: generation.clone(),
-            flush_numbers: vec![2, 1, 2, 2, 3, 3],
-            dirty: dirty.clone(),
-        };
-
-        let d3 = RegionMetadata {
-            generation,
-            flush_numbers: vec![3, 3, 3, 1, 3, 2],
-            dirty,
-        };
+        let d1 = RegionMetadata::new(&generation, &[1, 2, 3, 3, 1, 2], &dirty);
+        let d2 = RegionMetadata::new(&generation, &[2, 1, 2, 2, 3, 3], &dirty);
+        let d3 = RegionMetadata::new(&generation, &[3, 3, 3, 1, 3, 2], &dirty);
 
         let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
 
@@ -873,17 +641,8 @@ mod test {
         let generation = vec![9, 8, 7, 7];
         let dirty = vec![false, false, false, false];
 
-        let d1 = RegionMetadata {
-            generation: generation.clone(),
-            flush_numbers: vec![1, 1, 2, 1],
-            dirty: dirty.clone(),
-        };
-
-        let d2 = RegionMetadata {
-            generation,
-            flush_numbers: vec![2, 1, 2, 3],
-            dirty,
-        };
+        let d1 = RegionMetadata::new(&generation, &[1, 1, 2, 1], &dirty);
+        let d2 = RegionMetadata::new(&generation, &[2, 1, 2, 3], &dirty);
 
         let mut fix = DownstairsMend::new(&d1, &d1, &d2, csl()).unwrap();
         // Extent 0 has the first mismatch
@@ -913,21 +672,21 @@ mod test {
         // there are multiple differences in multiple fields.
 
         // Generate some reconciliation data
-        let d1 = RegionMetadata {
-            generation: vec![9, 8, 7, 7],
-            flush_numbers: vec![2, 1, 2, 1],
-            dirty: vec![false, false, false, true],
-        };
-        let d2 = RegionMetadata {
-            generation: vec![9, 7, 7, 7],
-            flush_numbers: vec![2, 1, 2, 1],
-            dirty: vec![false, false, true, true],
-        };
-        let d3 = RegionMetadata {
-            generation: vec![9, 8, 8, 7],
-            flush_numbers: vec![3, 1, 2, 1],
-            dirty: vec![true, false, false, true],
-        };
+        let d1 = RegionMetadata::new(
+            &[9, 8, 7, 7],
+            &[2, 1, 2, 1],
+            &[false, false, false, true],
+        );
+        let d2 = RegionMetadata::new(
+            &[9, 7, 7, 7],
+            &[2, 1, 2, 1],
+            &[false, false, true, true],
+        );
+        let d3 = RegionMetadata::new(
+            &[9, 8, 8, 7],
+            &[3, 1, 2, 1],
+            &[true, false, false, true],
+        );
 
         let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
         // Extent 0 has a flush mismatch
@@ -978,21 +737,21 @@ mod test {
         // two extents.
 
         // Generate some reconciliation data
-        let d1 = RegionMetadata {
-            generation: vec![9, 7, 7, 7],
-            flush_numbers: vec![1, 1, 2, 5],
-            dirty: vec![false, false, false, false],
-        };
-        let d2 = RegionMetadata {
-            generation: vec![9, 8, 9, 8],
-            flush_numbers: vec![2, 1, 1, 4],
-            dirty: vec![false, false, false, false],
-        };
-        let d3 = RegionMetadata {
-            generation: vec![8, 8, 7, 9],
-            flush_numbers: vec![3, 2, 3, 3],
-            dirty: vec![false, false, false, false],
-        };
+        let d1 = RegionMetadata::new(
+            &[9, 7, 7, 7],
+            &[1, 1, 2, 5],
+            &[false, false, false, false],
+        );
+        let d2 = RegionMetadata::new(
+            &[9, 8, 9, 8],
+            &[2, 1, 1, 4],
+            &[false, false, false, false],
+        );
+        let d3 = RegionMetadata::new(
+            &[8, 8, 7, 9],
+            &[3, 2, 3, 3],
+            &[false, false, false, false],
+        );
 
         let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
         // Extent 0 has a flush mismatch
@@ -1056,21 +815,9 @@ mod test {
             false, false, false, false, false, false, false, false, false,
         ];
 
-        let d0 = RegionMetadata {
-            generation: gen0,
-            flush_numbers: flush.clone(),
-            dirty: dirty.clone(),
-        };
-        let d1 = RegionMetadata {
-            generation: gen1,
-            flush_numbers: flush.clone(),
-            dirty: dirty.clone(),
-        };
-        let d2 = RegionMetadata {
-            generation: gen2,
-            flush_numbers: flush,
-            dirty,
-        };
+        let d0 = RegionMetadata::new(&gen0, &flush, &dirty);
+        let d1 = RegionMetadata::new(&gen1, &flush, &dirty);
+        let d2 = RegionMetadata::new(&gen2, &flush, &dirty);
         let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has no mismatch
@@ -1154,21 +901,9 @@ mod test {
             false, false, false, false, false, false, false, false, false,
         ];
 
-        let d0 = RegionMetadata {
-            generation: gen0,
-            flush_numbers: flush.clone(),
-            dirty: dirty.clone(),
-        };
-        let d1 = RegionMetadata {
-            generation: gen1,
-            flush_numbers: flush.clone(),
-            dirty: dirty.clone(),
-        };
-        let d2 = RegionMetadata {
-            generation: gen2,
-            flush_numbers: flush,
-            dirty,
-        };
+        let d0 = RegionMetadata::new(&gen0, &flush, &dirty);
+        let d1 = RegionMetadata::new(&gen1, &flush, &dirty);
+        let d2 = RegionMetadata::new(&gen2, &flush, &dirty);
         let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has a mismatch
@@ -1252,21 +987,9 @@ mod test {
             false, false, false, false, false, false, false, false, false,
         ];
 
-        let d0 = RegionMetadata {
-            generation: gen0,
-            flush_numbers: flush.clone(),
-            dirty: dirty.clone(),
-        };
-        let d1 = RegionMetadata {
-            generation: gen1,
-            flush_numbers: flush.clone(),
-            dirty: dirty.clone(),
-        };
-        let d2 = RegionMetadata {
-            generation: gen2,
-            flush_numbers: flush,
-            dirty,
-        };
+        let d0 = RegionMetadata::new(&gen0, &flush, &dirty);
+        let d1 = RegionMetadata::new(&gen1, &flush, &dirty);
+        let d2 = RegionMetadata::new(&gen2, &flush, &dirty);
         let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has a mismatch
@@ -1346,21 +1069,9 @@ mod test {
             false, false, false, false, false, false, false, false, false,
         ];
 
-        let d0 = RegionMetadata {
-            generation: gen.clone(),
-            flush_numbers: flush0,
-            dirty: dirty.clone(),
-        };
-        let d1 = RegionMetadata {
-            generation: gen.clone(),
-            flush_numbers: flush1,
-            dirty: dirty.clone(),
-        };
-        let d2 = RegionMetadata {
-            generation: gen,
-            flush_numbers: flush2,
-            dirty,
-        };
+        let d0 = RegionMetadata::new(&gen, &flush0, &dirty);
+        let d1 = RegionMetadata::new(&gen, &flush1, &dirty);
+        let d2 = RegionMetadata::new(&gen, &flush2, &dirty);
         let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has no mismatch
@@ -1443,21 +1154,9 @@ mod test {
             false, false, false, false, false, false, false, false, false,
         ];
 
-        let d0 = RegionMetadata {
-            generation: gen.clone(),
-            flush_numbers: flush0,
-            dirty: dirty.clone(),
-        };
-        let d1 = RegionMetadata {
-            generation: gen.clone(),
-            flush_numbers: flush1,
-            dirty: dirty.clone(),
-        };
-        let d2 = RegionMetadata {
-            generation: gen,
-            flush_numbers: flush2,
-            dirty,
-        };
+        let d0 = RegionMetadata::new(&gen, &flush0, &dirty);
+        let d1 = RegionMetadata::new(&gen, &flush1, &dirty);
+        let d2 = RegionMetadata::new(&gen, &flush2, &dirty);
         let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has a mismatch
@@ -1541,21 +1240,9 @@ mod test {
             false, false, false, false, false, false, false, false, false,
         ];
 
-        let d0 = RegionMetadata {
-            generation: gen.clone(),
-            flush_numbers: flush0,
-            dirty: dirty.clone(),
-        };
-        let d1 = RegionMetadata {
-            generation: gen.clone(),
-            flush_numbers: flush1,
-            dirty: dirty.clone(),
-        };
-        let d2 = RegionMetadata {
-            generation: gen,
-            flush_numbers: flush2,
-            dirty,
-        };
+        let d0 = RegionMetadata::new(&gen, &flush0, &dirty);
+        let d1 = RegionMetadata::new(&gen, &flush1, &dirty);
+        let d2 = RegionMetadata::new(&gen, &flush2, &dirty);
         let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
 
         // Extent 0 has a mismatch

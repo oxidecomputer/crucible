@@ -12,6 +12,8 @@ use crate::guest::Guest;
 use crate::up_main;
 use crate::BlockIO;
 use crate::Buffer;
+use crate::ClientFaultReason;
+use crate::ClientStopReason;
 use crate::ConnectionMode;
 use crate::CrucibleError;
 use crate::DsState;
@@ -33,6 +35,7 @@ use crucible_protocol::JobId;
 use crucible_protocol::Message;
 use crucible_protocol::ReadBlockContext;
 use crucible_protocol::ReadResponseHeader;
+use crucible_protocol::SnapshotDetails;
 use crucible_protocol::WriteHeader;
 
 use bytes::BytesMut;
@@ -215,14 +218,12 @@ impl DownstairsHandle {
 
     pub async fn negotiate_step_last_flush(
         &mut self,
-        last_flush_number: JobId,
+        expected_last_flush: Option<JobId>,
     ) {
         let packet = self.recv().await.unwrap();
-        if let Message::LastFlush { .. } = &packet {
+        if let Message::LastFlush { last_flush_number } = &packet {
+            assert_eq!(*last_flush_number, expected_last_flush);
             info!(self.log, "negotiate packet {:?}", packet);
-
-            self.send(Message::LastFlushAck { last_flush_number })
-                .unwrap();
         } else {
             panic!("wrong packet: {packet:?}, expected LastFlush");
         }
@@ -291,6 +292,35 @@ impl DownstairsHandle {
         }
     }
 
+    /// Awaits a `Message::Flush` and sends a `FlushAck` with an `IoError`
+    ///
+    /// Returns the flush number for further checks.
+    ///
+    /// # Panics
+    /// If a non-flush message arrives
+    pub async fn err_flush(&mut self) -> u64 {
+        match self.recv().await.unwrap() {
+            Message::Flush {
+                job_id,
+                flush_number,
+                upstairs_id,
+                ..
+            } => {
+                self.send(Message::FlushAck {
+                    upstairs_id,
+                    session_id: self.upstairs_session_id.unwrap(),
+                    job_id,
+                    result: Err(CrucibleError::IoError("oh no".to_string())),
+                })
+                .unwrap();
+                flush_number
+            }
+            m => {
+                panic!("saw non flush {m:?}");
+            }
+        }
+    }
+
     /// Awaits a `Message::Write { .. }` and sends a `WriteAck`
     ///
     /// Returns the job ID for further checks.
@@ -305,6 +335,23 @@ impl DownstairsHandle {
                     session_id: self.upstairs_session_id.unwrap(),
                     job_id: header.job_id,
                     result: Ok(()),
+                })
+                .unwrap();
+                header.job_id
+            }
+            m => panic!("saw non write: {m:?}"),
+        }
+    }
+
+    /// Awaits a `Message::Write` and sends a `WriteAck` with `IOError`
+    pub async fn err_write(&mut self) -> JobId {
+        match self.recv().await.unwrap() {
+            Message::Write { header, .. } => {
+                self.send(Message::WriteAck {
+                    upstairs_id: header.upstairs_id,
+                    session_id: self.upstairs_session_id.unwrap(),
+                    job_id: header.job_id,
+                    result: Err(CrucibleError::IoError("oh no".to_string())),
                 })
                 .unwrap();
                 header.job_id
@@ -360,7 +407,7 @@ impl DownstairsHandle {
                         job_id,
                         blocks: Ok(vec![block]),
                     },
-                    data: data.clone(),
+                    data,
                 })
                 .unwrap();
                 job_id
@@ -710,7 +757,7 @@ async fn test_replay_occurs() {
     harness.restart_ds1().await;
 
     harness.ds1().negotiate_start().await;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
+    harness.ds1().negotiate_step_last_flush(None).await;
 
     let mut ds1_message_second_time = None;
 
@@ -813,7 +860,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                 job_id,
                 blocks: Ok(vec![block]),
             },
-            data: data.clone(),
+            data,
         }) {
             Ok(()) => panic!("DS1 should be disconnected"),
             Err(e) => {
@@ -2783,7 +2830,7 @@ async fn test_write_replay() {
     harness.restart_ds1().await;
 
     harness.ds1().negotiate_start().await;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
+    harness.ds1().negotiate_step_last_flush(None).await;
 
     // Ensure that we get the same Write
     // Send a reply, which is the second time this Write operation completes
@@ -2845,7 +2892,7 @@ async fn test_no_send_offline() {
     // Start negotiation
     harness.ds1().negotiate_start().await;
 
-    // Check that a write doesn't make it to DS1
+    // Check that a write doesn't make it to DS1 before replay
     let write_handle = harness.spawn(|guest| async move {
         let mut data = BytesMut::new();
         data.resize(512, 1u8);
@@ -2854,27 +2901,15 @@ async fn test_no_send_offline() {
     harness.ds2.ack_write().await;
     harness.ds3.ack_write().await;
 
-    // We expect to receive the next negotiation packet, not the Write
+    // We expect to receive the final negotiation packet, followed by the Write
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let last_flush_number = match harness.ds1().try_recv() {
+    match harness.ds1().try_recv() {
         Ok(Message::LastFlush { last_flush_number }) => last_flush_number,
         m => panic!("unexpected message {m:?}"),
     };
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(harness.ds1().try_recv(), Err(TryRecvError::Empty));
-
     // The write should be done
     write_handle.await.unwrap();
-
-    // Now, bring the Downstairs up, which should trigger replay
-    harness
-        .ds1()
-        .send(Message::LastFlushAck { last_flush_number })
-        .unwrap();
-
-    // Give the replay a moment to happen
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // We should see that write sent as a replay
     match harness.ds1().try_recv() {
@@ -2883,6 +2918,111 @@ async fn test_no_send_offline() {
         }
         e => panic!("invalid message {e:?}; expected Write"),
     }
+}
+
+async fn test_ro_activate_from_list(activate: [bool; 3]) {
+    let log = csl();
+
+    let cfg = DownstairsConfig {
+        read_only: true,
+        reply_to_ping: true,
+        extent_count: DEFAULT_EXTENT_COUNT,
+        extent_size: Block::new_512(DEFAULT_BLOCK_COUNT),
+        gen_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
+        flush_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
+        dirty_bits: vec![false; DEFAULT_EXTENT_COUNT as usize],
+    };
+
+    let mut ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
+    let mut ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
+    let mut ds3 = cfg.clone().start(log.new(o!("downstairs" => 3))).await;
+
+    let (g, io) = Guest::new(Some(log.clone()));
+    let guest = Arc::new(g);
+
+    let crucible_opts = CrucibleOpts {
+        id: Uuid::new_v4(),
+        target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
+        flush_timeout: Some(1.0),
+        read_only: true,
+
+        ..Default::default()
+    };
+
+    let join_handle = up_main(crucible_opts, 1, None, io, None).unwrap();
+
+    let mut handles: Vec<JoinHandle<()>> = vec![];
+    {
+        let guest = guest.clone();
+        handles.push(tokio::spawn(async move {
+            guest.activate().await.unwrap();
+        }));
+    }
+
+    // Move negotiation along for downstairs we want to activate.
+    for (i, ds) in [&mut ds1, &mut ds2, &mut ds3].iter_mut().enumerate() {
+        if activate[i] {
+            info!(log, "Activate downstairs {i}");
+            ds.negotiate_start().await;
+            ds.negotiate_step_extent_versions_please().await;
+        }
+    }
+
+    for _ in 0..10 {
+        if guest.query_is_active().await.unwrap() {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    assert!(guest.query_is_active().await.unwrap());
+
+    // Create our test harness so we can send IO.
+    let mut harness = TestHarness {
+        log: log.clone(),
+        ds1: Some(ds1),
+        ds2,
+        ds3,
+        _join_handle: join_handle,
+        guest,
+    };
+
+    // We must `spawn` here because `read` will wait for the response to
+    // come back before returning
+    let h = harness.spawn(|guest| async move {
+        let mut buffer = Buffer::new(1, 512);
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
+    });
+
+    // Ack the read on the downstairs that are active.
+    if activate[0] {
+        harness.ds1().ack_read().await;
+    }
+    if activate[1] {
+        harness.ds2.ack_read().await;
+    }
+    if activate[2] {
+        harness.ds3.ack_read().await;
+    }
+
+    h.await.unwrap(); // after > 1x response, the read finishes
+}
+
+#[tokio::test]
+async fn test_ro_activate_with_one() {
+    // Verify ro upstairs can activate with just one downstairs ready.
+    test_ro_activate_from_list([true, false, false]).await;
+    test_ro_activate_from_list([false, true, false]).await;
+    test_ro_activate_from_list([false, false, true]).await;
+}
+
+#[tokio::test]
+async fn test_ro_activate_with_two() {
+    // Verify ro upstairs will activate with only two downstairs ready.
+    test_ro_activate_from_list([true, true, false]).await;
+    test_ro_activate_from_list([true, false, true]).await;
+    test_ro_activate_from_list([false, true, true]).await;
 }
 
 /// Test that barrier operations are sent periodically
@@ -2963,4 +3103,205 @@ async fn test_bytes_based_barrier() {
     harness.ds1().ack_flush().await;
     harness.ds2.ack_flush().await;
     harness.ds3.ack_flush().await;
+}
+
+fn assert_faulted(s: &DsState) {
+    match s {
+        DsState::Stopping(ClientStopReason::Fault(
+            ClientFaultReason::RequestedFault,
+        ))
+        | DsState::Connecting {
+            mode: ConnectionMode::Faulted,
+            ..
+        } => (),
+        _ => panic!("invalid state: expected faulted, got {s:?}"),
+    }
+}
+
+/// Test for early rejection of writes if > 1 Downstairs is unavailable
+#[tokio::test]
+async fn fast_write_rejection() {
+    let mut harness = TestHarness::new().await;
+
+    let write_buf = BytesMut::from(vec![1; 4096].as_slice());
+    harness
+        .guest
+        .write(BlockIndex(0), write_buf.clone())
+        .await
+        .unwrap();
+
+    harness.ds1().err_write().await;
+    harness.ds2.ack_write().await;
+    harness.ds3.ack_write().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+    // Send a second write, which should still work (because we have 2/3 ds)
+    harness
+        .guest
+        .write(BlockIndex(0), write_buf.clone())
+        .await
+        .unwrap();
+    harness.ds2.err_write().await;
+    harness.ds3.ack_write().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_faulted(&ds[ClientId::new(1)]);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+    // Subsequent writes should be rejected immediately
+    let r = harness.guest.write(BlockIndex(0), write_buf.clone()).await;
+    assert!(
+        matches!(r, Err(CrucibleError::IoError(..))),
+        "expected IoError, got {r:?}"
+    );
+}
+
+/// Make sure reads work with only 1x Downstairs
+#[tokio::test]
+async fn read_with_one_fault() {
+    let mut harness = TestHarness::new().await;
+
+    // Use a write to fault DS0 (XXX why do read errors not fault a DS?)
+    let write_buf = BytesMut::from(vec![1; 4096].as_slice());
+    harness
+        .guest
+        .write(BlockIndex(0), write_buf.clone())
+        .await
+        .unwrap();
+    harness.ds1().err_write().await;
+    harness.ds2.ack_write().await;
+    harness.ds3.ack_write().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+    // Check that reads still work
+    let h = harness.spawn(|guest| async move {
+        let mut buffer = Buffer::new(1, 512);
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
+    });
+    harness.ds2.ack_read().await;
+    h.await.unwrap(); // we have > 1x reply, so the read will return
+    harness.ds3.ack_read().await;
+
+    // Take out DS2 next
+    harness
+        .guest
+        .write(BlockIndex(0), write_buf.clone())
+        .await
+        .unwrap();
+    harness.ds2.err_write().await;
+    harness.ds3.ack_write().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_faulted(&ds[ClientId::new(1)]);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+    // Reads still work with 1x Downstairs
+    let h = harness.spawn(|guest| async move {
+        let mut buffer = Buffer::new(1, 512);
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
+    });
+    harness.ds3.ack_read().await;
+    h.await.unwrap(); // we have > 1x reply, so the read will return
+}
+
+/// Test early rejection of reads with 0x running Downstairs
+#[tokio::test]
+async fn fast_read_rejection() {
+    let mut harness = TestHarness::new().await;
+
+    // Use a write to fault DS0 (XXX why do read errors not fault a DS?)
+    let write_buf = BytesMut::from(vec![1; 4096].as_slice());
+    harness
+        .guest
+        .write(BlockIndex(0), write_buf.clone())
+        .await
+        .unwrap();
+    harness.ds1().err_write().await;
+    harness.ds2.err_write().await;
+    harness.ds3.err_write().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_faulted(&ds[ClientId::new(1)]);
+    assert_faulted(&ds[ClientId::new(2)]);
+
+    // Reads should return errors immediately
+    let mut buffer = Buffer::new(1, 512);
+    match harness.guest.read(BlockIndex(0), &mut buffer).await {
+        Err(CrucibleError::IoError(s)) => {
+            assert!(s.contains("too many inactive clients"))
+        }
+        r => panic!("expected IoError, got {r:?}"),
+    }
+}
+
+/// Test for early rejection of flushes
+#[tokio::test]
+async fn fast_flush_rejection() {
+    let mut harness = TestHarness::new().await;
+
+    let h = harness.spawn(|guest| async move {
+        guest.flush(None).await.unwrap();
+    });
+    harness.ds1().err_flush().await;
+    harness.ds2.ack_flush().await;
+    harness.ds3.ack_flush().await;
+    h.await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+    // A flush with snapshot should fail immediately
+    match harness
+        .guest
+        .flush(Some(SnapshotDetails {
+            snapshot_name: "hiiiii".to_string(),
+        }))
+        .await
+    {
+        Err(CrucibleError::IoError(s)) => {
+            assert!(s.contains("too many inactive clients"))
+        }
+        r => panic!("expected IoError, got {r:?}"),
+    }
+
+    // A non-snapshot flush should still succeed
+    let h = harness.spawn(|guest| async move {
+        guest.flush(None).await.unwrap();
+    });
+    harness.ds2.ack_flush().await;
+    harness.ds3.ack_flush().await;
+    h.await.unwrap();
+
+    // Use a flush to take out another downstairs
+    let h = harness.spawn(|guest| async move { guest.flush(None).await });
+    harness.ds2.ack_flush().await;
+    harness.ds3.err_flush().await;
+    let r = h.await.unwrap();
+    assert!(r.is_err());
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_faulted(&ds[ClientId::new(0)]);
+    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_faulted(&ds[ClientId::new(2)]);
+
+    // Subsequent flushes should fail immediately
+    match harness.guest.flush(None).await {
+        Err(CrucibleError::IoError(s)) => {
+            assert!(s.contains("too many inactive clients"))
+        }
+        r => panic!("expected IoError, got {r:?}"),
+    }
 }

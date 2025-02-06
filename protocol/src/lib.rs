@@ -162,6 +162,9 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Remove `LastFlushAck`
+    V13 = 13,
+
     /// Add `Barrier` and `BarrierAck`
     V12 = 12,
 
@@ -210,7 +213,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V12
+        Self::V13
     }
 }
 
@@ -469,10 +472,7 @@ pub enum Message {
     },
 
     LastFlush {
-        last_flush_number: JobId,
-    },
-    LastFlushAck {
-        last_flush_number: JobId,
+        last_flush_number: Option<JobId>,
     },
 
     /*
@@ -628,7 +628,6 @@ impl Message {
             | Message::ExtentVersionsPlease { .. }
             | Message::ExtentVersions { .. }
             | Message::LastFlush { .. }
-            | Message::LastFlushAck { .. }
             | Message::Write { .. }
             | Message::ExtentLiveClose { .. }
             | Message::ExtentLiveFlushClose { .. }

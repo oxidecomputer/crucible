@@ -108,7 +108,7 @@ pub const IO_OUTSTANDING_MAX_JOBS: usize = 1000;
 ///
 /// Caching complete jobs allows us to replay them if a Downstairs goes offline
 /// them comes back.
-const IO_CACHED_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+const IO_CACHED_MAX_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 
 /// Maximum of jobs to cache from complete (but un-flushed) IO
 ///
@@ -332,7 +332,6 @@ mod cdt {
     fn up__action_leak_check(_: u64) {}
     fn up__action_flush_check(_: u64) {}
     fn up__action_stat_check(_: u64) {}
-    fn up__action_repair_check(_: u64) {}
     fn up__action_control_check(_: u64) {}
     fn up__action_noop(_: u64) {}
     fn volume__read__start(_: u32, _: Uuid) {}
@@ -953,6 +952,11 @@ impl DownstairsIO {
 
         let bad_job = match &self.work {
             IOop::Read { .. } => wc.done == 0,
+            // Flushes with snapshots must be good on all 3x Downstairs
+            IOop::Flush {
+                snapshot_details: Some(..),
+                ..
+            } => wc.skipped + wc.error > 0,
             IOop::Write { .. }
             | IOop::WriteUnwritten { .. }
             | IOop::Flush { .. }
