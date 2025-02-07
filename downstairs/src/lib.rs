@@ -2610,9 +2610,7 @@ impl Downstairs {
 
         let url = format!("http://{:?}", source);
         // XXX Do we need a new client?
-        let reqwest_client = reqwest::ClientBuilder::new()
-                .build()
-                .unwrap();
+        let reqwest_client = reqwest::ClientBuilder::new().build().unwrap();
         let repair_server =
             Client::new_with_client(&url, reqwest_client.clone());
 

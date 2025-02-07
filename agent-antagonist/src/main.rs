@@ -320,7 +320,8 @@ async fn create_a_region(
                 info!(
                     log,
                     "created region {:?} state {:?}",
-                    region_request.id, region.state,
+                    region_request.id,
+                    region.state,
                 );
                 break;
             }
@@ -336,8 +337,7 @@ async fn create_a_region(
                 // This is to catch something at the point of failure.
                 panic!(
                     "create region {:?} failed {:?}",
-                    region_request.id,
-                    region,
+                    region_request.id, region,
                 );
                 bail!(
                     "region {:?} invalid state {:?}",
