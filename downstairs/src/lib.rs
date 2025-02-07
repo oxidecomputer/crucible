@@ -2609,8 +2609,12 @@ impl Downstairs {
         info!(log, "Connecting to {source} to obtain our extent files.");
 
         let url = format!("http://{:?}", source);
+        // XXX Do we need a new client?
+        let reqwest_client = reqwest::ClientBuilder::new()
+                .build()
+                .unwrap();
         let repair_server =
-            Client::new_with_client(&url, self.reqwest_client.clone());
+            Client::new_with_client(&url, reqwest_client.clone());
 
         let source_def = match repair_server.get_region_info().await {
             Ok(def) => def.into_inner(),
@@ -2649,7 +2653,7 @@ impl Downstairs {
 
             if let Err(e) = self
                 .region
-                .repair_extent(self.reqwest_client.clone(), eid, source, true)
+                .repair_extent(reqwest_client.clone(), eid, source, true)
                 .await
             {
                 bail!("repair extent {eid} returned: {e}");

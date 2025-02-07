@@ -7,7 +7,7 @@ use rand::random;
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
 use slog::Logger;
-use slog::{debug, info, warn};
+use slog::{debug, error, info, warn};
 use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::{
@@ -308,25 +308,39 @@ async fn create_a_region(
             RegionState::Requested => {
                 info!(
                     log,
-                    "waiting for region {:?}: state {:?} try:{}",
+                    "waiting for new region {:?}: state {:?} try:{}",
                     region_request.id,
                     region.state,
                     retry,
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
 
             RegionState::Created => {
                 info!(
                     log,
-                    "region {:?} state {:?}", region_request.id, region.state,
+                    "created region {:?} state {:?}",
+                    region_request.id, region.state,
                 );
                 break;
             }
 
             _ => {
+                error!(
+                    log,
+                    "region {:?} invalid state {:?}",
+                    region_request.id,
+                    region.state,
+                );
+                // XXX Remove before merging.
+                // This is to catch something at the point of failure.
+                panic!(
+                    "create region {:?} failed {:?}",
+                    region_request.id,
+                    region,
+                );
                 bail!(
-                    "region {:?} unknown state {:?}",
+                    "region {:?} invalid state {:?}",
                     region_request.id,
                     region.state,
                 );
@@ -761,7 +775,7 @@ async fn delete_a_region(
             RegionState::Tombstoned => {
                 info!(
                     log,
-                    "waiting for region {:?}: state {:?}  try:{}",
+                    "waiting for deleted region {:?}: state {:?}  try:{}",
                     region_id,
                     region.state,
                     retry,
@@ -994,7 +1008,10 @@ async fn main() -> Result<()> {
             // The reason a task ended might be lost in the logging noise, so
             // print out what every task ended with
             info!(log, "All tasks have ended");
-            info!(log, "Summary: {:?}", result_summary);
+            info!(log, "Task results");
+            for res in result_summary {
+                info!(log, "{:?}", res);
+            }
         }
     }
     Ok(())
