@@ -1971,7 +1971,7 @@ fn worker_region_create(
     let cmd = cmd.output()?;
 
     if cmd.status.success() {
-        info!(log, "region files created ok");
+        info!(log, "region {:?} created ok", region.id.0);
     } else {
         let err = String::from_utf8_lossy(&cmd.stderr);
         let out = String::from_utf8_lossy(&cmd.stdout);
