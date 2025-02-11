@@ -5,6 +5,7 @@
 //! Nexus-flavored types internally.
 
 use chrono::{DateTime, Utc};
+use rand::prelude::SliceRandom;
 use slog::{debug, error, info, o, warn, Logger};
 use std::net::{Ipv6Addr, SocketAddr};
 use tokio::sync::mpsc;
@@ -425,8 +426,21 @@ pub(crate) async fn get_nexus_client(
     };
 
     let nexus_address =
-        match resolver.lookup_socket_v6(ServiceName::Nexus).await {
-            Ok(addr) => addr,
+        match resolver.lookup_all_socket_v6(ServiceName::Nexus).await {
+            Ok(addrs) => {
+                if addrs.is_empty() {
+                    error!(log, "no Nexus addresses returned!");
+                    return None;
+                }
+
+                let Some(addr) = addrs.choose(&mut rand::thread_rng()) else {
+                    error!(log, "somehow, choose failed!");
+                    return None;
+                };
+
+                *addr
+            }
+
             Err(e) => {
                 error!(log, "lookup Nexus address failed: {e}");
                 return None;
