@@ -1,5 +1,4 @@
 // Copyright 2023 Oxide Computer Company
-
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -221,7 +220,7 @@ enum Args {
         bind_addr: SocketAddr,
     },
     Version,
-    /// Measure an isolated downstairs
+    /// Measure an isolated downstairs' disk usage
     Dynamometer {
         #[clap(long, default_value_t = 512)]
         block_size: u64,
@@ -257,6 +256,11 @@ enum Args {
         /// Flush per ms
         #[clap(long, value_parser = parse_duration, conflicts_with_all = ["flush_per_iops", "flush_per_blocks"])]
         flush_per_ms: Option<Duration>,
+    },
+    /// Measure a downstairs' repair server
+    RepairDynamometer {
+        #[clap(long, value_name = "SOURCE", action)]
+        clone_source: SocketAddr,
     },
 }
 
@@ -498,6 +502,9 @@ async fn main() -> Result<()> {
             };
 
             dynamometer(region, num_writes, samples, flush_config)
+        }
+        Args::RepairDynamometer { clone_source } => {
+            repair_dynamometer(clone_source).await
         }
     }
 }
