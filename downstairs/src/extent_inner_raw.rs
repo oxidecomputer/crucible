@@ -95,16 +95,51 @@ pub struct RawInner {
     ///
     /// A dirty context slot has not yet been saved to disk, and must be
     /// synched before being overwritten.
-    ///
-    /// Context slots are stored as a 2-bit field, with bit 0 marking
-    /// `ContextSlot::A` and bit 1 marking `ContextSlot::B`.
-    context_slot_dirty: Vec<u8>,
+    context_slot_dirty: ContextSlotsDirty,
 
     /// Total number of extra syscalls due to context slot fragmentation
     extra_syscall_count: u64,
 
     /// Denominator corresponding to `extra_syscall_count`
     extra_syscall_denominator: u64,
+}
+
+/// Data structure containing bitpacked dirty context slot flags
+///
+/// Each block has two flags, independently tracking the dirty state of context
+/// slots A and B.
+#[derive(Debug)]
+struct ContextSlotsDirty(Vec<u8>);
+
+impl ContextSlotsDirty {
+    fn new(block_count: u64) -> Self {
+        Self(vec![0u8; block_count as usize])
+    }
+
+    /// Checks whether the given `(block, slot)` tuple is dirty
+    #[must_use]
+    fn get(&self, block: u64, slot: ContextSlot) -> bool {
+        let mask = 1 << (slot as usize);
+        (self.0[block as usize] & mask) != 0
+    }
+
+    /// Sets the given `(block, slot)` tuple as dirty
+    fn set(&mut self, block: u64, slot: ContextSlot) {
+        self.0[block as usize] |= 1 << slot as usize;
+    }
+
+    /// Marks every slot as not dirty
+    fn reset(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Index<u64> for ContextSlotsDirty {
+    type Output = u8;
+    fn index(&self, block: u64) -> &Self::Output {
+        &self.0[block as usize]
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -422,7 +457,7 @@ impl ExtentInner for RawInner {
                 self.extent_number,
             )));
         }
-        self.context_slot_dirty.fill(0);
+        self.context_slot_dirty.reset();
         cdt::extent__flush__file__done!(|| {
             (job_id.get(), self.extent_number.0)
         });
@@ -549,7 +584,7 @@ impl RawInner {
                 ContextSlot::A; // both slots are empty, so this is fine
                 def.extent_size().value as usize
             ],
-            context_slot_dirty: vec![0; def.extent_size().value as usize],
+            context_slot_dirty: ContextSlotsDirty::new(extent_size.value),
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
         };
@@ -706,7 +741,7 @@ impl RawInner {
             extent_number,
             extent_size: def.extent_size(),
             layout: RawLayout::new(def.extent_size()),
-            context_slot_dirty: vec![0; def.extent_size().value as usize],
+            context_slot_dirty: ContextSlotsDirty::new(def.extent_size().value),
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
         })
@@ -786,7 +821,7 @@ impl RawInner {
             let block = block_context.block as usize;
             // We'll be writing to the inactive slot
             let slot = !self.active_context[block];
-            (self.context_slot_dirty[block] & (1 << slot as usize)) != 0
+            self.context_slot_dirty.get(block_context.block, slot)
         });
         if needs_sync {
             self.file.sync_all().map_err(|e| {
@@ -795,7 +830,7 @@ impl RawInner {
                     self.extent_number,
                 ))
             })?;
-            self.context_slot_dirty.fill(0);
+            self.context_slot_dirty.reset();
         }
         // Mark the to-be-written slots as unsynched on disk
         //
@@ -805,7 +840,7 @@ impl RawInner {
         for block_context in block_contexts {
             let block = block_context.block as usize;
             let slot = !self.active_context[block];
-            self.context_slot_dirty[block] |= 1 << (slot as usize);
+            self.context_slot_dirty.set(block_context.block, slot);
         }
 
         let mut start = 0;
@@ -1076,7 +1111,7 @@ impl RawInner {
 
                 // Mark this slot as unsynched, so that we don't overwrite
                 // it later on without a sync
-                self.context_slot_dirty[block] |= 1 << (!copy_from as usize);
+                self.context_slot_dirty.set(block as u64, !copy_from);
             }
         }
         let r = self.layout.write_context_slots_contiguous(
@@ -1953,7 +1988,7 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 5);
         inner.flush(10, 10, JobId(10).into())?;
-        assert!(inner.context_slot_dirty.iter().all(|v| *v == 0));
+        assert!(inner.context_slot_dirty.0.iter().all(|v| *v == 0));
 
         // This should not have changed active context slots!
         for i in 0..10 {
