@@ -105,9 +105,13 @@ pub struct RawInner {
 }
 
 /// Data structure containing a list of active context slots
+///
+/// Under the hood, this is a bitpacked array with one bit per block; 0
+/// indicates that `ContextSlot::A` is active and 1 selects `ContextSlot::B`.
 #[derive(Debug)]
 struct ActiveContextSlots {
-    data: Vec<ContextSlot>,
+    data: Vec<u32>,
+    /// Number of blocks
     block_count: u64,
 }
 
@@ -115,24 +119,40 @@ impl ActiveContextSlots {
     /// Builds a new list with [`ContextSlot::A`] initially active
     fn new(block_count: u64) -> Self {
         Self {
-            data: vec![ContextSlot::A; block_count as usize],
+            data: vec![0u32; (block_count as usize).div_ceil(32)],
             block_count,
         }
     }
 
+    /// Decodes a block number into an index and mask
+    ///
+    /// # Panics
+    /// If the block is above our max block count
+    #[must_use]
+    fn decode(&self, block: u64) -> (usize, u32) {
+        assert!(block < self.block_count);
+        ((block as usize) / 32, 1 << (block % 32))
+    }
+
     /// Sets the context slot for the given block
     fn set(&mut self, block: u64, slot: ContextSlot) {
-        self.data[block as usize] = slot;
+        let (index, mask) = self.decode(block);
+        let target = &mut self.data[index];
+        match slot {
+            ContextSlot::A => *target &= !mask, // clear the bit
+            ContextSlot::B => *target |= mask,  // set the bit
+        }
     }
 
     /// Swaps the active context slot for the given block
     fn swap(&mut self, block: u64) {
-        self.data[block as usize] = !self.data[block as usize];
+        let (index, mask) = self.decode(block);
+        self.data[index] ^= mask;
     }
 
     /// Iterates over context slots
     fn iter(&self) -> impl Iterator<Item = ContextSlot> + '_ {
-        self.data.iter().cloned()
+        (0..self.block_count).map(|i| self[i])
     }
 
     fn len(&self) -> usize {
@@ -143,7 +163,12 @@ impl ActiveContextSlots {
 impl std::ops::Index<u64> for ActiveContextSlots {
     type Output = ContextSlot;
     fn index(&self, block: u64) -> &Self::Output {
-        &self.data[block as usize]
+        let (index, mask) = self.decode(block);
+        if self.data[index] & mask == 0 {
+            &ContextSlot::A
+        } else {
+            &ContextSlot::B
+        }
     }
 }
 
