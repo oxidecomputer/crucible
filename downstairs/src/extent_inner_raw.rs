@@ -54,7 +54,7 @@ const DEFRAGMENT_THRESHOLD: u64 = 3;
 ///   serialized using `bincode`.
 /// - Active context slots, stored as a bit-packed array (where 0 is
 ///   [`ContextSlot::A`] and 1 is [`ContextSlot::B`]).  This array contains
-///   `(extent_size + 7) / 8` bytes.  It is only valid when the `dirty` bit is
+///   `extent_size.div_ceil(8)` bytes.  It is only valid when the `dirty` bit is
 ///   cleared.  This is an optimization that speeds up opening a clean extent
 ///   file; otherwise, we would have to rehash every block to find the active
 ///   context slot.
@@ -1147,7 +1147,7 @@ impl RawLayout {
         let block_count = self.block_count();
         self.block_size().checked_mul(block_count).unwrap()
             + BLOCK_META_SIZE_BYTES
-            + (block_count + 7) / 8
+            + block_count.div_ceil(8)
             + BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count * 2
     }
 
@@ -1180,7 +1180,7 @@ impl RawLayout {
     }
 
     fn active_context_size(&self) -> u64 {
-        (self.block_count() + 7) / 8
+        self.block_count().div_ceil(8)
     }
 
     fn metadata_offset(&self) -> u64 {
