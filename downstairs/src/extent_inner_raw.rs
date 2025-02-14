@@ -177,28 +177,46 @@ impl std::ops::Index<u64> for ActiveContextSlots {
 /// Each block has two flags, independently tracking the dirty state of context
 /// slots A and B.
 #[derive(Debug)]
-struct ContextSlotsDirty(Vec<u8>);
+struct ContextSlotsDirty {
+    data: Vec<u32>,
+    block_count: u64,
+}
 
 impl ContextSlotsDirty {
     fn new(block_count: u64) -> Self {
-        Self(vec![0u8; block_count as usize])
+        Self {
+            data: vec![0u32; (block_count as usize).div_ceil(16)],
+            block_count,
+        }
+    }
+
+    /// Decodes a block + slot into an index and mask
+    ///
+    /// # Panics
+    /// If the block is above our max block count
+    #[must_use]
+    fn decode(&self, block: u64, slot: ContextSlot) -> (usize, u32) {
+        assert!(block < self.block_count);
+        let b = block as usize;
+        (b / 16, 1 << (slot as usize + (b % 16) * 2))
     }
 
     /// Checks whether the given `(block, slot)` tuple is dirty
     #[must_use]
     fn get(&self, block: u64, slot: ContextSlot) -> bool {
-        let mask = 1 << (slot as usize);
-        (self.0[block as usize] & mask) != 0
+        let (index, mask) = self.decode(block, slot);
+        self.data[index] & mask != 0
     }
 
     /// Sets the given `(block, slot)` tuple as dirty
     fn set(&mut self, block: u64, slot: ContextSlot) {
-        self.0[block as usize] |= 1 << slot as usize;
+        let (index, mask) = self.decode(block, slot);
+        self.data[index] |= mask;
     }
 
     /// Marks every slot as not dirty
     fn reset(&mut self) {
-        self.0.fill(0);
+        self.data.fill(0);
     }
 }
 
@@ -206,7 +224,14 @@ impl ContextSlotsDirty {
 impl std::ops::Index<u64> for ContextSlotsDirty {
     type Output = u8;
     fn index(&self, block: u64) -> &Self::Output {
-        &self.0[block as usize]
+        let lo = self.get(block, ContextSlot::A);
+        let hi = self.get(block, ContextSlot::B);
+        match (hi, lo) {
+            (false, false) => &0b00,
+            (false, true) => &0b01,
+            (true, false) => &0b10,
+            (true, true) => &0b11,
+        }
     }
 }
 
@@ -2049,7 +2074,7 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 5);
         inner.flush(10, 10, JobId(10).into())?;
-        assert!(inner.context_slot_dirty.0.iter().all(|v| *v == 0));
+        assert!(inner.context_slot_dirty.data.iter().all(|v| *v == 0));
 
         // This should not have changed active context slots!
         for i in 0..10 {
