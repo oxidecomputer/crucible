@@ -84,7 +84,7 @@ pub struct RawInner {
     layout: RawLayout,
 
     /// Is the `A` or `B` context slot active, on a per-block basis?
-    active_context: Vec<ContextSlot>,
+    active_context: ActiveContextSlots,
 
     /// Local cache for the `dirty` value
     ///
@@ -95,16 +95,144 @@ pub struct RawInner {
     ///
     /// A dirty context slot has not yet been saved to disk, and must be
     /// synched before being overwritten.
-    ///
-    /// Context slots are stored as a 2-bit field, with bit 0 marking
-    /// `ContextSlot::A` and bit 1 marking `ContextSlot::B`.
-    context_slot_dirty: Vec<u8>,
+    context_slot_dirty: ContextSlotsDirty,
 
     /// Total number of extra syscalls due to context slot fragmentation
     extra_syscall_count: u64,
 
     /// Denominator corresponding to `extra_syscall_count`
     extra_syscall_denominator: u64,
+}
+
+/// Data structure containing a list of active context slots
+///
+/// Under the hood, this is a bitpacked array with one bit per block; 0
+/// indicates that `ContextSlot::A` is active and 1 selects `ContextSlot::B`.
+#[derive(Debug)]
+struct ActiveContextSlots {
+    data: Vec<u32>,
+    /// Number of blocks
+    block_count: u64,
+}
+
+impl ActiveContextSlots {
+    /// Builds a new list with [`ContextSlot::A`] initially active
+    fn new(block_count: u64) -> Self {
+        Self {
+            data: vec![0u32; (block_count as usize).div_ceil(32)],
+            block_count,
+        }
+    }
+
+    /// Decodes a block number into an index and mask
+    ///
+    /// # Panics
+    /// If the block is above our max block count
+    #[must_use]
+    fn decode(&self, block: u64) -> (usize, u32) {
+        assert!(block < self.block_count);
+        ((block as usize) / 32, 1 << (block % 32))
+    }
+
+    /// Sets the context slot for the given block
+    fn set(&mut self, block: u64, slot: ContextSlot) {
+        let (index, mask) = self.decode(block);
+        let target = &mut self.data[index];
+        match slot {
+            ContextSlot::A => *target &= !mask, // clear the bit
+            ContextSlot::B => *target |= mask,  // set the bit
+        }
+    }
+
+    /// Swaps the active context slot for the given block
+    fn swap(&mut self, block: u64) {
+        let (index, mask) = self.decode(block);
+        self.data[index] ^= mask;
+    }
+
+    /// Iterates over context slots
+    fn iter(&self) -> impl Iterator<Item = ContextSlot> + '_ {
+        (0..self.block_count).map(|i| self[i])
+    }
+
+    fn len(&self) -> usize {
+        self.block_count as usize
+    }
+}
+
+impl std::ops::Index<u64> for ActiveContextSlots {
+    type Output = ContextSlot;
+    fn index(&self, block: u64) -> &Self::Output {
+        let (index, mask) = self.decode(block);
+        if self.data[index] & mask == 0 {
+            &ContextSlot::A
+        } else {
+            &ContextSlot::B
+        }
+    }
+}
+
+/// Data structure containing bitpacked dirty context slot flags
+///
+/// Each block has two flags, independently tracking the dirty state of context
+/// slots A and B.
+#[derive(Debug)]
+struct ContextSlotsDirty {
+    data: Vec<u32>,
+    block_count: u64,
+}
+
+impl ContextSlotsDirty {
+    fn new(block_count: u64) -> Self {
+        Self {
+            data: vec![0u32; (block_count as usize).div_ceil(16)],
+            block_count,
+        }
+    }
+
+    /// Decodes a block + slot into an index and mask
+    ///
+    /// # Panics
+    /// If the block is above our max block count
+    #[must_use]
+    fn decode(&self, block: u64, slot: ContextSlot) -> (usize, u32) {
+        assert!(block < self.block_count);
+        let b = block as usize;
+        (b / 16, 1 << (slot as usize + (b % 16) * 2))
+    }
+
+    /// Checks whether the given `(block, slot)` tuple is dirty
+    #[must_use]
+    fn get(&self, block: u64, slot: ContextSlot) -> bool {
+        let (index, mask) = self.decode(block, slot);
+        self.data[index] & mask != 0
+    }
+
+    /// Sets the given `(block, slot)` tuple as dirty
+    fn set(&mut self, block: u64, slot: ContextSlot) {
+        let (index, mask) = self.decode(block, slot);
+        self.data[index] |= mask;
+    }
+
+    /// Marks every slot as not dirty
+    fn reset(&mut self) {
+        self.data.fill(0);
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Index<u64> for ContextSlotsDirty {
+    type Output = u8;
+    fn index(&self, block: u64) -> &Self::Output {
+        let lo = self.get(block, ContextSlot::A);
+        let hi = self.get(block, ContextSlot::B);
+        match (hi, lo) {
+            (false, false) => &0b00,
+            (false, true) => &0b01,
+            (true, false) => &0b10,
+            (true, true) => &0b11,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -292,8 +420,7 @@ impl ExtentInner for RawInner {
             for i in 0..write.block_contexts.len() {
                 if !writes_to_skip.contains(&i) {
                     // We always write to the inactive slot, so just swap it
-                    let block = write.offset.0 as usize + i;
-                    self.active_context[block] = !self.active_context[block];
+                    self.active_context.swap(write.offset.0 + i as u64);
                 }
             }
         }
@@ -422,7 +549,7 @@ impl ExtentInner for RawInner {
                 self.extent_number,
             )));
         }
-        self.context_slot_dirty.fill(0);
+        self.context_slot_dirty.reset();
         cdt::extent__flush__file__done!(|| {
             (job_id.get(), self.extent_number.0)
         });
@@ -461,8 +588,7 @@ impl ExtentInner for RawInner {
     ) -> Result<(), CrucibleError> {
         self.set_dirty()?;
         self.set_block_contexts(&[*block_context])?;
-        self.active_context[block_context.block as usize] =
-            !self.active_context[block_context.block as usize];
+        self.active_context.swap(block_context.block);
         Ok(())
     }
 
@@ -510,7 +636,7 @@ impl RawInner {
 
         layout.write_active_context_and_metadata(
             file,
-            vec![ContextSlot::A; block_count].as_slice(),
+            &ActiveContextSlots::new(layout.block_count()),
             dirty,
             flush_number,
             gen_number,
@@ -545,11 +671,8 @@ impl RawInner {
             extent_size,
             layout,
             extent_number,
-            active_context: vec![
-                ContextSlot::A; // both slots are empty, so this is fine
-                def.extent_size().value as usize
-            ],
-            context_slot_dirty: vec![0; def.extent_size().value as usize],
+            active_context: ActiveContextSlots::new(extent_size.value),
+            context_slot_dirty: ContextSlotsDirty::new(extent_size.value),
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
         };
@@ -648,7 +771,8 @@ impl RawInner {
             // Now that we've read the context slot arrays, read file data and
             // figure out which context slot is active.
             let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
-            let mut active_context = vec![];
+            let mut active_context =
+                ActiveContextSlots::new(def.extent_size().value);
             let mut buf = vec![0; extent_size.block_size_in_bytes() as usize];
             let mut last_seek_block = 0;
             for (block, (context_a, context_b)) in
@@ -694,7 +818,7 @@ impl RawInner {
                         CrucibleError::MissingContextSlot(block as u64),
                     )?
                 };
-                active_context.push(slot);
+                active_context.set(block as u64, slot);
             }
             active_context
         };
@@ -706,7 +830,7 @@ impl RawInner {
             extent_number,
             extent_size: def.extent_size(),
             layout: RawLayout::new(def.extent_size()),
-            context_slot_dirty: vec![0; def.extent_size().value as usize],
+            context_slot_dirty: ContextSlotsDirty::new(def.extent_size().value),
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
         })
@@ -772,7 +896,7 @@ impl RawInner {
         let value = matching_slot
             .or(empty_slot)
             .ok_or(CrucibleError::MissingContextSlot(block))?;
-        self.active_context[block as usize] = value;
+        self.active_context.set(block, value);
         Ok(())
     }
 
@@ -783,10 +907,9 @@ impl RawInner {
         // If any of these block contexts will be overwriting an unsynched
         // context slot, then we insert a sync here.
         let needs_sync = block_contexts.iter().any(|block_context| {
-            let block = block_context.block as usize;
             // We'll be writing to the inactive slot
-            let slot = !self.active_context[block];
-            (self.context_slot_dirty[block] & (1 << slot as usize)) != 0
+            let slot = !self.active_context[block_context.block];
+            self.context_slot_dirty.get(block_context.block, slot)
         });
         if needs_sync {
             self.file.sync_all().map_err(|e| {
@@ -795,7 +918,7 @@ impl RawInner {
                     self.extent_number,
                 ))
             })?;
-            self.context_slot_dirty.fill(0);
+            self.context_slot_dirty.reset();
         }
         // Mark the to-be-written slots as unsynched on disk
         //
@@ -803,9 +926,8 @@ impl RawInner {
         // here, because all it will do is force a sync next time this is called
         // (that sync is right above here!)
         for block_context in block_contexts {
-            let block = block_context.block as usize;
-            let slot = !self.active_context[block];
-            self.context_slot_dirty[block] |= 1 << (slot as usize);
+            let slot = !self.active_context[block_context.block];
+            self.context_slot_dirty.set(block_context.block, slot);
         }
 
         let mut start = 0;
@@ -846,7 +968,7 @@ impl RawInner {
             .iter()
             .chunk_by(|block_context| {
                 // We'll be writing to the inactive slot
-                !self.active_context[block_context.block as usize]
+                !self.active_context[block_context.block]
             })
             .into_iter()
         {
@@ -917,7 +1039,7 @@ impl RawInner {
         let mut out = Vec::with_capacity(count as usize);
         let mut reads = 0u64;
         for (slot, group) in (block..block + count)
-            .chunk_by(|block| self.active_context[*block as usize])
+            .chunk_by(|block| self.active_context[*block])
             .into_iter()
         {
             let mut group = group.peekable();
@@ -1070,13 +1192,12 @@ impl RawInner {
 
         // Selectively overwrite dest with source context slots
         for (i, block) in (counter.min_block..=counter.max_block).enumerate() {
-            let block = block as usize;
             if self.active_context[block] == copy_from {
                 dest_slots[i] = source_slots[i];
 
                 // Mark this slot as unsynched, so that we don't overwrite
                 // it later on without a sync
-                self.context_slot_dirty[block] |= 1 << (!copy_from as usize);
+                self.context_slot_dirty.set(block, !copy_from);
             }
         }
         let r = self.layout.write_context_slots_contiguous(
@@ -1094,7 +1215,7 @@ impl RawInner {
             }
         } else {
             for block in counter.min_block..=counter.max_block {
-                self.active_context[block as usize] = !copy_from;
+                self.active_context.set(block, !copy_from);
             }
             // At this point, the `dirty` bit is not set, but values in
             // `self.active_context` disagree with the active context slot
@@ -1304,7 +1425,7 @@ impl RawLayout {
     fn write_active_context_and_metadata(
         &self,
         file: &File,
-        active_context: &[ContextSlot],
+        active_context: &ActiveContextSlots,
         dirty: bool,
         flush_number: u64,
         gen_number: u64,
@@ -1313,10 +1434,10 @@ impl RawLayout {
 
         // Serialize bitpacked active slot values
         let mut buf = vec![];
-        for c in active_context.chunks(8) {
+        for c in &active_context.iter().chunks(8) {
             let mut v = 0;
-            for (i, slot) in c.iter().enumerate() {
-                v |= (*slot as u8) << i;
+            for (i, slot) in c.into_iter().enumerate() {
+                v |= (slot as u8) << i;
             }
             buf.push(v);
         }
@@ -1346,7 +1467,7 @@ impl RawLayout {
     fn get_active_contexts(
         &self,
         file: &File,
-    ) -> Result<Vec<ContextSlot>, CrucibleError> {
+    ) -> Result<ActiveContextSlots, CrucibleError> {
         let mut buf = vec![0u8; self.active_context_size() as usize];
         let offset = self.active_context_offset();
         pread_all(file.as_fd(), &mut buf, offset as i64).map_err(|e| {
@@ -1355,18 +1476,18 @@ impl RawLayout {
             ))
         })?;
 
-        let mut active_context = vec![];
-        for bit in buf
+        let mut active_context = ActiveContextSlots::new(self.block_count());
+        for (i, bit) in buf
             .iter()
             .flat_map(|b| (0..8).map(move |i| b & (1 << i) == 0))
             .take(self.block_count() as usize)
+            .enumerate()
         {
             // Unpack bits from each byte
-            active_context.push(if bit {
-                ContextSlot::A
-            } else {
-                ContextSlot::B
-            });
+            active_context.set(
+                i as u64,
+                if bit { ContextSlot::A } else { ContextSlot::B },
+            );
         }
         assert_eq!(active_context.len(), self.block_count() as usize);
         Ok(active_context)
@@ -1953,7 +2074,7 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 5);
         inner.flush(10, 10, JobId(10).into())?;
-        assert!(inner.context_slot_dirty.iter().all(|v| *v == 0));
+        assert!(inner.context_slot_dirty.data.iter().all(|v| *v == 0));
 
         // This should not have changed active context slots!
         for i in 0..10 {
