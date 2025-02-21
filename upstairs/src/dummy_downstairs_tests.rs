@@ -2988,14 +2988,24 @@ async fn test_ro_activate_from_list(activate: [bool; 3]) {
         guest,
     };
 
-    // Get downstairs state before we send IO.
-    // If a downstairs is not present before we send IO, then we won't bother
-    // calling ack_read() for that downstairs.  It's possible the downstairs
-    // joins just after  we check, and that is okay for this test.  The race
-    // here is when a downstairs should join, and eventually will but has not
-    // joined quite yet and the IO for that downstairs is skipped, then we go
-    // on an expect it to have arrived and fail the ack_read() below.
-    let ds = harness.guest.downstairs_state().await.unwrap();
+    // Wait for all downstairs we expect to be active to actually be active.
+    // If we don't do this, it's possible for a downstairs to join after
+    // we send the IO, which will cause the read to be skipped, and we
+    // will end up acking the following flush.
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let ds = harness.guest.downstairs_state().await.unwrap();
+        if activate[0] && ds[ClientId::new(0)] != DsState::Active {
+            continue;
+        }
+        if activate[1] && ds[ClientId::new(1)] != DsState::Active {
+            continue;
+        }
+        if activate[2] && ds[ClientId::new(2)] != DsState::Active {
+            continue;
+        }
+        break;
+    }
 
     // We must `spawn` here because `read` will wait for the response to
     // come back before returning
@@ -3006,13 +3016,13 @@ async fn test_ro_activate_from_list(activate: [bool; 3]) {
 
     // Ack the read on the downstairs that are active, but, only if a
     // downstairs has actually joined.
-    if activate[0] && ds[ClientId::new(0)] == DsState::Active {
+    if activate[0] {
         harness.ds1().ack_read().await;
     }
-    if activate[1] && ds[ClientId::new(1)] == DsState::Active {
+    if activate[1] {
         harness.ds2.ack_read().await;
     }
-    if activate[2] && ds[ClientId::new(2)] == DsState::Active {
+    if activate[2] {
         harness.ds3.ack_read().await;
     }
 
