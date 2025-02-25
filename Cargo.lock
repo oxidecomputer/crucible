@@ -596,7 +596,7 @@ dependencies = [
  "semver 1.0.24",
  "serde",
  "serde_json",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -701,7 +701,7 @@ checksum = "72f3f22f1a586604e62efd23f78218f3ccdecf7a33c4500db2d37d85a24fe994"
 dependencies = [
  "nix 0.26.4",
  "terminfo",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "which",
  "winapi",
 ]
@@ -1043,7 +1043,7 @@ dependencies = [
  "slog-term",
  "tempfile",
  "test-strategy",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-rustls 0.24.1",
  "toml 0.8.19",
@@ -1287,7 +1287,7 @@ dependencies = [
  "libc",
  "num-derive",
  "num-traits",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1299,7 +1299,7 @@ dependencies = [
  "libc",
  "num-derive",
  "num-traits",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1562,7 +1562,7 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff4a5fefe330e8d7f31b16a318f9ce81000d8e35e69b93eae154d16d2278f70f"
 dependencies = [
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1660,7 +1660,7 @@ dependencies = [
  "libdlpi-sys",
  "num_enum 0.5.11",
  "pretty-hex 0.2.1",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
 ]
 
@@ -1691,7 +1691,7 @@ dependencies = [
  "pretty-hex 0.4.1",
  "serde",
  "serde_json",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "zerocopy 0.7.32",
 ]
 
@@ -1808,7 +1808,7 @@ checksum = "71734e3eb68cd4df338d04dffdcc024f89eb0b238150cc95b826fbfad756452b"
 dependencies = [
  "pest",
  "pest_derive",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2327,7 +2327,7 @@ dependencies = [
  "ipnet",
  "once_cell",
  "rand 0.8.5",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tinyvec",
  "tokio",
  "tracing",
@@ -2350,7 +2350,7 @@ dependencies = [
  "rand 0.8.5",
  "resolv-conf",
  "smallvec",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
@@ -2677,7 +2677,7 @@ dependencies = [
  "serde",
  "slog",
  "smf",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "uuid",
  "whoami",
@@ -2766,7 +2766,7 @@ dependencies = [
  "omicron-workspace-hack",
  "reqwest",
  "slog",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "uuid",
 ]
 
@@ -2921,7 +2921,7 @@ dependencies = [
  "rand 0.8.5",
  "rusty-doors",
  "socket2",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tracing",
  "winnow 0.6.18",
 ]
@@ -3254,7 +3254,7 @@ dependencies = [
  "serde_json",
  "sled-hardware-types",
  "strum",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "uuid",
 ]
 
@@ -3299,7 +3299,7 @@ dependencies = [
  "slog-error-chain",
  "steno",
  "strum",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "update-engine",
  "uuid",
 ]
@@ -3610,7 +3610,7 @@ dependencies = [
  "slog",
  "slog-error-chain",
  "strum",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "uuid",
 ]
@@ -3626,7 +3626,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_with",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3670,7 +3670,7 @@ dependencies = [
  "serde_json",
  "slog",
  "tar",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "toml 0.7.8",
  "topological-sort",
@@ -3768,7 +3768,7 @@ dependencies = [
  "js-sys",
  "once_cell",
  "pin-project-lite",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "urlencoding",
 ]
 
@@ -3783,7 +3783,7 @@ dependencies = [
  "js-sys",
  "once_cell",
  "pin-project-lite",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3827,7 +3827,7 @@ dependencies = [
  "ordered-float 4.2.0",
  "percent-encoding",
  "rand 0.8.5",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3870,7 +3870,7 @@ dependencies = [
  "oxide-vpc",
  "postcard",
  "serde",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3964,7 +3964,7 @@ dependencies = [
  "serde",
  "slog",
  "slog-dtrace",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "uuid",
 ]
@@ -4018,7 +4018,7 @@ dependencies = [
  "schemars",
  "serde",
  "strum",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "uuid",
 ]
 
@@ -4140,7 +4140,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f200d8d83c44a45b21764d1916299752ca035d15ecd46faca3e9a2a2bf6ad06"
 dependencies = [
  "memchr",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "ucd-trie",
 ]
 
@@ -4442,7 +4442,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.96",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "typify 0.2.0",
  "unicode-ident",
 ]
@@ -4564,7 +4564,7 @@ dependencies = [
  "rustc-hash",
  "rustls 0.23.13",
  "socket2",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
@@ -4581,7 +4581,7 @@ dependencies = [
  "rustc-hash",
  "rustls 0.23.13",
  "slab",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tinyvec",
  "tracing",
 ]
@@ -4814,7 +4814,7 @@ checksum = "a18479200779601e498ada4e8c1e1f50e3ee19deb0259c25825a98b5603b2cb4"
 dependencies = [
  "getrandom",
  "libredox",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -4832,7 +4832,7 @@ dependencies = [
  "strip-ansi-escapes",
  "strum",
  "strum_macros 0.26.4",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "unicode-segmentation",
  "unicode-width",
 ]
@@ -5742,7 +5742,7 @@ version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a491bfc47dffa70a3c267bc379e9de9f4b0a7195e474a94498189b177f8d18c"
 dependencies = [
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -5820,7 +5820,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slog",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "uuid",
 ]
@@ -6083,11 +6083,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.66"
+version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d171f59dbaa811dbbb1aee1e73db92ec2b122911a48e1390dfe327a821ddede"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
 dependencies = [
- "thiserror-impl 1.0.66",
+ "thiserror-impl 1.0.69",
 ]
 
 [[package]]
@@ -6101,9 +6101,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.66"
+version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b08be0f17bd307950653ce45db00cd31200d82b624b36e181337d9c7d92765b5"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6533,7 +6533,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.96",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "unicode-ident",
 ]
 
@@ -6765,7 +6765,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.96",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "thread-id",
  "version_check",
 ]
@@ -7451,7 +7451,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a62a428a79ea2224ce8ab05d6d8a21bdd7b4b68a8dbc1230511677a56e72ef22"
 dependencies = [
  "itertools 0.10.5",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "zone_cfg_derive",
 ]
