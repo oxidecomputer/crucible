@@ -73,7 +73,7 @@ opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
 progenitor = "0.9.1"
 progenitor-client = "0.9.1"
-proptest = "1.5.0"
+proptest = "1.6.0"
 rayon = "1.10.0"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
 rand_chacha = "0.3.1"
