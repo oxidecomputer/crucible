@@ -1325,7 +1325,6 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "getrandom",
- "hashbrown 0.14.3",
  "hex",
  "hyper",
  "hyper-rustls",
