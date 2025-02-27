@@ -22,12 +22,22 @@ mkdir -p "$REGION_ROOT"
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
-mkdir -p "$WORK_ROOT"
+TEST_ROOT="${WORK_ROOT}/test_replace_special"
+if [[ ! -d "$TEST_ROOT" ]]; then
+    mkdir -p "$TEST_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make test root $TEST_ROOT"
+        exit 1
+    fi
+else
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
 
-loop_log="$WORK_ROOT"/test_replace_special_summary.log
-test_log="$WORK_ROOT"/test_replace_special.log
-verify_log="$WORK_ROOT/test_replace_special_verify.log"
-
+loop_log="$TEST_ROOT/test_replace_special_summary.log"
+test_log="$TEST_ROOT/test_replace_special.log"
+verify_log="$TEST_ROOT/test_replace_special_verify.log"
+dsc_ds_log="$TEST_ROOT/test_replace_special_dsc.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
@@ -76,6 +86,7 @@ echo "Tail $test_log for test output"
 if ! ${dsc} create --cleanup \
   --region-dir "$REGION_ROOT" \
   --region-count "$region_count" \
+  --output-dir "$dsc_ds_log" \
   --ds-bin "$downstairs" \
   --extent-count 400 \
   --block-size 4096 >> "$test_log"; then
@@ -84,6 +95,7 @@ if ! ${dsc} create --cleanup \
 fi
 ${dsc} start --ds-bin "$downstairs" \
   --region-dir "$REGION_ROOT" \
+  --output-dir "$dsc_ds_log" \
   --region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
@@ -109,7 +121,7 @@ replacement_port=$(${dsc} cmd port -c $last_client)
 
 # Now run the crutest replace-reconcile test
 SECONDS=0
-cp "$test_log" "$test_log".last
+cp "$test_log" "$test_log".fill
 echo "" > "$test_log"
 echo "$(date) replace-reconcile starts now" | tee -a "$test_log"
 "$crucible_test" replace-reconcile -c "$loops" --dsc 127.0.0.1:9998 \
@@ -130,4 +142,10 @@ ${dsc} cmd shutdown
 wait "$dsc_pid"
 
 echo "$(date) Test ends with $result" | tee -a "$test_log"
+
+if [[ $result -eq 0 ]]; then
+    # Cleanup
+    echo "$(date) Cleanup for $0" | tee -a "$test_log"
+    rm -rf "$TEST_ROOT"
+fi
 exit $result

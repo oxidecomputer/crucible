@@ -16,10 +16,21 @@ function ctrl_c() {
 }
 
 WORK_ROOT=${WORK_ROOT:-/tmp}
-mkdir -p "$WORK_ROOT"
+TEST_ROOT="$WORK_ROOT/test_replay"
 
-test_log="$WORK_ROOT/test_replay.log"
-verify_log="$WORK_ROOT/test_replay_verify.log"
+if [[ ! -d "$TEST_ROOT" ]]; then
+    mkdir -p "$TEST_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make test root $TEST_ROOT"
+        exit 1
+    fi
+else
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
+
+test_log="$TEST_ROOT/test_replay.log"
+verify_log="$TEST_ROOT/test_replay_verify.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
@@ -122,4 +133,7 @@ wait "$dsc_pid"
 
 sleep 4
 echo "$(date) Test ends with $result" | tee -a "$test_log" 2>&1
+if [[ $result -eq 0 ]]; then
+    rm -r "$TEST_ROOT"
+fi
 exit "$result"

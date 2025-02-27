@@ -48,12 +48,22 @@ fi
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
-mkdir -p "$WORK_ROOT"
+TEST_ROOT="$WORK_ROOT/test_live_repair"
+if [[ ! -d "$TEST_ROOT" ]]; then
+    mkdir -p "$TEST_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make test root $TEST_ROOT"
+        exit 1
+    fi
+else
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
 
-verify_file="$WORK_ROOT/test_repair_verify.data"
-test_log="$WORK_ROOT/test_repair_out.txt"
-ds_log_prefix="$WORK_ROOT/test_repair_ds"
-dsc_output_dir="$WORK_ROOT/dsc"
+verify_file="$TEST_ROOT/test_repair_verify.data"
+test_log="$TEST_ROOT/test_repair_out.txt"
+ds_log_prefix="$TEST_ROOT/test_repair_ds"
+dsc_output_dir="$TEST_ROOT/dsc"
 loops=100
 
 usage () {
@@ -224,3 +234,7 @@ duration=$SECONDS
 printf "%d:%02d Test duration\n" $((duration / 60)) $((duration % 60))
 echo "Test completed"
 cleanup
+
+# Errors exit directly, so arrival here indicates success.
+# rm -rf "$REGION_ROOT"/8810
+rm -rf "$TEST_ROOT"

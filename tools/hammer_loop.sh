@@ -29,6 +29,23 @@ if pgrep -fl -U "$(id -u)" "$cds"; then
     exit 1
 fi
 
+WORK_ROOT=${WORK_ROOT:-/tmp}
+TEST_ROOT="$WORK_ROOT/hammer_loop"
+REGION_ROOT=${REGION_ROOT:-/var/tmp/hammer_loop}
+loop_log="$TEST_ROOT/hammer_loop.log"
+test_log="$TEST_ROOT/hammer_loop_test.log"
+
+if [[ ! -d "$TEST_ROOT" ]]; then
+    mkdir -p "$TEST_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make test root $TEST_ROOT"
+        exit 1
+    fi
+else
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
+
 loops=20
 
 usage () {
@@ -37,23 +54,25 @@ usage () {
 }
 
 while getopts 'l:' opt; do
-	case "$opt" in
+    case "$opt" in
         l)  loops=$OPTARG
             ;;
         *)  echo "Invalid option"
             usage
-			exit 1
-			;;
-	esac
+            exit 1
+            ;;
+    esac
 done
 
-if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 60 --extent-size 50; then
+if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 60 \
+    --extent-size 50 --region-dir "$REGION_ROOT"
+then
     echo "Failed to create region"
     exit 1
 fi
 
 # Start up dsc, verify it really did start.
-"$dsc" start --ds-bin "$cds" &
+"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" &
 dsc_pid=$!
 sleep 5
 if ! pgrep -P $dsc_pid; then
@@ -78,9 +97,6 @@ function ctrl_c() {
     fi
     exit 1
 }
-
-loop_log=/tmp/hammer_loop.log
-test_log=/tmp/hammer_loop_test.log
 echo "" > ${loop_log}
 echo "starting Hammer test on $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
@@ -145,5 +161,11 @@ if pgrep -fl -U "$(id -u)" "$cds" > /dev/null; then
     pkill -f -U "$(id -u)" "$cds"
 fi
 
+if [[ $err -eq 0 ]]; then
+    # No errors, then cleanup all our logs and the region directories.
+    rm -r "$TEST_ROOT"
+    rm -r "$REGION_ROOT"/8810
+    rm -r "$REGION_ROOT"/8820
+    rm -r "$REGION_ROOT"/8830
+fi
 exit "$err"
-

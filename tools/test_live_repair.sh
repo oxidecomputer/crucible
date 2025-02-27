@@ -26,11 +26,22 @@ mkdir -p "$REGION_ROOT"
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
-mkdir -p "$WORK_ROOT"
+TEST_ROOT="$WORK_ROOT/test_live_repair"
+if [[ ! -d "$TEST_ROOT" ]]; then
+    mkdir -p "$TEST_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make test root $TEST_ROOT"
+    exit 1
+    fi  
+else
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
 
-loop_log="$WORK_ROOT"/test_live_repair_summary.log
-test_log="$WORK_ROOT"/test_live_repair.log
-verify_log="$WORK_ROOT/test_live_repair_verify.log"
+loop_log="$TEST_ROOT"/test_live_repair_summary.log
+test_log="$TEST_ROOT"/test_live_repair.log
+verify_log="$TEST_ROOT/test_live_repair_verify.log"
+dsc_ds_log="$TEST_ROOT/test_live_repair_dsc.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
@@ -68,8 +79,8 @@ done
 
 ((region_count=region_sets*3))
 ((region_count+=1))
-echo "" > "$loop_log"
-echo "" > "$test_log"
+rm -f "$loop_log"
+rm -f "$test_log"
 echo "starting $(date)" | tee "$loop_log"
 echo "Tail $test_log for test output"
 
@@ -91,6 +102,7 @@ fi
 if ! ${dsc} create --cleanup \
   --region-dir "$REGION_ROOT" \
   --region-count "$region_count" \
+  --output-dir "$dsc_ds_log" \
   --ds-bin "$downstairs" \
   --extent-size "$extent_size" \
   --extent-count 200 >> "$test_log"; then
@@ -99,6 +111,7 @@ if ! ${dsc} create --cleanup \
 fi
 ${dsc} start --ds-bin "$downstairs" \
   --region-dir "$REGION_ROOT" \
+  --output-dir "$dsc_ds_log" \
   --region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
@@ -148,4 +161,15 @@ ${dsc} cmd shutdown
 wait "$dsc_pid"
 
 echo "$(date) Test ends with $result" | tee -a "$test_log"
+
+if [[ $result -eq 0 ]]; then
+    echo "DELETE 8840" | tee -a "$test_log"
+    ps -ef | grep crucible-downstairs
+    rm -rf "$REGION_ROOT"/8810
+    rm -rf "$REGION_ROOT"/8820
+    rm -rf "$REGION_ROOT"/8830
+    rm -rf "$REGION_ROOT"/8840
+    rm -rf "$TEST_ROOT"
+fi
+
 exit $result

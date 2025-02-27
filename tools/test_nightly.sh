@@ -10,6 +10,9 @@ err=0
 output_file="/tmp/nightly_results"
 rm -f "$output_file"
 
+REGION_ROOT=/regions/ubuntu/nightly
+echo "using REGION_ROOT=$REGION_ROOT"
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/release}
@@ -17,6 +20,7 @@ export BINDIR=${BINDIR:-$ROOT/target/release}
 echo "Nightly starts at $(date)" | tee "$output_file"
 echo "$(date) hammer start" >> "$output_file"
 banner hammer
+banner loop
 ./tools/hammer_loop.sh -l 200
 res=$?
 if [[ "$res" -eq 0 ]]; then
@@ -26,58 +30,63 @@ else
     (( err += 1 ))
 fi
 
+banner test
 banner replay
-echo "$(date) replay start" >> "$output_file"
+echo "$(date) test_replay start" >> "$output_file"
 ./tools/test_replay.sh -l 200
 res=$?
 if [[ "$res" -eq 0 ]]; then
-    echo "$(date) replay pass" >> "$output_file"
+    echo "$(date) test_replay pass" >> "$output_file"
 else
-    echo "$(date) replay fail with: $res" >> "$output_file"
+    echo "$(date) test_replay fail with: $res" >> "$output_file"
     (( err += 1 ))
 fi
 
+banner "test"
 banner repair
-echo "$(date) repair start" >> "$output_file"
+echo "$(date) test_repair start" >> "$output_file"
 ./tools/test_repair.sh -l 500
 res=$?
 if [[ "$res" -eq 0 ]]; then
-    echo "$(date) repair pass" >> "$output_file"
+    echo "$(date) test_repair pass" >> "$output_file"
 else
-    echo "$(date) repair fail with: $res" >> "$output_file"
+    echo "$(date) test_repair fail with: $res" >> "$output_file"
     (( err += 1 ))
 fi
 
-banner restart_repair
-echo "$(date) restart_repair start" >> "$output_file"
-./tools/test_restart_repair.sh -l 200
+banner restart
+banner repair
+echo "$(date) test_restart_repair start" >> "$output_file"
+./tools/test_restart_repair.sh -l 50
 res=$?
 if [[ "$res" -eq 0 ]]; then
-    echo "$(date) restart_repair pass" >> "$output_file"
+    echo "$(date) test_restart_repair pass" >> "$output_file"
 else
-    echo "$(date) restart_repair fail with: $res" >> "$output_file"
+    echo "$(date) test_restart_repair fail with: $res" >> "$output_file"
     (( err += 1 ))
 fi
 
-banner live_repair
-echo "$(date) live_repair start" >> "$output_file"
+banner live
+banner repair
+echo "$(date) test_live_repair start" >> "$output_file"
 ./tools/test_live_repair.sh -l 20
 res=$?
 if [[ "$res" -eq 0 ]]; then
-    echo "$(date) live_repair pass" >> "$output_file"
+    echo "$(date) test_live_repair pass" >> "$output_file"
 else
-    echo "$(date) live_repair fail with: $res" >> "$output_file"
+    echo "$(date) test_live_repair fail with: $res" >> "$output_file"
     (( err += 1 ))
 fi
 
-banner replace_reconcile
-echo "$(date) replace_reconcile start" >> "$output_file"
-./tools/test_replace_special.sh -l 20
+banner replace
+banner special
+echo "$(date) test_replace_special start" >> "$output_file"
+./tools/test_replace_special.sh -l 30
 res=$?
 if [[ "$res" -eq 0 ]]; then
-    echo "$(date) replace_reconcile pass" >> "$output_file"
+    echo "$(date) test_replace_special pass" >> "$output_file"
 else
-    echo "$(date) replace_reconcile fail with: $res" >> "$output_file"
+    echo "$(date) test_replace_special fail with: $res" >> "$output_file"
     (( err += 1 ))
 fi
 duration=$SECONDS
@@ -85,5 +94,5 @@ duration=$SECONDS
 banner results
 cat "$output_file"
 printf "Tests took %d:%02d  errors:%d\n" \
-    $((duration / 60)) $((duration % 60)) "$err"
+    $((duration / 60)) $((duration % 60)) "$err" | tee -a "$output_file"
 

@@ -98,28 +98,43 @@ while getopts 'l:' opt; do
 done
 
 WORK_ROOT=${WORK_ROOT:-/tmp}
-export loop_log="$WORK_ROOT/repair_restart.log"
-export test_log="$WORK_ROOT/repair_restart_test.log"
-export dsc_log="$WORK_ROOT/repair_restart_dsc.log"
-export verify_log="$WORK_ROOT/repair_restart_verify.log"
+TEST_ROOT="$WORK_ROOT/test_restart_repair"
 REGION_ROOT=${REGION_ROOT:-/var/tmp/test_restart_repair}
+export loop_log="$TEST_ROOT/test_restart_repair.log"
+export test_log="$TEST_ROOT/test_restart_repair_test.log"
+export verify_log="$TEST_ROOT/test_restart_repair_verify.log"
+export dsc_log="$TEST_ROOT/test_restart_repair_dsc.log"
+export dsc_ds_log="$TEST_ROOT/dsc"
 
-echo "" > "$loop_log"
+if [[ ! -d "$TEST_ROOT" ]]; then
+    mkdir -p "$TEST_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make test root $TEST_ROOT"
+        exit 1
+    fi
+else
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
+
 echo "starting $(date)" | tee "$loop_log"
-echo "" > "$test_log"
 echo "Tail $test_log for test output"
 echo "Tail $loop_log for summary output"
 echo "Tail $dsc_log for dsc outout"
 
 echo "Create a new region to test" | tee -a "${loop_log}"
 ulimit -n 65536
-if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 61 --extent-size 5120 --region-dir "$REGION_ROOT"; then
+if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 61 \
+    --extent-size 5120 --output-dir "$dsc_ds_log" \
+    --region-dir "$REGION_ROOT"
+then
     echo "Failed to create region at $REGION_ROOT"
     exit 1
 fi
 
 echo "Starting the downstairs" | tee -a "${loop_log}"
-"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" >> "$dsc_log" 2>&1 &
+"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" \
+    --output-dir "$dsc_ds_log" >> "$dsc_log" 2>&1 &
 dsc_pid=$!
 # Sleep 5 to give the downstairs time to get going.
 sleep 5
@@ -273,4 +288,12 @@ printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d
   $((ave / 60)) $((ave % 60)) \
   $((total / 60)) $((total % 60)) \
   "$err" $duration | tee -a "$loop_log"
+
+if [[ $err -eq 0 ]]; then
+    # No errors, then cleanup all our logs and the region directories.
+    rm -r "$TEST_ROOT"
+    rm -r "$REGION_ROOT"/8810
+    rm -r "$REGION_ROOT"/8820
+    rm -r "$REGION_ROOT"/8830
+fi
 exit "$err"
