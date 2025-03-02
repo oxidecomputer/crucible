@@ -27,13 +27,15 @@ pub struct SqliteInner(std::sync::Mutex<SqliteMoreInner>);
 
 impl ExtentInner for SqliteInner {
     fn gen_number(&self) -> Result<u64, CrucibleError> {
-        self.0.lock().unwrap().gen_number()
+        let v = self.0.lock().unwrap().gen_number()?;
+        Ok(v)
     }
     fn flush_number(&self) -> Result<u64, CrucibleError> {
-        self.0.lock().unwrap().flush_number()
+        let v = self.0.lock().unwrap().flush_number()?;
+        Ok(v)
     }
     fn dirty(&self) -> Result<bool, CrucibleError> {
-        self.0.lock().unwrap().dirty()
+        Ok(self.0.lock().unwrap().dirty())
     }
 
     fn pre_flush(
@@ -42,7 +44,8 @@ impl ExtentInner for SqliteInner {
         new_gen: u64,
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError> {
-        self.0.lock().unwrap().pre_flush(new_flush, new_gen, job_id)
+        self.0.lock().unwrap().pre_flush(new_flush, new_gen, job_id);
+        Ok(())
     }
 
     fn flush_inner(
@@ -61,7 +64,8 @@ impl ExtentInner for SqliteInner {
         self.0
             .lock()
             .unwrap()
-            .post_flush(new_flush, new_gen, job_id)
+            .post_flush(new_flush, new_gen, job_id)?;
+        Ok(())
     }
 
     fn read(
@@ -85,7 +89,8 @@ impl ExtentInner for SqliteInner {
             write,
             only_write_unwritten,
             iov_max,
-        )
+        )?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -94,7 +99,8 @@ impl ExtentInner for SqliteInner {
         block: u64,
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
-        self.0.lock().unwrap().get_block_contexts(block, count)
+        let bc = self.0.lock().unwrap().get_block_contexts(block, count)?;
+        Ok(bc)
     }
 
     #[cfg(test)]
@@ -158,7 +164,8 @@ impl SqliteInner {
             .unwrap()
             .truncate_encryption_contexts_and_hashes(
                 extent_block_indexes_and_hashes,
-            )
+            )?;
+        Ok(())
     }
 }
 
@@ -186,8 +193,42 @@ struct SqliteMoreInner {
     dirty_blocks: BTreeMap<usize, Option<u64>>,
 }
 
+// To avoid CrucibleError having a Rusqlite variant, use an "inner" error
+// variant and convert it to CrucibleError for the ExtentInner function
+// implementations.
+#[derive(thiserror::Error, Debug)]
+enum SqliteMoreInnerError {
+    #[error("crucible error")]
+    Crucible(#[from] CrucibleError),
+
+    #[error("rusqlite error")]
+    Rusqlite(#[from] rusqlite::Error),
+
+    #[error("io error")]
+    Io(#[from] std::io::Error),
+
+    #[error("anyhow error")]
+    Anyhow(#[from] anyhow::Error),
+}
+
+impl From<SqliteMoreInnerError> for CrucibleError {
+    fn from(e: SqliteMoreInnerError) -> CrucibleError {
+        match e {
+            SqliteMoreInnerError::Crucible(e) => e,
+
+            SqliteMoreInnerError::Rusqlite(e) => {
+                CrucibleError::GenericError(format!("{:?}", e))
+            }
+
+            SqliteMoreInnerError::Io(e) => e.into(),
+
+            SqliteMoreInnerError::Anyhow(e) => e.into(),
+        }
+    }
+}
+
 impl SqliteMoreInner {
-    fn gen_number(&self) -> Result<u64, CrucibleError> {
+    fn gen_number(&self) -> Result<u64, SqliteMoreInnerError> {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='gen_number'",
         )?;
@@ -198,7 +239,7 @@ impl SqliteMoreInner {
         Ok(gen_number)
     }
 
-    fn flush_number(&self) -> Result<u64, CrucibleError> {
+    fn flush_number(&self) -> Result<u64, SqliteMoreInnerError> {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='flush_number'",
         )?;
@@ -209,8 +250,8 @@ impl SqliteMoreInner {
         Ok(flush_number)
     }
 
-    fn dirty(&self) -> Result<bool, CrucibleError> {
-        Ok(self.dirty.get())
+    fn dirty(&self) -> bool {
+        self.dirty.get()
     }
 
     fn pre_flush(
@@ -218,15 +259,13 @@ impl SqliteMoreInner {
         _new_flush: u64,
         _new_gen: u64,
         job_id: JobOrReconciliationId,
-    ) -> Result<(), CrucibleError> {
+    ) {
         // Used for profiling
         let n_dirty_blocks = self.dirty_blocks.len() as u64;
 
         cdt::extent__flush__start!(|| {
             (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
-
-        Ok(())
     }
 
     fn flush_inner(
@@ -262,7 +301,7 @@ impl SqliteMoreInner {
         new_flush: u64,
         new_gen: u64,
         job_id: JobOrReconciliationId,
-    ) -> Result<(), CrucibleError> {
+    ) -> Result<(), SqliteMoreInnerError> {
         // Clear old block contexts. In order to be crash consistent, only
         // perform this after the extent fsync is done. For each block
         // written since the last flush, remove all block context rows where
@@ -404,7 +443,7 @@ impl SqliteMoreInner {
         write: &ExtentWrite,
         only_write_unwritten: bool,
         _iov_max: usize,
-    ) -> Result<(), CrucibleError> {
+    ) -> Result<(), SqliteMoreInnerError> {
         check_input(self.extent_size, write.offset, write.data.len())?;
 
         /*
@@ -622,7 +661,7 @@ impl SqliteMoreInner {
         &self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
+    ) -> Result<Vec<Option<DownstairsBlockContext>>, SqliteMoreInnerError> {
         let stmt =
             "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
              WHERE block BETWEEN ?1 AND ?2";
@@ -695,7 +734,8 @@ impl SqliteMoreInner {
                             "extent {}: incomplete read \
                          (expected {block_size}, got {num_bytes})",
                             self.extent_number
-                        )));
+                        ))
+                        .into());
                     }
                     let hash = integrity_hash(&[&buffer]);
                     known_hashes[i] = Some(hash);
@@ -964,7 +1004,7 @@ impl SqliteMoreInner {
         Ok(out)
     }
 
-    fn set_dirty(&self) -> Result<()> {
+    fn set_dirty(&self) -> Result<(), SqliteMoreInnerError> {
         if !self.dirty.get() {
             let _ = self
                 .metadb
@@ -980,7 +1020,7 @@ impl SqliteMoreInner {
     fn set_block_context(
         &self,
         block_context: &DownstairsBlockContext,
-    ) -> Result<(), CrucibleError> {
+    ) -> Result<(), SqliteMoreInnerError> {
         let stmt =
             "INSERT OR IGNORE INTO block_context (block, hash, nonce, tag, on_disk_hash) \
              VALUES (?1, ?2, ?3, ?4, ?5)";
@@ -1016,7 +1056,7 @@ impl SqliteMoreInner {
     fn truncate_encryption_contexts_and_hashes(
         &self,
         extent_block_indexes_and_hashes: &[(usize, u64)],
-    ) -> Result<()> {
+    ) -> Result<(), SqliteMoreInnerError> {
         let tx = self.metadb.unchecked_transaction()?;
 
         self.truncate_encryption_contexts_and_hashes_with_tx(
@@ -1038,7 +1078,7 @@ impl SqliteMoreInner {
         &self,
         extent_block_indexes_and_hashes: impl ExactSizeIterator<Item = (usize, u64)>,
         tx: &Transaction,
-    ) -> Result<()> {
+    ) -> Result<(), SqliteMoreInnerError> {
         let n_blocks = extent_block_indexes_and_hashes.len();
         cdt::extent__context__truncate__start!(|| n_blocks as u64);
 
@@ -1134,7 +1174,7 @@ impl SqliteMoreInner {
         &mut self,
         force_override_dirty: bool,
     ) -> Result<(), CrucibleError> {
-        if !force_override_dirty && !self.dirty()? {
+        if !force_override_dirty && !self.dirty() {
             return Ok(());
         }
 
