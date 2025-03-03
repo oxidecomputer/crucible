@@ -117,6 +117,7 @@ else
     rm -r "$TEST_ROOT"
 fi
 
+touch "$loop_log"
 echo "starting $(date)" | tee "$loop_log"
 echo "Tail $test_log for test output"
 echo "Tail $loop_log for summary output"
@@ -152,19 +153,12 @@ if [[ "$os_name" == 'Darwin' ]]; then
     codesign -s - -f "$ct"
 fi
 
-args=()
-port_base=8810
-for (( i = 0; i < 30; i += 10 )); do
-    (( port = port_base + i ))
-    args+=( -t "127.0.0.1:$port" )
-done
-
 gen=1
 # Send something to the region so our old region files have data.
 echo "$(date) pre-fill" >> "$test_log"
 echo "$(date) run pre-fill of our region" | tee -a "$loop_log"
-echo "$ct" fill "${args[@]}" --stable -g "$gen" >> "$test_log"
-"$ct" fill "${args[@]}" --stable -g "$gen" >> "$test_log" 2>&1
+echo "$ct" fill --dsc 127.0.0.1:9998 --stable -g "$gen" >> "$test_log"
+"$ct" fill --dsc 127.0.0.1:9998 --stable -g "$gen" >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial pre-fill"
     ctrl_c
@@ -179,6 +173,7 @@ stop_all_downstairs
 # We need to do this before moving the region directory out from
 # under a downstairs, otherwise it can fail and exit and the
 # downstairs daemon will think it is a real failure.
+# Issue oxidecomputer/crucible#1660
 sleep 7
 
 # Create the "old" region files
@@ -195,8 +190,8 @@ bring_all_downstairs_online
 # different data in current vs. old region directories.
 echo "$(date) Run a second fill test" >> "$test_log"
 echo "$(date) Run a second fill test" | tee -a "$loop_log"
-echo "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out "$verify_log" >> "$test_log"
-"$ct" fill "${args[@]}" --stable -g "$gen" --verify-out "$verify_log" >> "$test_log" 2>&1
+echo "$ct" fill --dsc 127.0.0.1:9998 --stable -g "$gen" --verify-out "$verify_log" >> "$test_log"
+"$ct" fill --dsc 127.0.0.1:9998 --stable -g "$gen" --verify-out "$verify_log" >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial fill"
     ctrl_c
@@ -250,7 +245,7 @@ while [[ $count -le $loops ]]; do
     fi
 
     echo "$(date) do one IO" >> "$test_log"
-    "$ct" one "${args[@]}" \
+    "$ct" one --dsc 127.0.0.1:9998 \
             -q -g "$gen" --verify-out "$verify_log" \
             --verify-in "$verify_log" \
             --verify-at-start \

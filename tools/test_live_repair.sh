@@ -31,7 +31,7 @@ if [[ ! -d "$TEST_ROOT" ]]; then
     mkdir -p "$TEST_ROOT"
     if [[ $? -ne 0 ]]; then
         echo "Failed to make test root $TEST_ROOT"
-    exit 1
+        exit 1
     fi  
 else
     # Delete previous test data
@@ -79,9 +79,8 @@ done
 
 ((region_count=region_sets*3))
 ((region_count+=1))
-rm -f "$loop_log"
-rm -f "$test_log"
-echo "starting $(date)" | tee "$loop_log"
+echo "Starting $(date)" > "$test_log"
+echo "starting $(date)" > "$loop_log"
 echo "Tail $test_log for test output"
 
 # No real data was used to come up with these numbers.  If you have some data
@@ -105,7 +104,8 @@ if ! ${dsc} create --cleanup \
   --output-dir "$dsc_ds_log" \
   --ds-bin "$downstairs" \
   --extent-size "$extent_size" \
-  --extent-count 200 >> "$test_log"; then
+  --extent-count 200 >> "$test_log"
+then
     echo "Failed to create downstairs regions"
     exit 1
 fi

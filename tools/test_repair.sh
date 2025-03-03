@@ -34,7 +34,7 @@ dsc="$BINDIR/dsc"
 
 for bin in $cds $ct $dsc; do
     if [[ ! -f "$bin" ]]; then
-        echo "Can't find crucible binary at $bin" >&2
+        echo "Can't find required binary at $bin" >&2
         exit 1
     fi
 done
@@ -69,25 +69,27 @@ loops=100
 usage () {
     echo "Usage: $0 [-l #] [N]" >&2
     echo " -l loops   Number of test loops to perform (default 100)" >&2
-	echo " -N         Don't dump color output"
+    echo " -N         Don't dump color output"
 }
 
 dump_args=()
 while getopts 'l:N' opt; do
-	case "$opt" in
+    case "$opt" in
         l)  loops=$OPTARG
             ;;
-		N)  echo "Turn off color for downstairs dump"
+        N)  echo "Turn off color for downstairs dump"
             dump_args+=(" --no-color")
             ;;
         *)  echo "Invalid option"
             usage
-			exit 1
-			;;
-	esac
+            exit 1
+            ;;
+    esac
 done
 
-if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 30 --extent-size 20 --region-dir "$REGION_ROOT" --output-dir "$dsc_output_dir"; then
+if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 30 \
+        --extent-size 20 --region-dir "$REGION_ROOT" \
+        --output-dir "$dsc_output_dir"; then
     echo "Failed to create region"
     exit 1
 fi
@@ -113,6 +115,10 @@ ${cds} run -d "${REGION_ROOT}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
 ds1_pid=$!
 ${cds} run -d "${REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
 ds2_pid=$!
+
+# Some programatic way to wait for all the downstairs to start before we
+# continue here.
+sleep 20
 
 os_name=$(uname)
 if [[ "$os_name" == 'Darwin' ]]; then
@@ -209,7 +215,7 @@ while [[ $count -lt $loops ]]; do
     then
         echo "Exit on verify fail, loop: $count, choice: $choice"
         echo "Check $test_log for details"
-        cleanup
+	cleanup
         exit 1
     fi
     set +o errexit
@@ -236,5 +242,7 @@ echo "Test completed"
 cleanup
 
 # Errors exit directly, so arrival here indicates success.
-# rm -rf "$REGION_ROOT"/8810
 rm -rf "$TEST_ROOT"
+rm -rf "$REGION_ROOT"/8810
+rm -rf "$REGION_ROOT"/8820
+rm -rf "$REGION_ROOT"/8830

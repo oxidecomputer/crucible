@@ -30,6 +30,10 @@ else
     (( err += 1 ))
 fi
 
+echo "$(date) Next test"
+ps -ef | egrep "downstairs|dsc"
+echo ""
+
 banner test
 banner replay
 echo "$(date) test_replay start" >> "$output_file"
@@ -42,6 +46,10 @@ else
     (( err += 1 ))
 fi
 
+echo "$(date) Next test"
+ps -ef | egrep "downstairs|dsc"
+echo ""
+
 banner "test"
 banner repair
 echo "$(date) test_repair start" >> "$output_file"
@@ -52,7 +60,12 @@ if [[ "$res" -eq 0 ]]; then
 else
     echo "$(date) test_repair fail with: $res" >> "$output_file"
     (( err += 1 ))
+    exit 1
 fi
+
+echo "$(date) Next test"
+ps -ef | egrep "downstairs|dsc"
+echo ""
 
 banner restart
 banner repair
@@ -64,7 +77,12 @@ if [[ "$res" -eq 0 ]]; then
 else
     echo "$(date) test_restart_repair fail with: $res" >> "$output_file"
     (( err += 1 ))
+    exit 1
 fi
+
+echo "$(date) Next test"
+ps -ef | egrep "downstairs|dsc"
+echo ""
 
 banner live
 banner repair
@@ -76,7 +94,12 @@ if [[ "$res" -eq 0 ]]; then
 else
     echo "$(date) test_live_repair fail with: $res" >> "$output_file"
     (( err += 1 ))
+    exit 1
 fi
+
+echo "$(date) Next test"
+ps -ef | egrep "downstairs|dsc"
+echo ""
 
 banner replace
 banner special
@@ -88,6 +111,7 @@ if [[ "$res" -eq 0 ]]; then
 else
     echo "$(date) test_replace_special fail with: $res" >> "$output_file"
     (( err += 1 ))
+    exit 1
 fi
 duration=$SECONDS
 
