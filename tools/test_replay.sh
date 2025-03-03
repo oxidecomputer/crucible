@@ -31,6 +31,7 @@ fi
 
 test_log="$TEST_ROOT/test_replay.log"
 verify_log="$TEST_ROOT/test_replay_verify.log"
+dsc_ds_log="$TEST_ROOT/test_live_repair_dsc.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
@@ -75,13 +76,15 @@ echo "Tail $test_log for test output"
 
 echo "Creating $region_count downstairs regions" | tee -a "$test_log"
 if ! ${dsc} create --cleanup --ds-bin "$downstairs" \
+        --output-dir "$dsc_ds_log" \
         --extent-count 50 --region-count "$region_count" >> "$test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
 
 echo "Starting $region_count downstairs" | tee -a "$test_log"
-${dsc} start --ds-bin "$downstairs" --region-count "$region_count" >> "$test_log" 2>&1 &
+${dsc} start --ds-bin "$downstairs" --output-dir "$dsc_ds_log" \
+	--region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
 if ! ps -p $dsc_pid > /dev/null; then
