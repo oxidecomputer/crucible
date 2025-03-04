@@ -5802,11 +5802,17 @@ mod test {
         // equal. Test that this doesn't produce an Err.
         assert_eq!(
             ReplaceResult::Started,
-            volume.target_replace(original, replacement.clone()).await.unwrap(),
+            volume
+                .target_replace(original, replacement.clone())
+                .await
+                .unwrap(),
         );
         assert_eq!(
             ReplaceResult::VcrMatches,
-            volume.target_replace(replacement.clone(), replacement).await.unwrap(),
+            volume
+                .target_replace(replacement.clone(), replacement)
+                .await
+                .unwrap(),
         );
     }
 
