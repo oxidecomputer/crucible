@@ -255,7 +255,8 @@ while [[ $count -le $loops ]]; do
 
     echo "$(date) do one IO" >> "$test_log"
     "$ct" one --dsc 127.0.0.1:9998 \
-            -q -g "$gen" --verify-out "$verify_log" \ --verify-in "$verify_log" \
+            -q -g "$gen" --verify-out "$verify_log" \
+	    --verify-in "$verify_log" \
             --verify-at-start \
             --retry-activate >> "$test_log" 2>&1
     result=$?
