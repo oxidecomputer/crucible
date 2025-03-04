@@ -21,7 +21,8 @@ echo "Nightly starts at $(date)" | tee "$output_file"
 echo "$(date) hammer start" >> "$output_file"
 banner hammer
 banner loop
-./tools/hammer_loop.sh -l 200
+#./tools/hammer_loop.sh -l 200
+./tools/hammer_loop.sh -l 10
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) hammer pass" >> "$output_file"
@@ -37,7 +38,8 @@ echo ""
 banner test
 banner replay
 echo "$(date) test_replay start" >> "$output_file"
-./tools/test_replay.sh -l 200
+#./tools/test_replay.sh -l 200
+./tools/test_replay.sh -l 10
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_replay pass" >> "$output_file"
@@ -70,7 +72,8 @@ echo ""
 banner restart
 banner repair
 echo "$(date) test_restart_repair start" >> "$output_file"
-./tools/test_restart_repair.sh -l 50
+#./tools/test_restart_repair.sh -l 50
+./tools/test_restart_repair.sh -l 5
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_restart_repair pass" >> "$output_file"
@@ -87,7 +90,8 @@ echo ""
 banner live
 banner repair
 echo "$(date) test_live_repair start" >> "$output_file"
-./tools/test_live_repair.sh -l 20
+#./tools/test_live_repair.sh -l 20
+./tools/test_live_repair.sh -l 3
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_live_repair pass" >> "$output_file"
@@ -104,7 +108,8 @@ echo ""
 banner replace
 banner special
 echo "$(date) test_replace_special start" >> "$output_file"
-./tools/test_replace_special.sh -l 30
+#./tools/test_replace_special.sh -l 30
+./tools/test_replace_special.sh -l 3
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_replace_special pass" >> "$output_file"

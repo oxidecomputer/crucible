@@ -97,15 +97,18 @@ while getopts 'l:' opt; do
     esac
 done
 
+REGION_ROOT=${REGION_ROOT:-/var/tmp/test_restart_repair}
+if [[ -d "$REGION_ROOT" ]]; then
+    rm -r "$REGION_ROOT"/8810
+    rm -r "$REGION_ROOT"/8810.old
+    rm -r "$REGION_ROOT"/8820
+    rm -r "$REGION_ROOT"/8820.old
+    rm -r "$REGION_ROOT"/8830
+    rm -r "$REGION_ROOT"/8830.old
+fi
+
 WORK_ROOT=${WORK_ROOT:-/tmp}
 TEST_ROOT="$WORK_ROOT/test_restart_repair"
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_restart_repair}
-export loop_log="$TEST_ROOT/test_restart_repair.log"
-export test_log="$TEST_ROOT/test_restart_repair_test.log"
-export verify_log="$TEST_ROOT/test_restart_repair_verify.log"
-export dsc_log="$TEST_ROOT/test_restart_repair_dsc.log"
-export dsc_ds_log="$TEST_ROOT/dsc"
-
 if [[ ! -d "$TEST_ROOT" ]]; then
     mkdir -p "$TEST_ROOT"
     if [[ $? -ne 0 ]]; then
@@ -116,6 +119,12 @@ else
     # Delete previous test data
     rm -r "$TEST_ROOT"
 fi
+
+export loop_log="$TEST_ROOT/test_restart_repair.log"
+export test_log="$TEST_ROOT/test_restart_repair_test.log"
+export verify_log="$TEST_ROOT/test_restart_repair_verify.log"
+export dsc_log="$TEST_ROOT/test_restart_repair_dsc.log"
+export dsc_ds_log="$TEST_ROOT/dsc"
 
 touch "$loop_log"
 echo "starting $(date)" | tee "$loop_log"
@@ -246,8 +255,7 @@ while [[ $count -le $loops ]]; do
 
     echo "$(date) do one IO" >> "$test_log"
     "$ct" one --dsc 127.0.0.1:9998 \
-            -q -g "$gen" --verify-out "$verify_log" \
-            --verify-in "$verify_log" \
+            -q -g "$gen" --verify-out "$verify_log" \ --verify-in "$verify_log" \
             --verify-at-start \
             --retry-activate >> "$test_log" 2>&1
     result=$?
@@ -288,7 +296,12 @@ if [[ $err -eq 0 ]]; then
     # No errors, then cleanup all our logs and the region directories.
     rm -r "$TEST_ROOT"
     rm -r "$REGION_ROOT"/8810
+    rm -r "$REGION_ROOT"/8810.old
     rm -r "$REGION_ROOT"/8820
+    rm -r "$REGION_ROOT"/8820.old
     rm -r "$REGION_ROOT"/8830
+    rm -r "$REGION_ROOT"/8830.old
+    # If the directory is empty, remove it.
+    rmdir "$REGION_ROOT" || true
 fi
 exit "$err"

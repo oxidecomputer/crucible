@@ -163,12 +163,12 @@ wait "$dsc_pid"
 echo "$(date) Test ends with $result" | tee -a "$test_log"
 
 if [[ $result -eq 0 ]]; then
-    echo "DELETE 8840" | tee -a "$test_log"
-    ps -ef | grep crucible-downstairs
     rm -rf "$REGION_ROOT"/8810
     rm -rf "$REGION_ROOT"/8820
     rm -rf "$REGION_ROOT"/8830
     rm -rf "$REGION_ROOT"/8840
+    # If empty, remove the region directory
+    rmdir "$REGION_ROOT"
     rm -rf "$TEST_ROOT"
 fi
 

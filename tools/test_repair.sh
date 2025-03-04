@@ -43,7 +43,9 @@ done
 # For buildomat, the regions should be in /var/tmp
 REGION_ROOT=${REGION_ROOT:-/var/tmp/test_repair}
 if [[ -d ${REGION_ROOT} ]]; then
-    rm -rf ${REGION_ROOT}
+    rm -rf "$REGION_ROOT"/8810
+    rm -rf "$REGION_ROOT"/8820
+    rm -rf "$REGION_ROOT"/8830
 fi
 
 # Location of logs and working files
@@ -246,3 +248,5 @@ rm -rf "$TEST_ROOT"
 rm -rf "$REGION_ROOT"/8810
 rm -rf "$REGION_ROOT"/8820
 rm -rf "$REGION_ROOT"/8830
+# If empty, remove the region directory
+rmdir "$REGION_ROOT"

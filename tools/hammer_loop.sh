@@ -167,5 +167,7 @@ if [[ $err -eq 0 ]]; then
     rm -r "$REGION_ROOT"/8810
     rm -r "$REGION_ROOT"/8820
     rm -r "$REGION_ROOT"/8830
+    # If empty, remove the region directory
+    rmdir "$REGION_ROOT"
 fi
 exit "$err"
