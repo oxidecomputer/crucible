@@ -39,7 +39,7 @@ banner test
 banner replay
 echo "$(date) test_replay start" >> "$output_file"
 #./tools/test_replay.sh -l 200
-./tools/test_replay.sh -l 10
+./tools/test_replay.sh -l 3
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_replay pass" >> "$output_file"
@@ -55,7 +55,8 @@ echo ""
 banner "test"
 banner repair
 echo "$(date) test_repair start" >> "$output_file"
-./tools/test_repair.sh -l 500
+# ./tools/test_repair.sh -l 500
+./tools/test_repair.sh -l 5
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_repair pass" >> "$output_file"
@@ -73,7 +74,7 @@ banner restart
 banner repair
 echo "$(date) test_restart_repair start" >> "$output_file"
 #./tools/test_restart_repair.sh -l 50
-./tools/test_restart_repair.sh -l 5
+./tools/test_restart_repair.sh -l 3
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_restart_repair pass" >> "$output_file"

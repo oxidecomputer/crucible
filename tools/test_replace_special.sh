@@ -146,6 +146,11 @@ echo "$(date) Test ends with $result" | tee -a "$test_log"
 if [[ $result -eq 0 ]]; then
     # Cleanup
     echo "$(date) Cleanup for $0" | tee -a "$test_log"
+    rm -rf "$REGION_ROOT"/8810
+    rm -rf "$REGION_ROOT"/8820
+    rm -rf "$REGION_ROOT"/8830
+    rm -rf "$REGION_ROOT"/8840
+    rmdir "$REGION_ROOT"
     rm -rf "$TEST_ROOT"
 fi
 exit $result

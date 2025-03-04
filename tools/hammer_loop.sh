@@ -32,9 +32,6 @@ fi
 WORK_ROOT=${WORK_ROOT:-/tmp}
 TEST_ROOT="$WORK_ROOT/hammer_loop"
 REGION_ROOT=${REGION_ROOT:-/var/tmp/hammer_loop}
-loop_log="$TEST_ROOT/hammer_loop.log"
-test_log="$TEST_ROOT/hammer_loop_test.log"
-
 if [[ ! -d "$TEST_ROOT" ]]; then
     mkdir -p "$TEST_ROOT"
     if [[ $? -ne 0 ]]; then
@@ -45,6 +42,10 @@ else
     # Delete previous test data
     rm -r "$TEST_ROOT"
 fi
+
+loop_log="$TEST_ROOT/hammer_loop.log"
+test_log="$TEST_ROOT/hammer_loop_test.log"
+dsc_ds_log="$TEST_ROOT/test_live_repair_dsc.log"
 
 loops=20
 
@@ -65,6 +66,7 @@ while getopts 'l:' opt; do
 done
 
 if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 60 \
+    --output-dir "$dsc_ds_log" \
     --extent-size 50 --region-dir "$REGION_ROOT"
 then
     echo "Failed to create region"
@@ -72,7 +74,8 @@ then
 fi
 
 # Start up dsc, verify it really did start.
-"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" &
+"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" 
+    --output-dir "$dsc_ds_log" &
 dsc_pid=$!
 sleep 5
 if ! pgrep -P $dsc_pid; then
@@ -154,8 +157,9 @@ printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d
   "$err" $duration | tee -a ${loop_log}
 
 echo "Stopping dsc"
-kill $dsc_pid 2> /dev/null
+"$dsc" cmd shutdown
 wait $dsc_pid
+
 # Also remove any leftover downstairs
 if pgrep -fl -U "$(id -u)" "$cds" > /dev/null; then
     pkill -f -U "$(id -u)" "$cds"
