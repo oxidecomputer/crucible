@@ -21,8 +21,7 @@ echo "Nightly starts at $(date)" | tee "$output_file"
 echo "$(date) hammer start" >> "$output_file"
 banner hammer
 banner loop
-#./tools/hammer_loop.sh -l 200
-./tools/hammer_loop.sh -l 10
+./tools/hammer_loop.sh -l 200
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) hammer pass" >> "$output_file"
@@ -35,11 +34,11 @@ echo "$(date) Next test"
 ps -ef | egrep "downstairs|dsc"
 echo ""
 
+sleep 1
 banner test
 banner replay
 echo "$(date) test_replay start" >> "$output_file"
-#./tools/test_replay.sh -l 200
-./tools/test_replay.sh -l 3
+./tools/test_replay.sh -l 200
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_replay pass" >> "$output_file"
@@ -52,11 +51,11 @@ echo "$(date) Next test"
 ps -ef | egrep "downstairs|dsc"
 echo ""
 
+sleep 1
 banner "test"
 banner repair
 echo "$(date) test_repair start" >> "$output_file"
-# ./tools/test_repair.sh -l 500
-./tools/test_repair.sh -l 5
+./tools/test_repair.sh -l 500
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_repair pass" >> "$output_file"
@@ -70,11 +69,11 @@ echo "$(date) Next test"
 ps -ef | egrep "downstairs|dsc"
 echo ""
 
+sleep 1
 banner restart
 banner repair
 echo "$(date) test_restart_repair start" >> "$output_file"
-#./tools/test_restart_repair.sh -l 50
-./tools/test_restart_repair.sh -l 3
+./tools/test_restart_repair.sh -l 50
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_restart_repair pass" >> "$output_file"
@@ -88,11 +87,11 @@ echo "$(date) Next test"
 ps -ef | egrep "downstairs|dsc"
 echo ""
 
+sleep 1
 banner live
 banner repair
 echo "$(date) test_live_repair start" >> "$output_file"
-#./tools/test_live_repair.sh -l 20
-./tools/test_live_repair.sh -l 3
+./tools/test_live_repair.sh -l 20
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_live_repair pass" >> "$output_file"
@@ -106,11 +105,11 @@ echo "$(date) Next test"
 ps -ef | egrep "downstairs|dsc"
 echo ""
 
+sleep 1
 banner replace
 banner special
 echo "$(date) test_replace_special start" >> "$output_file"
-#./tools/test_replace_special.sh -l 30
-./tools/test_replace_special.sh -l 3
+./tools/test_replace_special.sh -l 30
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_replace_special pass" >> "$output_file"
