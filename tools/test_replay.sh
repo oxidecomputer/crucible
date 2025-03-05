@@ -32,7 +32,7 @@ fi
 
 test_log="$TEST_ROOT/test_replay.log"
 verify_log="$TEST_ROOT/test_replay_verify.log"
-dsc_ds_log="$TEST_ROOT/test_live_repair_dsc.log"
+dsc_ds_log="$TEST_ROOT/test_replay_dsc.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)

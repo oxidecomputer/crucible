@@ -65,7 +65,7 @@ fi
 verify_file="$TEST_ROOT/test_repair_verify.data"
 test_log="$TEST_ROOT/test_repair_out.txt"
 ds_log_prefix="$TEST_ROOT/test_repair_ds"
-dsc_output_dir="$TEST_ROOT/dsc"
+dsc_output_dir="$TEST_ROOT/test_repair_dsc"
 loops=100
 
 usage () {
