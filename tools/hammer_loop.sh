@@ -74,7 +74,7 @@ then
 fi
 
 # Start up dsc, verify it really did start.
-"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" 
+"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" \
     --output-dir "$dsc_ds_log" &
 dsc_pid=$!
 sleep 5
