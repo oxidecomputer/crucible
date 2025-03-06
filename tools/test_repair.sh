@@ -118,7 +118,7 @@ ds1_pid=$!
 ${cds} run -d "${REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
 ds2_pid=$!
 
-# Some programatic way to wait for all the downstairs to start before we
+# TODO: Some programatic way to wait for all the downstairs to start before we
 # continue here.
 sleep 20
 

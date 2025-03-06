@@ -45,7 +45,7 @@ fi
 
 loop_log="$TEST_ROOT/hammer_loop.log"
 test_log="$TEST_ROOT/hammer_loop_test.log"
-dsc_ds_log="$TEST_ROOT/test_live_repair_dsc.log"
+dsc_ds_log="$TEST_ROOT/hammer_loop_dsc.log"
 
 loops=20
 
