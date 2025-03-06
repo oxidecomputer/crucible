@@ -10,9 +10,6 @@ err=0
 output_file="/tmp/nightly_results"
 rm -f "$output_file"
 
-REGION_ROOT=/regions/ubuntu/nightly
-echo "using REGION_ROOT=$REGION_ROOT"
-
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/release}
