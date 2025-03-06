@@ -1113,7 +1113,7 @@ dependencies = [
  "slog-term",
  "statistical",
  "tempfile",
- "thiserror 1.0.66",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-rustls 0.24.1",
  "tokio-util",

@@ -97,29 +97,54 @@ while getopts 'l:' opt; do
     esac
 done
 
-WORK_ROOT=${WORK_ROOT:-/tmp}
-export loop_log="$WORK_ROOT/repair_restart.log"
-export test_log="$WORK_ROOT/repair_restart_test.log"
-export dsc_log="$WORK_ROOT/repair_restart_dsc.log"
-export verify_log="$WORK_ROOT/repair_restart_verify.log"
 REGION_ROOT=${REGION_ROOT:-/var/tmp/test_restart_repair}
+if [[ -d "$REGION_ROOT" ]]; then
+    rm -r "$REGION_ROOT"/8810
+    rm -r "$REGION_ROOT"/8810.old
+    rm -r "$REGION_ROOT"/8820
+    rm -r "$REGION_ROOT"/8820.old
+    rm -r "$REGION_ROOT"/8830
+    rm -r "$REGION_ROOT"/8830.old
+fi
 
-echo "" > "$loop_log"
+WORK_ROOT=${WORK_ROOT:-/tmp}
+TEST_ROOT="$WORK_ROOT/test_restart_repair"
+if [[ ! -d "$TEST_ROOT" ]]; then
+    mkdir -p "$TEST_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make test root $TEST_ROOT"
+        exit 1
+    fi
+else
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
+
+export loop_log="$TEST_ROOT/test_restart_repair.log"
+export test_log="$TEST_ROOT/test_restart_repair_test.log"
+export verify_log="$TEST_ROOT/test_restart_repair_verify.log"
+export dsc_log="$TEST_ROOT/test_restart_repair_dsc.log"
+export dsc_ds_log="$TEST_ROOT/dsc"
+
+touch "$loop_log"
 echo "starting $(date)" | tee "$loop_log"
-echo "" > "$test_log"
 echo "Tail $test_log for test output"
 echo "Tail $loop_log for summary output"
 echo "Tail $dsc_log for dsc outout"
 
 echo "Create a new region to test" | tee -a "${loop_log}"
 ulimit -n 65536
-if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 61 --extent-size 5120 --region-dir "$REGION_ROOT"; then
+if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 61 \
+    --extent-size 5120 --output-dir "$dsc_ds_log" \
+    --region-dir "$REGION_ROOT"
+then
     echo "Failed to create region at $REGION_ROOT"
     exit 1
 fi
 
 echo "Starting the downstairs" | tee -a "${loop_log}"
-"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" >> "$dsc_log" 2>&1 &
+"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" \
+    --output-dir "$dsc_ds_log" >> "$dsc_log" 2>&1 &
 dsc_pid=$!
 # Sleep 5 to give the downstairs time to get going.
 sleep 5
@@ -137,19 +162,12 @@ if [[ "$os_name" == 'Darwin' ]]; then
     codesign -s - -f "$ct"
 fi
 
-args=()
-port_base=8810
-for (( i = 0; i < 30; i += 10 )); do
-    (( port = port_base + i ))
-    args+=( -t "127.0.0.1:$port" )
-done
-
 gen=1
 # Send something to the region so our old region files have data.
 echo "$(date) pre-fill" >> "$test_log"
 echo "$(date) run pre-fill of our region" | tee -a "$loop_log"
-echo "$ct" fill "${args[@]}" --stable -g "$gen" >> "$test_log"
-"$ct" fill "${args[@]}" --stable -g "$gen" >> "$test_log" 2>&1
+echo "$ct" fill --dsc 127.0.0.1:9998 --stable -g "$gen" >> "$test_log"
+"$ct" fill --dsc 127.0.0.1:9998 --stable -g "$gen" >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial pre-fill"
     ctrl_c
@@ -164,6 +182,7 @@ stop_all_downstairs
 # We need to do this before moving the region directory out from
 # under a downstairs, otherwise it can fail and exit and the
 # downstairs daemon will think it is a real failure.
+# Issue oxidecomputer/crucible#1660
 sleep 7
 
 # Create the "old" region files
@@ -180,8 +199,8 @@ bring_all_downstairs_online
 # different data in current vs. old region directories.
 echo "$(date) Run a second fill test" >> "$test_log"
 echo "$(date) Run a second fill test" | tee -a "$loop_log"
-echo "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out "$verify_log" >> "$test_log"
-"$ct" fill "${args[@]}" --stable -g "$gen" --verify-out "$verify_log" >> "$test_log" 2>&1
+echo "$ct" fill --dsc 127.0.0.1:9998 --stable -g "$gen" --verify-out "$verify_log" >> "$test_log"
+"$ct" fill --dsc 127.0.0.1:9998 --stable -g "$gen" --verify-out "$verify_log" >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial fill"
     ctrl_c
@@ -235,9 +254,9 @@ while [[ $count -le $loops ]]; do
     fi
 
     echo "$(date) do one IO" >> "$test_log"
-    "$ct" one "${args[@]}" \
+    "$ct" one --dsc 127.0.0.1:9998 \
             -q -g "$gen" --verify-out "$verify_log" \
-            --verify-in "$verify_log" \
+	    --verify-in "$verify_log" \
             --verify-at-start \
             --retry-activate >> "$test_log" 2>&1
     result=$?
@@ -273,4 +292,17 @@ printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d
   $((ave / 60)) $((ave % 60)) \
   $((total / 60)) $((total % 60)) \
   "$err" $duration | tee -a "$loop_log"
+
+if [[ $err -eq 0 ]]; then
+    # No errors, then cleanup all our logs and the region directories.
+    rm -r "$TEST_ROOT"
+    rm -r "$REGION_ROOT"/8810
+    rm -r "$REGION_ROOT"/8810.old
+    rm -r "$REGION_ROOT"/8820
+    rm -r "$REGION_ROOT"/8820.old
+    rm -r "$REGION_ROOT"/8830
+    rm -r "$REGION_ROOT"/8830.old
+    # If the directory is empty, remove it.
+    rmdir "$REGION_ROOT" || true
+fi
 exit "$err"
