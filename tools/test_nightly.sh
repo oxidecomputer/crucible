@@ -29,9 +29,6 @@ else
     echo "$(date) hammer fail with: $res" >> "$output_file"
     (( err += 1 ))
 fi
-
-echo "$(date) Next test"
-ps -ef | egrep "downstairs|dsc"
 echo ""
 
 sleep 1
@@ -46,9 +43,6 @@ else
     echo "$(date) test_replay fail with: $res" >> "$output_file"
     (( err += 1 ))
 fi
-
-echo "$(date) Next test"
-ps -ef | egrep "downstairs|dsc"
 echo ""
 
 sleep 1
@@ -64,9 +58,6 @@ else
     (( err += 1 ))
     exit 1
 fi
-
-echo "$(date) Next test"
-ps -ef | egrep "downstairs|dsc"
 echo ""
 
 sleep 1
@@ -82,9 +73,6 @@ else
     (( err += 1 ))
     exit 1
 fi
-
-echo "$(date) Next test"
-ps -ef | egrep "downstairs|dsc"
 echo ""
 
 sleep 1
@@ -100,9 +88,6 @@ else
     (( err += 1 ))
     exit 1
 fi
-
-echo "$(date) Next test"
-ps -ef | egrep "downstairs|dsc"
 echo ""
 
 sleep 1
