@@ -3288,8 +3288,8 @@ impl Work {
         }
     }
 
-    fn completed(&self) -> &[JobId] {
-        self.completed.completed()
+    fn completed(&self) -> Vec<JobId> {
+        self.completed.completed().collect()
     }
 
     /// Pushes a new job to the back of the queue
@@ -4947,7 +4947,7 @@ mod test {
         test_do_work(&mut work, next_jobs);
         assert_eq!(
             work.completed(),
-            vec![JobId(1000), JobId(2000), JobId(1001), JobId(2001)]
+            vec![JobId(1000), JobId(1001), JobId(2000), JobId(2001)]
         );
 
         let next_jobs = test_push_next_jobs(&mut work);

@@ -1,15 +1,19 @@
 use crate::JobId;
+use rangemap::RangeSet;
 
 /// Stores a set of complete jobs
 #[derive(Debug)]
 pub struct CompletedJobs {
-    completed: Vec<JobId>,
+    completed: RangeSet<JobId>,
 }
 
 impl CompletedJobs {
     pub fn new(last_flush: Option<JobId>) -> Self {
         Self {
-            completed: last_flush.into_iter().collect(),
+            completed: last_flush
+                .into_iter()
+                .map(|id| id..JobId(id.0 + 1))
+                .collect(),
         }
     }
 
@@ -20,7 +24,7 @@ impl CompletedJobs {
 
     /// Records a new complete job in the list
     pub fn push(&mut self, id: JobId) {
-        self.completed.push(id);
+        self.completed.insert(id..JobId(id.0 + 1));
     }
 
     /// Resets the data structure, given a new barrier operation
@@ -29,20 +33,20 @@ impl CompletedJobs {
     /// oldest complete job.
     pub fn reset(&mut self, id: JobId) {
         self.completed.clear();
-        self.completed.push(id);
+        self.completed.insert(id..JobId(id.0 + 1));
     }
 
     /// Checks whether the given job is complete
     ///
     /// A job is complete if it is listed in the set of complete jobs.
     pub fn is_complete(&self, id: JobId) -> bool {
-        // We deliberately reverse the `completed` list because new jobs are at
-        // the back and are more likely to be what we care about
-        self.completed.iter().rev().any(|j| *j == id)
+        self.completed.contains(&id)
     }
 
     /// Returns the list of completed jobs
-    pub fn completed(&self) -> &[JobId] {
-        &self.completed
+    pub fn completed(&self) -> impl Iterator<Item = JobId> + use<'_> {
+        self.completed
+            .iter()
+            .flat_map(|r| (r.start.0..r.end.0).map(JobId))
     }
 }
