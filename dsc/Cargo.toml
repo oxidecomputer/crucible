@@ -17,6 +17,7 @@ dropshot.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 schemars.workspace = true
+semver.workspace = true
 serde.workspace = true
 statistical.workspace = true
 tokio.workspace = true

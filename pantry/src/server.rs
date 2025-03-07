@@ -469,7 +469,7 @@ pub fn run_server(
             bind_address,
             // max import, multiplied by worst case base64 overhead, plus room
             // for metadata
-            request_body_max_bytes: 1024
+            default_request_body_max_bytes: 1024
                 + crate::pantry::PantryEntry::MAX_CHUNK_SIZE * 2,
             default_handler_task_mode: HandlerTaskMode::Detached,
             log_headers: vec![],

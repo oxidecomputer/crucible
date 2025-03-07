@@ -16,6 +16,7 @@ http.workspace = true
 hyper.workspace = true
 omicron-common.workspace = true
 schemars.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slog.workspace = true
