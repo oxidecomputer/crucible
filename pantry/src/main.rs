@@ -47,7 +47,8 @@ async fn main() -> Result<()> {
 
 fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
     let api = server::make_api().map_err(|e| anyhow!(e))?;
-    api.openapi("Crucible Pantry", Version::new(0, 0, 1)).write(f)?;
+    api.openapi("Crucible Pantry", Version::new(0, 0, 1))
+        .write(f)?;
     Ok(())
 }
 

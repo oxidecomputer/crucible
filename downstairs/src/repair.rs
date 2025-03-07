@@ -31,7 +31,8 @@ pub struct FileServerContext {
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
     let api = build_api();
-    api.openapi("Downstairs Repair", Version::new(0, 0, 1)).write(f)?;
+    api.openapi("Downstairs Repair", Version::new(0, 0, 1))
+        .write(f)?;
     Ok(())
 }
 
