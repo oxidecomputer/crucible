@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
 use slog::{debug, error, info, o, Logger};
+use semver::Version;
 use std::collections::HashSet;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -341,7 +342,7 @@ async fn main() -> Result<()> {
 
 fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
     let api = server::make_api()?;
-    api.openapi("Crucible Agent", "0.0.0").write(f)?;
+    api.openapi("Crucible Agent", Version::new(0, 0, 1)).write(f)?;
     Ok(())
 }
 

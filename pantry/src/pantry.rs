@@ -851,7 +851,7 @@ impl Pantry {
                             "volume {} is no longer active!",
                             volume_id
                         )),
-                        hyper::StatusCode::GONE,
+                        dropshot::ClientErrorStatusCode::GONE,
                         format!("volume {} is no longer active!", volume_id),
                     ))
                 } else {
