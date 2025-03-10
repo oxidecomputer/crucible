@@ -31,7 +31,6 @@ fi
 
 WORK_ROOT=${WORK_ROOT:-/tmp}
 TEST_ROOT="$WORK_ROOT/hammer_loop"
-REGION_ROOT=${REGION_ROOT:-/var/tmp/hammer_loop}
 if [[ ! -d "$TEST_ROOT" ]]; then
     mkdir -p "$TEST_ROOT"
     if [[ $? -ne 0 ]]; then
@@ -41,6 +40,17 @@ if [[ ! -d "$TEST_ROOT" ]]; then
 else
     # Delete previous test data
     rm -r "$TEST_ROOT"
+fi
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT=${REGION_ROOT/hammer_loop}
+if [[ ! -d "$MY_REGION_ROOT" ]]; then
+    mkdir -p "$MY_REGION_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make region root $MY_REGION_ROOT"
+        exit 1
+    fi
+else
+    rm -rf "$MY_REGION_ROOT"
 fi
 
 loop_log="$TEST_ROOT/hammer_loop.log"
@@ -67,14 +77,14 @@ done
 
 if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 60 \
     --output-dir "$dsc_ds_log" \
-    --extent-size 50 --region-dir "$REGION_ROOT"
+    --extent-size 50 --region-dir "$MY_REGION_ROOT"
 then
     echo "Failed to create region"
     exit 1
 fi
 
 # Start up dsc, verify it really did start.
-"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" \
+"$dsc" start --ds-bin "$cds" --region-dir "$MY_REGION_ROOT" \
     --output-dir "$dsc_ds_log" &
 dsc_pid=$!
 sleep 5
@@ -168,10 +178,6 @@ fi
 if [[ $err -eq 0 ]]; then
     # No errors, then cleanup all our logs and the region directories.
     rm -r "$TEST_ROOT"
-    rm -r "$REGION_ROOT"/8810
-    rm -r "$REGION_ROOT"/8820
-    rm -r "$REGION_ROOT"/8830
-    # If empty, remove the region directory
-    rmdir "$REGION_ROOT"
+    rm -rf "$MY_REGION_ROOT"
 fi
 exit "$err"

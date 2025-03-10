@@ -21,8 +21,17 @@ function ctrl_c() {
     exit 1
 }
 
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_live_repair}
-mkdir -p "$REGION_ROOT"
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT=${REGION_ROOT/test_live_repair}
+if [[ ! -d "$MY_REGION_ROOT" ]]; then
+    mkdir -p "$MY_REGION_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make region root $MY_REGION_ROOT"
+        exit 1
+    fi
+else
+    rm -rf "$MY_REGION_ROOT"
+fi
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
@@ -99,7 +108,7 @@ fi
 # be used by the replace test.  We can use dsc to determine what the port will
 # be for the final region.
 if ! ${dsc} create --cleanup \
-  --region-dir "$REGION_ROOT" \
+  --region-dir "$MY_REGION_ROOT" \
   --region-count "$region_count" \
   --output-dir "$dsc_ds_log" \
   --ds-bin "$downstairs" \
@@ -110,7 +119,7 @@ then
     exit 1
 fi
 ${dsc} start --ds-bin "$downstairs" \
-  --region-dir "$REGION_ROOT" \
+  --region-dir "$MY_REGION_ROOT" \
   --output-dir "$dsc_ds_log" \
   --region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
@@ -163,12 +172,7 @@ wait "$dsc_pid"
 echo "$(date) Test ends with $result" | tee -a "$test_log"
 
 if [[ $result -eq 0 ]]; then
-    rm -rf "$REGION_ROOT"/8810
-    rm -rf "$REGION_ROOT"/8820
-    rm -rf "$REGION_ROOT"/8830
-    rm -rf "$REGION_ROOT"/8840
-    # If empty, remove the region directory
-    rmdir "$REGION_ROOT"
+    rm -rf "$MY_REGION_ROOT"
     rm -rf "$TEST_ROOT"
 fi
 

@@ -97,14 +97,16 @@ while getopts 'l:' opt; do
     esac
 done
 
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_restart_repair}
-if [[ -d "$REGION_ROOT" ]]; then
-    rm -r "$REGION_ROOT"/8810
-    rm -r "$REGION_ROOT"/8810.old
-    rm -r "$REGION_ROOT"/8820
-    rm -r "$REGION_ROOT"/8820.old
-    rm -r "$REGION_ROOT"/8830
-    rm -r "$REGION_ROOT"/8830.old
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT=${REGION_ROOT/test_restart_repair}
+if [[ ! -d "$MY_REGION_ROOT" ]]; then
+    mkdir -p "$MY_REGION_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make region root $MY_REGION_ROOT"
+        exit 1
+    fi
+else
+    rm -rf "$MY_REGION_ROOT"
 fi
 
 WORK_ROOT=${WORK_ROOT:-/tmp}
@@ -136,14 +138,14 @@ echo "Create a new region to test" | tee -a "${loop_log}"
 ulimit -n 65536
 if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 61 \
     --extent-size 5120 --output-dir "$dsc_ds_log" \
-    --region-dir "$REGION_ROOT"
+    --region-dir "$MY_REGION_ROOT"
 then
-    echo "Failed to create region at $REGION_ROOT"
+    echo "Failed to create region at $MY_REGION_ROOT"
     exit 1
 fi
 
 echo "Starting the downstairs" | tee -a "${loop_log}"
-"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" \
+"$dsc" start --ds-bin "$cds" --region-dir "$MY_REGION_ROOT" \
     --output-dir "$dsc_ds_log" >> "$dsc_log" 2>&1 &
 dsc_pid=$!
 # Sleep 5 to give the downstairs time to get going.
@@ -186,10 +188,10 @@ stop_all_downstairs
 sleep 7
 
 # Create the "old" region files
-rm -rf "$REGION_ROOT"/8810.old "$REGION_ROOT"/8820.old "$REGION_ROOT"/8830.old
-cp -R  "$REGION_ROOT"/8810 "$REGION_ROOT"/8810.old || ctrl_c
-cp -R  "$REGION_ROOT"/8820 "$REGION_ROOT"/8820.old || ctrl_c
-cp -R  "$REGION_ROOT"/8830 "$REGION_ROOT"/8830.old || ctrl_c
+rm -rf "$MY_REGION_ROOT"/8810.old "$MY_REGION_ROOT"/8820.old "$MY_REGION_ROOT"/8830.old
+cp -R  "$MY_REGION_ROOT"/8810 "$MY_REGION_ROOT"/8810.old || ctrl_c
+cp -R  "$MY_REGION_ROOT"/8820 "$MY_REGION_ROOT"/8820.old || ctrl_c
+cp -R  "$MY_REGION_ROOT"/8830 "$MY_REGION_ROOT"/8830.old || ctrl_c
 
 # Bring the downstairs back online.
 echo "$(date) Bring downstairs back online" | tee -a "$loop_log"
@@ -230,19 +232,19 @@ while [[ $count -le $loops ]]; do
     echo "$(date) move regions" >> "$test_log"
     choice=$((RANDOM % 3))
     if [[ $choice -eq 0 ]]; then
-        rm -rf "$REGION_ROOT"/8810
-        cp -R  "$REGION_ROOT"/8810.old "$REGION_ROOT"/8810
+        rm -rf "$MY_REGION_ROOT"/8810
+        cp -R  "$MY_REGION_ROOT"/8810.old "$MY_REGION_ROOT"/8810
     elif [[ $choice -eq 1 ]]; then
-        rm -rf "$REGION_ROOT"/8820
-        cp -R  "$REGION_ROOT"/8820.old "$REGION_ROOT"/8820
+        rm -rf "$MY_REGION_ROOT"/8820
+        cp -R  "$MY_REGION_ROOT"/8820.old "$MY_REGION_ROOT"/8820
     else
-        rm -rf "$REGION_ROOT"/8830
-        cp -R  "$REGION_ROOT"/8830.old "$REGION_ROOT"/8830
+        rm -rf "$MY_REGION_ROOT"/8830
+        cp -R  "$MY_REGION_ROOT"/8830.old "$MY_REGION_ROOT"/8830
     fi
     echo "$(date) regions moved, current dump outputs:" >> "$test_log"
-    $cds dump --no-color -d "$REGION_ROOT"/8810 \
-        -d "$REGION_ROOT"/8820 \
-        -d "$REGION_ROOT"/8830 >> "$test_log" 2>&1
+    $cds dump --no-color -d "$MY_REGION_ROOT"/8810 \
+        -d "$MY_REGION_ROOT"/8820 \
+        -d "$MY_REGION_ROOT"/8830 >> "$test_log" 2>&1
 
     echo "$(date) resume downstairs" >> "$test_log"
     bring_all_downstairs_online
@@ -296,13 +298,6 @@ printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d
 if [[ $err -eq 0 ]]; then
     # No errors, then cleanup all our logs and the region directories.
     rm -r "$TEST_ROOT"
-    rm -r "$REGION_ROOT"/8810
-    rm -r "$REGION_ROOT"/8810.old
-    rm -r "$REGION_ROOT"/8820
-    rm -r "$REGION_ROOT"/8820.old
-    rm -r "$REGION_ROOT"/8830
-    rm -r "$REGION_ROOT"/8830.old
-    # If the directory is empty, remove it.
-    rmdir "$REGION_ROOT" || true
+    rm -rf "$MY_REGION_ROOT"
 fi
 exit "$err"

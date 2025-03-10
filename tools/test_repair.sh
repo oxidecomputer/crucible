@@ -41,11 +41,16 @@ done
 
 
 # For buildomat, the regions should be in /var/tmp
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_repair}
-if [[ -d ${REGION_ROOT} ]]; then
-    rm -rf "$REGION_ROOT"/8810
-    rm -rf "$REGION_ROOT"/8820
-    rm -rf "$REGION_ROOT"/8830
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT=${REGION_ROOT/test_repair}
+if [[ ! -d "$MY_REGION_ROOT" ]]; then
+    mkdir -p "$MY_REGION_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make region root $MY_REGION_ROOT"
+        exit 1
+    fi
+else
+    rm -rf "$MY_REGION_ROOT"
 fi
 
 # Location of logs and working files
@@ -90,7 +95,7 @@ while getopts 'l:N' opt; do
 done
 
 if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 30 \
-        --extent-size 20 --region-dir "$REGION_ROOT" \
+        --extent-size 20 --region-dir "$MY_REGION_ROOT" \
         --output-dir "$dsc_output_dir"; then
     echo "Failed to create region"
     exit 1
@@ -100,9 +105,9 @@ fi
 # are the same as what DSC uses by default.  If either side changes, then
 # the other will need to be update manually.
 target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
-dump_args+=("-d ${REGION_ROOT}/8810")
-dump_args+=("-d ${REGION_ROOT}/8820")
-dump_args+=("-d ${REGION_ROOT}/8830")
+dump_args+=("-d ${MY_REGION_ROOT}/8810")
+dump_args+=("-d ${MY_REGION_ROOT}/8820")
+dump_args+=("-d ${MY_REGION_ROOT}/8830")
 
 if pgrep -fl -U "$(id -u)" "$cds"; then
     echo "Downstairs already running" >&2
@@ -111,11 +116,11 @@ if pgrep -fl -U "$(id -u)" "$cds"; then
 fi
 
 # Start all three downstairs
-${cds} run -d "${REGION_ROOT}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
+${cds} run -d "${MY_REGION_ROOT}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
 ds0_pid=$!
-${cds} run -d "${REGION_ROOT}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
+${cds} run -d "${MY_REGION_ROOT}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
 ds1_pid=$!
-${cds} run -d "${REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
+${cds} run -d "${MY_REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
 ds2_pid=$!
 
 # TODO: Some programatic way to wait for all the downstairs to start before we
@@ -154,17 +159,17 @@ while [[ $count -lt $loops ]]; do
     if [[ $choice -eq 0 ]]; then
         kill "$ds0_pid"
         wait "$ds0_pid" || true
-        ${cds} run -d "${REGION_ROOT}/8810" -p 8810 --lossy &> "$ds_log_prefix"8810.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8810" -p 8810 --lossy &> "$ds_log_prefix"8810.txt &
         ds0_pid=$!
     elif [[ $choice -eq 1 ]]; then
         kill "$ds1_pid"
         wait "$ds1_pid" || true
-        ${cds} run -d "${REGION_ROOT}/8820" -p 8820 --lossy &> "$ds_log_prefix"8820.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8820" -p 8820 --lossy &> "$ds_log_prefix"8820.txt &
         ds1_pid=$!
     else
         kill "$ds2_pid"
         wait "$ds2_pid" || true
-        ${cds} run -d "${REGION_ROOT}/8830" -p 8830 --lossy &> "$ds_log_prefix"8830.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8830" -p 8830 --lossy &> "$ds_log_prefix"8830.txt &
         ds2_pid=$!
     fi
 
@@ -200,13 +205,13 @@ while [[ $count -lt $loops ]]; do
     echo ""
     # Start downstairs without lossy
     if [[ $choice -eq 0 ]]; then
-        ${cds} run -d "${REGION_ROOT}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
         ds0_pid=$!
     elif [[ $choice -eq 1 ]]; then
-        ${cds} run -d "${REGION_ROOT}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
         ds1_pid=$!
     else
-        ${cds} run -d "${REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
         ds2_pid=$!
     fi
 
@@ -245,8 +250,4 @@ cleanup
 
 # Errors exit directly, so arrival here indicates success.
 rm -rf "$TEST_ROOT"
-rm -rf "$REGION_ROOT"/8810
-rm -rf "$REGION_ROOT"/8820
-rm -rf "$REGION_ROOT"/8830
-# If empty, remove the region directory
-rmdir "$REGION_ROOT"
+rm -rf "$MY_REGION_ROOT"

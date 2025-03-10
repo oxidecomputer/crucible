@@ -15,8 +15,18 @@ function ctrl_c() {
     exit 1
 }
 
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_replay}
-mkdir -p "$REGION_ROOT"
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT=${REGION_ROOT/test_replay}
+if [[ ! -d "$MY_REGION_ROOT" ]]; then
+    mkdir -p "$MY_REGION_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make region root $MY_REGION_ROOT"
+        exit 1
+    fi
+else
+    rm -rf "$MY_REGION_ROOT"
+fi
+
 WORK_ROOT=${WORK_ROOT:-/tmp}
 TEST_ROOT="$WORK_ROOT/test_replay"
 if [[ ! -d "$TEST_ROOT" ]]; then
@@ -77,7 +87,7 @@ echo "Tail $test_log for test output"
 
 echo "Creating $region_count downstairs regions" | tee -a "$test_log"
 if ! ${dsc} create --cleanup --ds-bin "$downstairs" \
-	--region-dir "$REGION_ROOT" \
+	--region-dir "$MY_REGION_ROOT" \
         --output-dir "$dsc_ds_log" \
         --extent-count 50 --region-count "$region_count" >> "$test_log"; then
     echo "Failed to create downstairs regions"
@@ -86,7 +96,7 @@ fi
 
 echo "Starting $region_count downstairs" | tee -a "$test_log"
 ${dsc} start --ds-bin "$downstairs" --output-dir "$dsc_ds_log" \
-	--region-dir "$REGION_ROOT" \
+	--region-dir "$MY_REGION_ROOT" \
 	--region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
@@ -140,11 +150,7 @@ wait "$dsc_pid"
 sleep 4
 echo "$(date) Test ends with $result" | tee -a "$test_log" 2>&1
 if [[ $result -eq 0 ]]; then
-    rm -rf "$REGION_ROOT"/8810
-    rm -rf "$REGION_ROOT"/8820
-    rm -rf "$REGION_ROOT"/8830
-    # If empty, remove the region directory
-    rmdir "$REGION_ROOT"
+    rm -rf "$MY_REGION_ROOT"
     rm -r "$TEST_ROOT"
 fi
 exit "$result"

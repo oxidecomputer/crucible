@@ -17,8 +17,17 @@ function ctrl_c() {
     exit 1
 }
 
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_replace_special}
-mkdir -p "$REGION_ROOT"
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT=${REGION_ROOT/test_replace_special}
+if [[ ! -d "$MY_REGION_ROOT" ]]; then
+    mkdir -p "$MY_REGION_ROOT"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to make region root $MY_REGION_ROOT"
+        exit 1
+    fi
+else
+    rm -rf "$MY_REGION_ROOT"
+fi
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
@@ -84,7 +93,7 @@ echo "Tail $test_log for test output"
 # to be used for replacement.  We can use dsc to determine what the port will
 # be for the final region
 if ! ${dsc} create --cleanup \
-  --region-dir "$REGION_ROOT" \
+  --region-dir "$MY_REGION_ROOT" \
   --region-count "$region_count" \
   --output-dir "$dsc_ds_log" \
   --ds-bin "$downstairs" \
@@ -94,7 +103,7 @@ if ! ${dsc} create --cleanup \
     exit 1
 fi
 ${dsc} start --ds-bin "$downstairs" \
-  --region-dir "$REGION_ROOT" \
+  --region-dir "$MY_REGION_ROOT" \
   --output-dir "$dsc_ds_log" \
   --region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
@@ -146,11 +155,7 @@ echo "$(date) Test ends with $result" | tee -a "$test_log"
 if [[ $result -eq 0 ]]; then
     # Cleanup
     echo "$(date) Cleanup for $0" | tee -a "$test_log"
-    rm -rf "$REGION_ROOT"/8810
-    rm -rf "$REGION_ROOT"/8820
-    rm -rf "$REGION_ROOT"/8830
-    rm -rf "$REGION_ROOT"/8840
-    rmdir "$REGION_ROOT"
+    rm -rf "$MY_REGION_ROOT"
     rm -rf "$TEST_ROOT"
 fi
 exit $result
