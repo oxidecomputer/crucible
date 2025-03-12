@@ -42,7 +42,7 @@ else
     rm -r "$TEST_ROOT"
 fi
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
-MY_REGION_ROOT=${REGION_ROOT/hammer_loop}
+MY_REGION_ROOT=${REGION_ROOT}/hammer_loop
 if [[ ! -d "$MY_REGION_ROOT" ]]; then
     mkdir -p "$MY_REGION_ROOT"
     if [[ $? -ne 0 ]]; then

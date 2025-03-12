@@ -16,7 +16,7 @@ function ctrl_c() {
 }
 
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
-MY_REGION_ROOT=${REGION_ROOT/test_replay}
+MY_REGION_ROOT=${REGION_ROOT}/test_replay
 if [[ ! -d "$MY_REGION_ROOT" ]]; then
     mkdir -p "$MY_REGION_ROOT"
     if [[ $? -ne 0 ]]; then

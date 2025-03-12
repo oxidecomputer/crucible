@@ -98,7 +98,7 @@ while getopts 'l:' opt; do
 done
 
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
-MY_REGION_ROOT=${REGION_ROOT/test_restart_repair}
+MY_REGION_ROOT=${REGION_ROOT}/test_restart_repair
 if [[ ! -d "$MY_REGION_ROOT" ]]; then
     mkdir -p "$MY_REGION_ROOT"
     if [[ $? -ne 0 ]]; then
