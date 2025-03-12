@@ -42,7 +42,7 @@ done
 
 # For buildomat, the regions should be in /var/tmp
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
-MY_REGION_ROOT=${REGION_ROOT/test_repair}
+MY_REGION_ROOT=${REGION_ROOT}/test_repair
 if [[ ! -d "$MY_REGION_ROOT" ]]; then
     mkdir -p "$MY_REGION_ROOT"
     if [[ $? -ne 0 ]]; then
@@ -56,15 +56,14 @@ fi
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
 TEST_ROOT="$WORK_ROOT/test_live_repair"
-if [[ ! -d "$TEST_ROOT" ]]; then
-    mkdir -p "$TEST_ROOT"
-    if [[ $? -ne 0 ]]; then
-        echo "Failed to make test root $TEST_ROOT"
-        exit 1
-    fi
-else
+if [[ -d "$TEST_ROOT" ]]; then
     # Delete previous test data
     rm -r "$TEST_ROOT"
+fi
+mkdir -p "$TEST_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make test root $TEST_ROOT"
+    exit 1
 fi
 
 verify_file="$TEST_ROOT/test_repair_verify.data"
