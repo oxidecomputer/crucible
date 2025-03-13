@@ -23,14 +23,13 @@ function ctrl_c() {
 
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
 MY_REGION_ROOT=${REGION_ROOT}/test_live_repair
-if [[ ! -d "$MY_REGION_ROOT" ]]; then
-    mkdir -p "$MY_REGION_ROOT"
-    if [[ $? -ne 0 ]]; then
-        echo "Failed to make region root $MY_REGION_ROOT"
-        exit 1
-    fi
-else
+if [[ -d "$MY_REGION_ROOT" ]]; then
     rm -rf "$MY_REGION_ROOT"
+fi
+mkdir -p "$MY_REGION_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make region root $MY_REGION_ROOT"
+    exit 1
 fi
 
 # Location of logs and working files
