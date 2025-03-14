@@ -165,50 +165,8 @@ impl ImpactedBlocks {
         ImpactedBlocks::InclusiveRange(first_impacted, last_impacted)
     }
 
-    pub fn intersection(&self, other: &ImpactedBlocks) -> ImpactedBlocks {
-        let ImpactedBlocks::InclusiveRange(fst_self, lst_self) = self else {
-            return ImpactedBlocks::Empty;
-        };
-
-        let ImpactedBlocks::InclusiveRange(fst_other, lst_other) = other else {
-            return ImpactedBlocks::Empty;
-        };
-
-        let fst = fst_self.max(fst_other);
-        let lst = lst_self.min(lst_other);
-        if lst >= fst {
-            ImpactedBlocks::InclusiveRange(*fst, *lst)
-        } else {
-            ImpactedBlocks::Empty
-        }
-    }
-
-    pub fn union(&self, other: &ImpactedBlocks) -> ImpactedBlocks {
-        let ImpactedBlocks::InclusiveRange(fst_self, lst_self) = self else {
-            return *other;
-        };
-
-        let ImpactedBlocks::InclusiveRange(fst_other, lst_other) = other else {
-            return *self;
-        };
-        let fst = fst_self.min(fst_other);
-        let lst = lst_self.max(lst_other);
-        ImpactedBlocks::InclusiveRange(*fst, *lst)
-    }
-
     pub fn is_empty(&self) -> bool {
         self == &ImpactedBlocks::Empty
-    }
-
-    /// Return true if this list of impacted blocks overlaps with another.
-    pub fn conflicts(&self, other: &ImpactedBlocks) -> bool {
-        !self.intersection(other).is_empty()
-    }
-
-    pub fn fully_contains(&self, other: &ImpactedBlocks) -> bool {
-        !self.is_empty()
-            && !other.is_empty()
-            && self.intersection(other) == *other
     }
 
     /// Return a range of impacted extents
@@ -240,8 +198,8 @@ impl ImpactedBlocks {
     }
 }
 
-/// Given a global offset and number of blocks, compute a list of individually
-/// impacted blocks:
+/// Given a global offset and number of blocks, compute a range of impacted
+/// blocks:
 ///
 ///  |eid0                   |eid1
 ///  |───────────────────────────────────────────────│
@@ -255,14 +213,8 @@ impl ImpactedBlocks {
 /// The example offset and length above spans 7 blocks over two extents (where
 /// the numbers at the bottom of the diagram are block numbers).
 ///
-/// Return an ImpactedBlocks object that stores which extents are impacted,
-/// along with the specific blocks in those extents. For the above example, the
-/// hashmap inside ImpactedBlocks would be:
-///
-///  blocks = {
-///    eid0 -> [2, 3, 4, 5],
-///    eid1 -> [0, 1, 2],
-///  }
+/// Return an ImpactedBlocks object that stores the affected region as a range
+/// of [`ImpactedAddr`] values (which are `(ExtentId, BlockOffset)` tuples)
 pub fn extent_from_offset(
     ddef: &RegionDefinition,
     offset: BlockIndex,
@@ -778,35 +730,8 @@ mod test {
         )
     }
 
-    /// Map the ImpactedBlocks to the full range of possible values
-    fn reify_impacted_blocks_without_region(
-        test_iblocks: ArbitraryImpactedBlocks,
-    ) -> ImpactedBlocks {
-        reify_impacted_blocks(test_iblocks, u32::MAX, usize::MAX)
-    }
-
     fn region_def_strategy() -> impl Strategy<Value = RegionDefinition> {
         any::<ArbitraryRegionDefinition>().prop_map(reify_region_definition)
-    }
-
-    /// Generate a random region definition, and a pair of ImpactedBlocks ranges
-    /// that fit within it
-    fn region_and_impacted_pair_strategy(
-    ) -> impl Strategy<Value = (RegionDefinition, ImpactedBlocks, ImpactedBlocks)>
-    {
-        any::<(
-            ArbitraryRegionDefinition,
-            ArbitraryImpactedBlocks,
-            ArbitraryImpactedBlocks,
-        )>()
-        .prop_map(|(test_ddef, test_iblocks_a, test_iblocks_b)| {
-            let ddef = reify_region_definition(test_ddef);
-            let iblocks_a =
-                reify_impacted_blocks_in_region(test_iblocks_a, &ddef);
-            let iblocks_b =
-                reify_impacted_blocks_in_region(test_iblocks_b, &ddef);
-            (ddef, iblocks_a, iblocks_b)
-        })
     }
 
     /// Generate a random region definition, and a single ImpactedBlocks range
@@ -821,126 +746,6 @@ mod test {
                 (ddef, iblocks)
             },
         )
-    }
-
-    fn any_impacted_blocks_strategy() -> impl Strategy<Value = ImpactedBlocks> {
-        any::<ArbitraryImpactedBlocks>()
-            .prop_map(reify_impacted_blocks_without_region)
-    }
-
-    #[proptest]
-    fn intersection_produces_less_than_or_equal_block_count(
-        #[strategy(region_and_impacted_pair_strategy())]
-        region_and_impacted_pair: (
-            RegionDefinition,
-            ImpactedBlocks,
-            ImpactedBlocks,
-        ),
-    ) {
-        let (ddef, iblocks_a, iblocks_b) = region_and_impacted_pair;
-        let intersection = iblocks_a.intersection(&iblocks_b);
-
-        let len_a = iblocks_a.len(&ddef);
-        let len_b = iblocks_b.len(&ddef);
-        let len_intersection = intersection.len(&ddef);
-
-        prop_assert!(len_intersection <= len_a);
-        prop_assert!(len_intersection <= len_b);
-    }
-
-    #[proptest]
-    fn union_produces_greater_than_or_equal_block_count(
-        #[strategy(region_and_impacted_pair_strategy())]
-        region_and_impacted_pair: (
-            RegionDefinition,
-            ImpactedBlocks,
-            ImpactedBlocks,
-        ),
-    ) {
-        let (ddef, iblocks_a, iblocks_b) = region_and_impacted_pair;
-        let union = iblocks_a.union(&iblocks_b);
-
-        let len_a = iblocks_a.len(&ddef);
-        let len_b = iblocks_b.len(&ddef);
-        let len_union = union.len(&ddef);
-
-        prop_assert!(len_union >= len_a);
-        prop_assert!(len_union >= len_b);
-    }
-
-    #[proptest]
-    fn intersection_with_empty_is_empty(
-        #[strategy(any_impacted_blocks_strategy())] iblocks: ImpactedBlocks,
-    ) {
-        // a . Empty == Empty
-        prop_assert_eq!(
-            iblocks.intersection(&ImpactedBlocks::Empty),
-            ImpactedBlocks::Empty
-        );
-    }
-
-    #[proptest]
-    fn union_with_empty_is_identity(
-        #[strategy(any_impacted_blocks_strategy())] iblocks: ImpactedBlocks,
-    ) {
-        // a . Empty == a
-        prop_assert_eq!(iblocks.union(&ImpactedBlocks::Empty), iblocks);
-    }
-
-    #[proptest]
-    fn intersection_is_commutative(
-        #[strategy(any_impacted_blocks_strategy())] iblocks_a: ImpactedBlocks,
-        #[strategy(any_impacted_blocks_strategy())] iblocks_b: ImpactedBlocks,
-    ) {
-        // a . b == b . a
-        prop_assert_eq!(
-            iblocks_a.intersection(&iblocks_b),
-            iblocks_b.intersection(&iblocks_a)
-        );
-    }
-
-    #[proptest]
-    fn union_is_commutative(
-        #[strategy(any_impacted_blocks_strategy())] iblocks_a: ImpactedBlocks,
-        #[strategy(any_impacted_blocks_strategy())] iblocks_b: ImpactedBlocks,
-    ) {
-        // a . b == b . a
-        prop_assert_eq!(
-            iblocks_a.union(&iblocks_b),
-            iblocks_b.union(&iblocks_a)
-        );
-    }
-
-    #[proptest]
-    fn intersection_is_associative(
-        #[strategy(any_impacted_blocks_strategy())] iblocks_a: ImpactedBlocks,
-        #[strategy(any_impacted_blocks_strategy())] iblocks_b: ImpactedBlocks,
-        #[strategy(any_impacted_blocks_strategy())] iblocks_c: ImpactedBlocks,
-    ) {
-        // a . (b . c)
-        let l = iblocks_a.intersection(&iblocks_b.intersection(&iblocks_c));
-
-        // (a . b) . c
-        let r = iblocks_a.intersection(&iblocks_b).intersection(&iblocks_c);
-
-        // a . (b . c) == (a . b) . c
-        prop_assert_eq!(l, r);
-    }
-
-    #[proptest]
-    fn union_is_associative(
-        #[strategy(any_impacted_blocks_strategy())] iblocks_a: ImpactedBlocks,
-        #[strategy(any_impacted_blocks_strategy())] iblocks_b: ImpactedBlocks,
-        #[strategy(any_impacted_blocks_strategy())] iblocks_c: ImpactedBlocks,
-    ) {
-        // a . (b . c)
-        let l = iblocks_a.union(&iblocks_b.union(&iblocks_c));
-
-        // (a . b) . c
-        let r = iblocks_a.union(&iblocks_b).union(&iblocks_c);
-
-        // a . (b . c) == (a . b) . c
-        prop_assert_eq!(l, r);
     }
 
     #[proptest]
@@ -1056,135 +861,6 @@ mod test {
             iblocks.blocks(&ddef).collect::<Vec<_>>(),
             expected_addresses
         );
-    }
-
-    #[proptest]
-    fn iblocks_conflicts_is_commutative(
-        #[strategy(any_impacted_blocks_strategy())] iblocks_a: ImpactedBlocks,
-        #[strategy(any_impacted_blocks_strategy())] iblocks_b: ImpactedBlocks,
-    ) {
-        // a . b == b . a
-        prop_assert_eq!(
-            iblocks_a.conflicts(&iblocks_b),
-            iblocks_b.conflicts(&iblocks_a)
-        );
-    }
-
-    #[proptest]
-    fn empty_impacted_blocks_never_conflict(
-        #[strategy(any_impacted_blocks_strategy())] iblocks: ImpactedBlocks,
-    ) {
-        prop_assert!(!iblocks.conflicts(&ImpactedBlocks::Empty));
-    }
-
-    #[proptest]
-    fn overlapping_impacted_blocks_should_conflict(
-        // 4 random points, we'll make two overlapping ranges out of them
-        point_a: (u32, u64),
-        point_b: (u32, u64),
-        point_c: (u32, u64),
-        point_d: (u32, u64),
-    ) {
-        // First we need to sort the points so we can use them correctly.
-        let mut sorted_points = [point_a, point_b, point_c, point_d];
-        sorted_points.sort();
-        let (eid_a, block_a) = sorted_points[0];
-        let (eid_b, block_b) = sorted_points[1];
-        let (eid_c, block_c) = sorted_points[2];
-        let (eid_d, block_d) = sorted_points[3];
-
-        // After sorting, if we make ranges from the pairs (a,c) and (b,d)
-        // then they are guaranteed to overlap.
-        let iblocks_a = ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(eid_a),
-                block: BlockOffset(block_a),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(eid_c),
-                block: BlockOffset(block_c),
-            },
-        );
-
-        let iblocks_b = ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(eid_b),
-                block: BlockOffset(block_b),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(eid_d),
-                block: BlockOffset(block_d),
-            },
-        );
-
-        // And thus they should conflict
-        prop_assert!(iblocks_a.conflicts(&iblocks_b),
-            "These overlapping ImpactedBlocks should conflict, but don't:\n    {:?}\n    {:?}",
-            iblocks_a,
-            iblocks_b);
-    }
-
-    #[proptest]
-    fn nothing_contains_empty(
-        #[strategy(any_impacted_blocks_strategy())] iblocks: ImpactedBlocks,
-    ) {
-        prop_assert!(!iblocks.fully_contains(&ImpactedBlocks::Empty));
-    }
-
-    #[proptest]
-    fn empty_contains_nothing(
-        #[strategy(any_impacted_blocks_strategy())] iblocks: ImpactedBlocks,
-    ) {
-        prop_assert!(!ImpactedBlocks::Empty.fully_contains(&iblocks));
-    }
-
-    const U32_U64_MAX: u128 = ((u32::MAX as u128) << 64) | (u64::MAX as u128);
-    #[proptest]
-    fn subregions_are_contained(
-        // proptest doesn't implement strategies for tuple-ranges for some
-        // reason, so I'm using a u128 in place of a (u32, u64)
-        #[strategy(0..=U32_U64_MAX)] outer_start: u128,
-        #[strategy(#outer_start..=U32_U64_MAX)] outer_end: u128,
-
-        // Inner must be within outer
-        #[strategy(#outer_start ..= #outer_end)] inner_start: u128,
-        #[strategy(#inner_start ..= #outer_end)] inner_end: u128,
-    ) {
-        let (outer_eid_a, outer_block_a) =
-            ((outer_start >> 64) as u32, outer_start as u64);
-        let (outer_eid_b, outer_block_b) =
-            ((outer_end >> 64) as u32, outer_end as u64);
-        let (inner_eid_a, inner_block_a) =
-            ((inner_start >> 64) as u32, inner_start as u64);
-        let (inner_eid_b, inner_block_b) =
-            ((inner_end >> 64) as u32, inner_end as u64);
-
-        let outer_iblocks = ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(outer_eid_a),
-                block: BlockOffset(outer_block_a),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(outer_eid_b),
-                block: BlockOffset(outer_block_b),
-            },
-        );
-
-        let inner_iblocks = ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(inner_eid_a),
-                block: BlockOffset(inner_block_a),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(inner_eid_b),
-                block: BlockOffset(inner_block_b),
-            },
-        );
-
-        prop_assert!(outer_iblocks.fully_contains(&inner_iblocks),
-            "Outer ImpactedBlocks does not contain inner ImpactedBlocks:\n    Outer: {:?}\n    Inner: {:?}",
-            outer_iblocks,
-            inner_iblocks);
     }
 
     #[proptest]
