@@ -139,7 +139,7 @@ pub(crate) struct EncryptedWrite {
 
 impl DeferredWrite {
     pub fn run(mut self) -> EncryptedWrite {
-        let num_blocks = self.impacted_blocks.blocks(&self.ddef).len();
+        let num_blocks = self.impacted_blocks.blocks().len();
         let mut blocks = Vec::with_capacity(num_blocks);
         let block_size = self.ddef.block_size() as usize;
 

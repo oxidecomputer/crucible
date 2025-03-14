@@ -1,11 +1,9 @@
 // Copyright 2023 Oxide Computer Company
 
-use crucible_common::{BlockOffset, ExtentId};
+use crucible_common::{BlockIndex, ExtentId, RegionDefinition};
 use crucible_protocol::JobId;
 
-use crate::{
-    DownstairsIO, ExtentRepairIDs, IOop, ImpactedAddr, ImpactedBlocks,
-};
+use crate::{DownstairsIO, ExtentRepairIDs, IOop, ImpactedBlocks};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `ActiveJobs` tracks active jobs (and associated metadata) by job ID
@@ -119,16 +117,8 @@ impl ActiveJobs {
     }
 
     pub fn deps_for_flush(&mut self, flush_id: JobId) -> Vec<JobId> {
-        let blocks = ImpactedBlocks::InclusiveRange(
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(0),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(u32::MAX),
-                block: BlockOffset(u64::MAX),
-            },
-        );
+        let blocks =
+            ImpactedBlocks::InclusiveRange(BlockIndex(0), BlockIndex(u64::MAX));
         let dep = self.block_to_active.check_range(blocks, true);
         self.block_to_active.insert_range(blocks, flush_id, true);
         dep
@@ -173,16 +163,14 @@ impl ActiveJobs {
         &mut self,
         repair_ids: ExtentRepairIDs,
         extent: ExtentId,
+        ddef: &RegionDefinition,
     ) -> Vec<JobId> {
+        let blocks_per_extent = ddef.extent_size().value;
         let blocks = ImpactedBlocks::InclusiveRange(
-            ImpactedAddr {
-                extent_id: extent,
-                block: BlockOffset(0),
-            },
-            ImpactedAddr {
-                extent_id: extent,
-                block: BlockOffset(u64::MAX),
-            },
+            BlockIndex(u64::from(extent.0) * blocks_per_extent),
+            BlockIndex(
+                u64::from(extent.0) * blocks_per_extent + blocks_per_extent - 1,
+            ),
         );
         let dep = self.block_to_active.check_range(blocks, true);
         self.block_to_active
@@ -191,7 +179,7 @@ impl ActiveJobs {
     }
 
     #[cfg(test)]
-    pub fn get_extents_for(&self, job: JobId) -> ImpactedBlocks {
+    pub fn get_blocks_for(&self, job: JobId) -> ImpactedBlocks {
         *self.block_to_active.job_to_range.get(&job).unwrap()
     }
 }
@@ -217,19 +205,8 @@ struct BlockMap {
     ///
     /// The data structure must maintain the invariant that block ranges never
     /// overlap.
-    addr_to_jobs: BTreeMap<ImpactedAddr, (ImpactedAddr, DependencySet)>,
+    addr_to_jobs: BTreeMap<BlockIndex, (BlockIndex, DependencySet)>,
     job_to_range: BTreeMap<JobId, ImpactedBlocks>,
-
-    /// If we know the number of blocks in an extent, it's stored here
-    ///
-    /// This is used for optimization: for example, if there are 8 blocks per
-    /// extent, then `{ extent: 0, block: 8 }` represents the same block as
-    /// `{ extent: 1, block: 0 }`.
-    ///
-    /// If we _don't_ know blocks per extent, this still works: the former is
-    /// lexicographically ordered below the latter.  However, there could be
-    /// zero-length ranges in the range map.
-    blocks_per_extent: Option<u64>,
 }
 
 impl BlockMap {
@@ -246,15 +223,12 @@ impl BlockMap {
 
     fn blocks_to_range(
         r: ImpactedBlocks,
-    ) -> Option<std::ops::Range<ImpactedAddr>> {
+    ) -> Option<std::ops::Range<BlockIndex>> {
         match r {
             ImpactedBlocks::Empty => None,
-            ImpactedBlocks::InclusiveRange(first, last) => Some(
-                first..ImpactedAddr {
-                    extent_id: last.extent_id,
-                    block: BlockOffset(last.block.0.saturating_add(1)),
-                },
-            ),
+            ImpactedBlocks::InclusiveRange(first, last) => {
+                Some(first..BlockIndex(last.0.saturating_add(1)))
+            }
         }
     }
 
@@ -312,7 +286,7 @@ impl BlockMap {
         self.merge_adjacent_sections(r);
     }
 
-    fn insert_splits(&mut self, r: std::ops::Range<ImpactedAddr>) {
+    fn insert_splits(&mut self, r: std::ops::Range<BlockIndex>) {
         // Okay, this is a tricky one.  The incoming range `r` can overlap with
         // existing ranges in a variety of ways.
         //
@@ -360,14 +334,14 @@ impl BlockMap {
     ///
     /// If such a range exists, returns its starting address (i.e. the key to
     /// look it up in [`self.addr_to_jobs`].
-    fn find_split_location(&self, i: ImpactedAddr) -> Option<ImpactedAddr> {
+    fn find_split_location(&self, i: BlockIndex) -> Option<BlockIndex> {
         match self.addr_to_jobs.range(..i).next_back() {
             Some((start, (end, _))) if i < *end => Some(*start),
             _ => None,
         }
     }
 
-    fn merge_adjacent_sections(&mut self, r: std::ops::Range<ImpactedAddr>) {
+    fn merge_adjacent_sections(&mut self, r: std::ops::Range<BlockIndex>) {
         // Pick a start position that's right below our modified range if
         // possible; otherwise, pick the first value in the map (or return if
         // the entire map is empty).
@@ -394,11 +368,7 @@ impl BlockMap {
                 }
                 _ => {
                     // Remove blocks which are pathologically empty
-                    if (pos.block.0 == u64::MAX
-                        || Some(pos.block.0) == self.blocks_per_extent)
-                        && end.block.0 == 0
-                        && end.extent_id == pos.extent_id + 1
-                    {
+                    if end.0 == pos.0 {
                         self.addr_to_jobs.remove(&pos).unwrap();
                     }
                     // Shuffle along
@@ -418,9 +388,8 @@ impl BlockMap {
 
     fn iter_overlapping(
         &self,
-        r: std::ops::Range<ImpactedAddr>,
-    ) -> impl Iterator<Item = (&ImpactedAddr, &(ImpactedAddr, DependencySet))>
-    {
+        r: std::ops::Range<BlockIndex>,
+    ) -> impl Iterator<Item = (&BlockIndex, &(BlockIndex, DependencySet))> {
         let start = self
             .addr_to_jobs
             .range(..=r.start)
@@ -460,10 +429,7 @@ impl BlockMap {
                 .range_mut(pos..)
                 .next()
                 .map(|(start, _)| *start)
-                .unwrap_or(ImpactedAddr {
-                    extent_id: ExtentId(u32::MAX),
-                    block: BlockOffset(u64::MAX),
-                });
+                .unwrap_or(BlockIndex(u64::MAX));
             if next_start == pos {
                 // Remove ourself from the existing range
                 let (next_end, v) =
@@ -605,7 +571,6 @@ impl DependencySet {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{Block, RegionDefinition};
     use proptest::prelude::*;
 
     /// The Oracle is similar to a [`BlockMap`], but doesn't do range stuff
@@ -614,23 +579,15 @@ mod test {
     /// This is much less efficient, but provides a ground-truth oracle for
     /// property-based testing.
     struct Oracle {
-        addr_to_jobs: BTreeMap<ImpactedAddr, DependencySet>,
+        addr_to_jobs: BTreeMap<BlockIndex, DependencySet>,
         job_to_range: BTreeMap<JobId, ImpactedBlocks>,
-        ddef: RegionDefinition,
     }
 
     impl Oracle {
         fn new() -> Self {
-            let mut ddef = RegionDefinition::default();
-            ddef.set_extent_size(Block {
-                value: BLOCKS_PER_EXTENT,
-                shift: crucible_common::MIN_SHIFT, // unused
-            });
-            ddef.set_block_size(crucible_common::MIN_BLOCK_SIZE as u64);
             Self {
                 addr_to_jobs: BTreeMap::new(),
                 job_to_range: BTreeMap::new(),
-                ddef,
             }
         }
         fn insert_range(
@@ -639,12 +596,8 @@ mod test {
             job: JobId,
             blocking: bool,
         ) {
-            for (i, b) in r.blocks(&self.ddef) {
-                let addr = ImpactedAddr {
-                    extent_id: i,
-                    block: b,
-                };
-                let v = self.addr_to_jobs.entry(addr).or_default();
+            for b in r.blocks() {
+                let v = self.addr_to_jobs.entry(b).or_default();
                 if blocking {
                     v.insert_blocking(job)
                 } else {
@@ -655,12 +608,8 @@ mod test {
         }
         fn check_range(&self, r: ImpactedBlocks, blocking: bool) -> Vec<JobId> {
             let mut out = BTreeSet::new();
-            for (i, b) in r.blocks(&self.ddef) {
-                let addr = ImpactedAddr {
-                    extent_id: i,
-                    block: b,
-                };
-                if let Some(s) = self.addr_to_jobs.get(&addr) {
+            for b in r.blocks() {
+                if let Some(s) = self.addr_to_jobs.get(&b) {
                     out.extend(s.iter_jobs(blocking));
                 }
             }
@@ -668,23 +617,13 @@ mod test {
         }
         fn remove_job(&mut self, job: JobId) {
             let r = self.job_to_range.remove(&job).unwrap();
-            for (i, b) in r.blocks(&self.ddef) {
-                let addr = ImpactedAddr {
-                    extent_id: i,
-                    block: b,
-                };
-                if let Some(s) = self.addr_to_jobs.get_mut(&addr) {
+            for b in r.blocks() {
+                if let Some(s) = self.addr_to_jobs.get_mut(&b) {
                     s.remove(job);
                 }
             }
         }
     }
-
-    // Pick an extent size that plays nice with `block_strat`
-    //
-    // This should be small enough that `block_strat` generates `ImpactedBlocks`
-    // that span multiple extents, but is otherwise arbitrary
-    const BLOCKS_PER_EXTENT: u64 = 8;
 
     fn block_strat() -> impl Strategy<Value = ImpactedBlocks> {
         (0u64..100, 0u64..100).prop_map(|(start, len)| {
@@ -692,18 +631,8 @@ mod test {
                 ImpactedBlocks::Empty
             } else {
                 ImpactedBlocks::InclusiveRange(
-                    ImpactedAddr {
-                        extent_id: ExtentId((start / BLOCKS_PER_EXTENT) as u32),
-                        block: BlockOffset(start % BLOCKS_PER_EXTENT),
-                    },
-                    ImpactedAddr {
-                        extent_id: ExtentId(
-                            ((start + len - 1) / BLOCKS_PER_EXTENT) as u32,
-                        ),
-                        block: BlockOffset(
-                            (start + len - 1) % BLOCKS_PER_EXTENT,
-                        ),
-                    },
+                    BlockIndex(start),
+                    BlockIndex(start + len - 1),
                 )
             }
         })
@@ -717,10 +646,7 @@ mod test {
             c in block_strat(), c_type in any::<bool>(),
             read in block_strat(), read_type in any::<bool>(),
         ) {
-            let mut dut = BlockMap {
-                blocks_per_extent:Some(BLOCKS_PER_EXTENT),
-                ..BlockMap::default()
-            };
+            let mut dut = BlockMap::default();
             dut.self_check();
             dut.insert_range(a, JobId(1000), a_type);
             dut.self_check();
@@ -747,10 +673,7 @@ mod test {
             remove in 1000u64..1003,
             read in block_strat(), read_type in any::<bool>(),
         ) {
-            let mut dut = BlockMap {
-                blocks_per_extent:Some(BLOCKS_PER_EXTENT),
-                ..BlockMap::default()
-            };
+            let mut dut = BlockMap::default();
             dut.insert_range(a, JobId(1000), a_type);
             dut.insert_range(b, JobId(1001), b_type);
             dut.insert_range(c, JobId(1002), c_type);
@@ -775,10 +698,7 @@ mod test {
             a in block_strat(), a_type in any::<bool>(),
             read in block_strat(), read_type in any::<bool>(),
         ) {
-            let mut dut = BlockMap {
-                blocks_per_extent:Some(BLOCKS_PER_EXTENT),
-                ..BlockMap::default()
-            };
+            let mut dut = BlockMap::default();
             dut.insert_range(a, JobId(1000), a_type);
             dut.self_check();
             dut.remove_job(JobId(1000));
@@ -803,11 +723,7 @@ mod test {
             order in Just([JobId(1000), JobId(1001), JobId(1002)]).prop_shuffle(),
             read in block_strat(), read_type in any::<bool>(),
         ) {
-            let mut dut = BlockMap {
-                blocks_per_extent:Some(BLOCKS_PER_EXTENT),
-                ..BlockMap::default()
-            };
-            dut.blocks_per_extent = Some(BLOCKS_PER_EXTENT);
+            let mut dut = BlockMap::default();
             dut.insert_range(a, JobId(1000), a_type);
             dut.insert_range(b, JobId(1001), b_type);
             dut.insert_range(c, JobId(1002), c_type);
@@ -861,14 +777,7 @@ mod test {
             b in block_strat(), b_type in any::<bool>(),
         ) {
             let flush_range = ImpactedBlocks::InclusiveRange(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(0),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(u32::MAX),
-                    block: BlockOffset(u64::MAX),
-                },
+                BlockIndex(0), BlockIndex(u64::MAX),
             );
 
             let mut dut = BlockMap::default();
