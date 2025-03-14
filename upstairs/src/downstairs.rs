@@ -11,7 +11,7 @@ use crate::{
     client::{
         ClientAction, ClientFaultReason, ClientNegotiationFailed,
         ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
-        NegotiationState,
+        NegotiationState, ShouldSendResult,
     },
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
@@ -2288,7 +2288,22 @@ impl Downstairs {
         // Send the job to each client!
         let state = ClientData::from_fn(|cid| {
             let client = &mut self.clients[cid];
-            let r = client.enqueue(ds_id, &io, last_repair_extent);
+            // should_send -> ShouldSendResult
+            //      (Send, Hold, Skip, CheckLiveRepair)
+            // then convert from that into EnqueueResult and apply it
+            let r = match client.should_send() {
+                ShouldSendResult::Send => EnqueueResult::Send,
+                ShouldSendResult::Hold => EnqueueResult::Hold,
+                ShouldSendResult::Skip => EnqueueResult::Skip,
+                ShouldSendResult::CheckLiveRepair => {
+                    if io.send_io_live_repair(last_repair_extent) {
+                        EnqueueResult::Send
+                    } else {
+                        EnqueueResult::Skip
+                    }
+                }
+            };
+            client.apply_enqueue_result(ds_id, &io, r);
             match r {
                 EnqueueResult::Send => self.send(ds_id, io.clone(), cid),
                 EnqueueResult::Hold => (),

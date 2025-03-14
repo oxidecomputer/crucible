@@ -6,9 +6,7 @@ use crate::{
     DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
     ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
 };
-use crucible_common::{
-    x509::TLSContext, ExtentId, NegotiationError, VerboseTimeout,
-};
+use crucible_common::{x509::TLSContext, NegotiationError, VerboseTimeout};
 use crucible_protocol::{
     MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -809,29 +807,16 @@ impl DownstairsClient {
         self.state = DsState::Active;
     }
 
-    /// Checks whether the given job should be sent
-    ///
-    /// Returns an [`EnqueueResult`] indicating how the caller should handle the
-    /// packet.
+    /// Applies an [`EnqueueResult`] for the given job
     ///
     /// If the job should be skipped, then it is added to `self.skipped_jobs`.
     /// `self.io_state_job_count` is updated with the incoming job state.
-    #[must_use]
-    pub(crate) fn enqueue(
+    pub(crate) fn apply_enqueue_result(
         &mut self,
         ds_id: JobId,
         io: &IOop,
-        last_repair_extent: Option<ExtentId>,
-    ) -> EnqueueResult {
-        // If a downstairs is faulted or ready for repair, we can move
-        // that job directly to IOState::Skipped
-        // If a downstairs is in repair, then we need to see if this
-        // IO is on a repaired extent or not.  If an IO spans extents
-        // where some are repaired and some are not, then this IO had
-        // better have the dependencies already set to reflect the
-        // requirement that a repair IO will need to finish first.
-        let should_send = self.should_send(io, last_repair_extent);
-
+        should_send: EnqueueResult,
+    ) {
         // Update our set of skipped jobs if we're not sending this one
         if matches!(should_send, EnqueueResult::Skip) {
             self.skipped_jobs.insert(ds_id);
@@ -841,20 +826,11 @@ impl DownstairsClient {
         let state = should_send.state();
         self.io_state_job_count[&state] += 1;
         self.io_state_byte_count[&state] += io.job_bytes();
-
-        should_send
     }
 
-    /// Checks whether the given job should be sent or skipped
-    ///
-    /// Returns an [`EnqueueResult`] indicating how the caller should handle the
-    /// packet.
+    /// Checks whether the client is accepting IO
     #[must_use]
-    fn should_send(
-        &self,
-        io: &IOop,
-        last_repair_extent: Option<ExtentId>,
-    ) -> EnqueueResult {
+    pub fn should_send(&self) -> ShouldSendResult {
         match self.state {
             // We never send jobs if we're in certain inactive states
             DsState::Connecting {
@@ -863,7 +839,7 @@ impl DownstairsClient {
             } if self.cfg.read_only => {
                 // Read only upstairs can connect with just a single downstairs
                 // ready, we skip jobs on the other downstairs till they connect.
-                EnqueueResult::Skip
+                ShouldSendResult::Skip
             }
             DsState::Connecting {
                 mode: ConnectionMode::Faulted | ConnectionMode::Replaced,
@@ -874,34 +850,22 @@ impl DownstairsClient {
                 | ClientStopReason::Disabled
                 | ClientStopReason::Replacing
                 | ClientStopReason::NegotiationFailed(..),
-            ) => EnqueueResult::Skip,
+            ) => ShouldSendResult::Skip,
 
-            // We conditionally send jobs if we're in live-repair, depending on
-            // the current extent.
-            DsState::LiveRepair => {
-                // Pick the latest repair limit that's relevant for this
-                // downstairs.  This is either the extent under repair (if
-                // there are no reserved repair jobs), or the last extent
-                // for which we have reserved a repair job ID; either way, the
-                // caller has provided it to us.
-                if io.send_io_live_repair(last_repair_extent) {
-                    EnqueueResult::Send
-                } else {
-                    EnqueueResult::Skip
-                }
-            }
+            // Send jobs if the client is active or in live-repair.  The caller
+            // is responsible for checking whether live-repair jobs should be
+            // skipped, and this happens outside of this function
+            DsState::Active => ShouldSendResult::Send,
+            DsState::LiveRepair => ShouldSendResult::CheckLiveRepair,
 
-            // Send jobs if the client is active or offline
-            //
-            // Sending jobs to an offline client seems counter-intuitive, but it
-            // means that those jobs are marked as InProgress, so they aren't
-            // cleared out by a subsequent flush (so we'll be able to bring that
-            // client back into compliance by replaying jobs).
-            DsState::Active => EnqueueResult::Send,
+            // Holding jobs for an offline client means that those jobs are
+            // marked as InProgress, so they aren't cleared out by a subsequent
+            // flush (so we'll be able to bring that client back into compliance
+            // by replaying jobs).
             DsState::Connecting {
                 mode: ConnectionMode::Offline,
                 ..
-            } => EnqueueResult::Hold,
+            } => ShouldSendResult::Hold,
 
             DsState::Stopping(ClientStopReason::Deactivated)
             | DsState::Connecting {
@@ -2046,6 +2010,7 @@ pub(crate) enum NegotiationResult {
 }
 
 /// Result value from [`DownstairsClient::enqueue`]
+#[derive(Copy, Clone)]
 pub(crate) enum EnqueueResult {
     /// The given job should be marked as in progress and sent
     Send,
@@ -2059,6 +2024,20 @@ pub(crate) enum EnqueueResult {
 
     /// The job should be marked as skipped and not sent
     Skip,
+}
+
+/// Result value from [`DownstairsClient::should_send`]
+///
+/// This is a superset of [`EnqueueResult`], which includes a value indicating
+/// that the client is in live-repair and the caller should figure it out based
+/// on the last active live-repair extent.
+pub(crate) enum ShouldSendResult {
+    Send,
+    Hold,
+    Skip,
+
+    /// The caller should check against our active live-repair extent
+    CheckLiveRepair,
 }
 
 impl EnqueueResult {
