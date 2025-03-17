@@ -11,7 +11,6 @@ use dropshot::Path;
 use dropshot::RequestContext;
 use dropshot::{HttpResponseOk, HttpResponseUpdatedNoContent};
 use schemars::JsonSchema;
-use semver::Version;
 use serde::Deserialize;
 use std::sync::Arc;
 

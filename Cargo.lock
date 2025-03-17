@@ -359,7 +359,7 @@ source = "git+https://github.com/oxidecomputer/propolis?rev=4ba9c33817c89d5d48b9
 dependencies = [
  "bhyve_api_sys",
  "libc",
- "strum",
+ "strum 0.26.3",
 ]
 
 [[package]]
@@ -368,7 +368,7 @@ version = "0.0.0"
 source = "git+https://github.com/oxidecomputer/propolis?rev=4ba9c33817c89d5d48b96e037a64421fb7a026e2#4ba9c33817c89d5d48b96e037a64421fb7a026e2"
 dependencies = [
  "libc",
- "strum",
+ "strum 0.26.3",
 ]
 
 [[package]]
@@ -746,7 +746,7 @@ dependencies = [
  "crucible-protocol",
  "crucible-workspace-hack",
  "serde_json",
- "strum",
+ "strum 0.27.1",
  "strum_macros 0.26.4",
  "tokio",
 ]
@@ -1100,6 +1100,7 @@ dependencies = [
  "oximeter-producer",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
+ "rangemap",
  "rayon",
  "repair-client",
  "reqwest",
@@ -1329,6 +1330,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "getrandom 0.2.11",
+ "hashbrown 0.15.2",
  "hex",
  "hyper",
  "hyper-rustls",
@@ -2015,6 +2017,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foldhash"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0d2fde1f7b3d48b8395d5f2de76c18a528bd6a9cdde438df747bfcba3e05d6f"
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2322,14 +2330,17 @@ name = "hashbrown"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
+dependencies = [
+ "foldhash",
+]
 
 [[package]]
 name = "hashlink"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
+checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
 dependencies = [
- "hashbrown 0.14.3",
+ "hashbrown 0.15.2",
 ]
 
 [[package]]
@@ -2998,9 +3009,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.30.1"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
+checksum = "fbb8270bb4060bd76c6e96f20c52d80620f1d82a3470885694e41e0f81ef6fe7"
 dependencies = [
  "pkg-config",
  "vcpkg",
@@ -3312,7 +3323,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sled-hardware-types",
- "strum",
+ "strum 0.26.3",
  "thiserror 1.0.69",
  "uuid",
 ]
@@ -3357,7 +3368,7 @@ dependencies = [
  "slog",
  "slog-error-chain",
  "steno",
- "strum",
+ "strum 0.26.3",
  "thiserror 1.0.69",
  "update-engine",
  "uuid",
@@ -3657,7 +3668,7 @@ dependencies = [
  "serde_with",
  "slog",
  "slog-error-chain",
- "strum",
+ "strum 0.26.3",
  "thiserror 1.0.69",
  "tokio",
  "uuid",
@@ -4065,7 +4076,7 @@ dependencies = [
  "regex",
  "schemars",
  "serde",
- "strum",
+ "strum 0.26.3",
  "thiserror 1.0.69",
  "uuid",
 ]
@@ -4808,6 +4819,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rangemap"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f60fcc7d6849342eff22c4350c8b9a989ee8ceabc4b481253e8946b9fe83d684"
+
+[[package]]
 name = "rayon"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4878,7 +4895,7 @@ dependencies = [
  "nu-ansi-term 0.50.0",
  "serde",
  "strip-ansi-escapes",
- "strum",
+ "strum 0.26.3",
  "strum_macros 0.26.4",
  "thiserror 1.0.69",
  "unicode-segmentation",
@@ -5088,9 +5105,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.32.1"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7753b721174eb8ff87a9a0e799e2d7bc3749323e773db92e0984debb00019d6e"
+checksum = "37e34486da88d8e051c7c0e23c3f15fd806ea8546260aa2fec247e97242ec143"
 dependencies = [
  "bitflags 2.6.0",
  "fallible-iterator",
@@ -5926,6 +5943,12 @@ checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 dependencies = [
  "strum_macros 0.26.4",
 ]
+
+[[package]]
+name = "strum"
+version = "0.27.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f64def088c51c9510a8579e3c5d67c65349dcf755e5479ad3d010aa6454e2c32"
 
 [[package]]
 name = "strum_macros"

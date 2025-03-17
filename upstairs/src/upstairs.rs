@@ -918,10 +918,7 @@ impl Upstairs {
         }
 
         // Try to start live-repair
-        self.downstairs.check_live_repair_start(
-            &self.state,
-            self.ddef.get_def().unwrap().extent_count(),
-        );
+        self.downstairs.check_live_repair_start(&self.state);
     }
 
     /// Returns `true` if we're ready to accept guest IO
