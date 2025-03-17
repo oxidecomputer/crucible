@@ -51,7 +51,7 @@ pub async fn begin(dsci: Arc<DscInfo>, addr: SocketAddr) -> Result<(), String> {
     // Setup dropshot
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
-        request_body_max_bytes: 1024,
+        default_request_body_max_bytes: 1024,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
     };
@@ -588,6 +588,7 @@ async fn dsc_enable_random_max(
 #[cfg(test)]
 mod test {
     use openapiv3::OpenAPI;
+    use semver::Version;
 
     use super::build_api;
 
@@ -595,7 +596,7 @@ mod test {
     fn test_dsc_openapi() {
         let api = build_api();
         let mut raw = Vec::new();
-        api.openapi("DownStairs Control", "0.0.0")
+        api.openapi("DownStairs Control", Version::new(0, 0, 1))
             .write(&mut raw)
             .unwrap();
         let actual = String::from_utf8(raw).unwrap();

@@ -410,7 +410,9 @@ impl PantryEntry {
     }
 
     pub async fn detach(&self) -> Result<(), CrucibleError> {
+        let uuid = self.volume.get_uuid().await;
         self.volume.deactivate().await?;
+        info!(self.log, "Pantry detach and deactivated {:?}", uuid);
         Ok(())
     }
 
@@ -436,6 +438,11 @@ impl PantryEntry {
                     drop(inner);
 
                     self.volume.activate().await?;
+                    info!(
+                        self.log,
+                        "Pantry activated {:?}",
+                        self.volume.get_uuid().await
+                    );
                 }
 
                 ActiveObservation::SawActive => {
@@ -851,7 +858,7 @@ impl Pantry {
                             "volume {} is no longer active!",
                             volume_id
                         )),
-                        hyper::StatusCode::GONE,
+                        dropshot::ClientErrorStatusCode::GONE,
                         format!("volume {} is no longer active!", volume_id),
                     ))
                 } else {
