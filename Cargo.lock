@@ -1312,7 +1312,6 @@ name = "crucible-workspace-hack"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
- "bitflags 1.3.2",
  "bitflags 2.6.0",
  "bytes",
  "cc",
@@ -1340,6 +1339,7 @@ dependencies = [
  "log",
  "memchr",
  "mio",
+ "nix",
  "num-integer",
  "num-iter",
  "num-traits",
