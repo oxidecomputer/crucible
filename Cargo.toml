@@ -81,7 +81,7 @@ reedline = "0.38.0"
 rangemap = "1.5.1"
 reqwest = { version = "0.12", features = ["default", "blocking", "json", "stream"] }
 ringbuffer = "0.15.0"
-rusqlite = { version = "0.32" }
+rusqlite = { version = "0.34" }
 rustls-pemfile = { version = "1.0.4" }
 schemars = { version = "0.8", features = [ "chrono", "uuid1" ] }
 semver = "1"
@@ -98,7 +98,7 @@ slog-term = { version = "2.9" }
 static_assertions = "1.1.0"
 statistical = "1.0.0"
 subprocess = "0.2.9"
-strum = "0.26"
+strum = "0.27"
 strum_macros = "0.26"
 tempfile = "3"
 test-strategy = "0.4.0"
