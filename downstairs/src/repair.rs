@@ -13,6 +13,7 @@ use dropshot::RequestContext;
 use dropshot::{endpoint, Path};
 use hyper::{Response, StatusCode};
 use schemars::JsonSchema;
+use semver::Version;
 use serde::Deserialize;
 
 use super::*;
@@ -30,7 +31,8 @@ pub struct FileServerContext {
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
     let api = build_api();
-    api.openapi("Downstairs Repair", "0.0.0").write(f)?;
+    api.openapi("Downstairs Repair", Version::new(0, 0, 1))
+        .write(f)?;
     Ok(())
 }
 
@@ -57,7 +59,7 @@ pub fn repair_main(
      */
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
-        request_body_max_bytes: 1024,
+        default_request_body_max_bytes: 1024,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
     };
