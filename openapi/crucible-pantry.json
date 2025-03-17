@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Crucible Pantry",
-    "version": "0.0.0"
+    "version": "0.0.1"
   },
   "paths": {
     "/crucible/pantry/0": {

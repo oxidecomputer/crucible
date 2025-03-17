@@ -39,6 +39,7 @@ rand.workspace = true
 rayon.workspace = true
 ringbuffer.workspace = true
 schemars.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slog.workspace = true
