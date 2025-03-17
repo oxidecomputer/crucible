@@ -30,7 +30,6 @@ futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
-getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -80,7 +79,6 @@ futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
-getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
