@@ -829,8 +829,7 @@ impl DownstairsClient {
     }
 
     /// Checks whether the client is accepting IO
-    #[must_use]
-    pub fn should_send(&self) -> ShouldSendResult {
+    pub fn should_send(&self) -> Result<EnqueueResult, ShouldSendError> {
         match self.state {
             // We never send jobs if we're in certain inactive states
             DsState::Connecting {
@@ -839,7 +838,7 @@ impl DownstairsClient {
             } if self.cfg.read_only => {
                 // Read only upstairs can connect with just a single downstairs
                 // ready, we skip jobs on the other downstairs till they connect.
-                ShouldSendResult::Skip
+                Ok(EnqueueResult::Skip)
             }
             DsState::Connecting {
                 mode: ConnectionMode::Faulted | ConnectionMode::Replaced,
@@ -850,13 +849,13 @@ impl DownstairsClient {
                 | ClientStopReason::Disabled
                 | ClientStopReason::Replacing
                 | ClientStopReason::NegotiationFailed(..),
-            ) => ShouldSendResult::Skip,
+            ) => Ok(EnqueueResult::Skip),
 
             // Send jobs if the client is active or in live-repair.  The caller
             // is responsible for checking whether live-repair jobs should be
             // skipped, and this happens outside of this function
-            DsState::Active => ShouldSendResult::Send,
-            DsState::LiveRepair => ShouldSendResult::CheckLiveRepair,
+            DsState::Active => Ok(EnqueueResult::Send),
+            DsState::LiveRepair => Err(ShouldSendError::InLiveRepair),
 
             // Holding jobs for an offline client means that those jobs are
             // marked as InProgress, so they aren't cleared out by a subsequent
@@ -865,7 +864,7 @@ impl DownstairsClient {
             DsState::Connecting {
                 mode: ConnectionMode::Offline,
                 ..
-            } => ShouldSendResult::Hold,
+            } => Ok(EnqueueResult::Hold),
 
             DsState::Stopping(ClientStopReason::Deactivated)
             | DsState::Connecting {
@@ -2009,7 +2008,7 @@ pub(crate) enum NegotiationResult {
     LiveRepair,
 }
 
-/// Result value from [`DownstairsClient::enqueue`]
+/// Success value from [`DownstairsClient::should_send`]
 #[derive(Copy, Clone)]
 pub(crate) enum EnqueueResult {
     /// The given job should be marked as in progress and sent
@@ -2026,18 +2025,11 @@ pub(crate) enum EnqueueResult {
     Skip,
 }
 
-/// Result value from [`DownstairsClient::should_send`]
-///
-/// This is a superset of [`EnqueueResult`], which includes a value indicating
-/// that the client is in live-repair and the caller should figure it out based
-/// on the last active live-repair extent.
-pub(crate) enum ShouldSendResult {
-    Send,
-    Hold,
-    Skip,
-
+/// Error result from [`DownstairsClient::should_send`]
+#[derive(Copy, Clone)]
+pub(crate) enum ShouldSendError {
     /// The caller should check against our active live-repair extent
-    CheckLiveRepair,
+    InLiveRepair,
 }
 
 impl EnqueueResult {
