@@ -21,23 +21,41 @@ function ctrl_c() {
     exit 1
 }
 
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_live_repair}
-mkdir -p "$REGION_ROOT"
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT="${REGION_ROOT}/test_live_repair"
+if [[ -d "$MY_REGION_ROOT" ]]; then
+    rm -rf "$MY_REGION_ROOT"
+fi
+mkdir -p "$MY_REGION_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make region root $MY_REGION_ROOT"
+    exit 1
+fi
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
-mkdir -p "$WORK_ROOT"
+TEST_ROOT="${WORK_ROOT}/test_live_repair"
+if [[ -d "$TEST_ROOT" ]]; then
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
+mkdir -p "$TEST_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make test root $TEST_ROOT"
+    exit 1
+fi
 
-loop_log="$WORK_ROOT"/test_live_repair_summary.log
-test_log="$WORK_ROOT"/test_live_repair.log
-verify_log="$WORK_ROOT/test_live_repair_verify.log"
+loop_log="${TEST_ROOT}/test_live_repair_summary.log"
+test_log="${TEST_ROOT}/test_live_repair.log"
+verify_log="${TEST_ROOT}/test_live_repair_verify.log"
+dsc_ds_log="${TEST_ROOT}/test_live_repair_dsc.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
-crucible_test="$BINDIR/crutest"
-dsc="$BINDIR/dsc"
-downstairs="$BINDIR/crucible-downstairs"
+crucible_test="${BINDIR}/crutest"
+dsc="${BINDIR}/dsc"
+downstairs="${BINDIR}/crucible-downstairs"
 if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]]; then
     echo "Can't find required binaries"
     echo "Missing $crucible_test or $dsc or $downstairs"
@@ -68,9 +86,8 @@ done
 
 ((region_count=region_sets*3))
 ((region_count+=1))
-echo "" > "$loop_log"
-echo "" > "$test_log"
-echo "starting $(date)" | tee "$loop_log"
+echo "Starting $(date)" > "$test_log"
+echo "starting $(date)" > "$loop_log"
 echo "Tail $test_log for test output"
 
 # No real data was used to come up with these numbers.  If you have some data
@@ -89,16 +106,19 @@ fi
 # be used by the replace test.  We can use dsc to determine what the port will
 # be for the final region.
 if ! ${dsc} create --cleanup \
-  --region-dir "$REGION_ROOT" \
+  --region-dir "$MY_REGION_ROOT" \
   --region-count "$region_count" \
+  --output-dir "$dsc_ds_log" \
   --ds-bin "$downstairs" \
   --extent-size "$extent_size" \
-  --extent-count 200 >> "$test_log"; then
+  --extent-count 200 >> "$test_log"
+then
     echo "Failed to create downstairs regions"
     exit 1
 fi
 ${dsc} start --ds-bin "$downstairs" \
-  --region-dir "$REGION_ROOT" \
+  --region-dir "$MY_REGION_ROOT" \
+  --output-dir "$dsc_ds_log" \
   --region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
@@ -148,4 +168,10 @@ ${dsc} cmd shutdown
 wait "$dsc_pid"
 
 echo "$(date) Test ends with $result" | tee -a "$test_log"
+
+if [[ $result -eq 0 ]]; then
+    rm -rf "$MY_REGION_ROOT"
+    rm -rf "$TEST_ROOT"
+fi
+
 exit $result

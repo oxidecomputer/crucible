@@ -17,24 +17,41 @@ function ctrl_c() {
     exit 1
 }
 
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_replace_special}
-mkdir -p "$REGION_ROOT"
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT="${REGION_ROOT}/test_replace_special"
+if [[ -d "$MY_REGION_ROOT" ]]; then
+    rm -rf "$MY_REGION_ROOT"
+fi
+mkdir -p "$MY_REGION_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make region root $MY_REGION_ROOT"
+    exit 1
+fi
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
-mkdir -p "$WORK_ROOT"
+TEST_ROOT="${WORK_ROOT}/test_replace_special"
+if [[ -d "$TEST_ROOT" ]]; then
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
+mkdir -p "$TEST_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make test root $TEST_ROOT"
+    exit 1
+fi
 
-loop_log="$WORK_ROOT"/test_replace_special_summary.log
-test_log="$WORK_ROOT"/test_replace_special.log
-verify_log="$WORK_ROOT/test_replace_special_verify.log"
-
+loop_log="${TEST_ROOT}/test_replace_special_summary.log"
+test_log="${TEST_ROOT}/test_replace_special.log"
+verify_log="${TEST_ROOT}/test_replace_special_verify.log"
+dsc_ds_log="${TEST_ROOT}/test_replace_special_dsc.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
-crucible_test="$BINDIR/crutest"
-dsc="$BINDIR/dsc"
-downstairs="$BINDIR/crucible-downstairs"
+crucible_test="${BINDIR}/crutest"
+dsc="${BINDIR}/dsc"
+downstairs="${BINDIR}/crucible-downstairs"
 if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]]; then
     echo "Can't find required binaries"
     echo "Missing $crucible_test or $dsc or $downstairs"
@@ -74,8 +91,9 @@ echo "Tail $test_log for test output"
 # to be used for replacement.  We can use dsc to determine what the port will
 # be for the final region
 if ! ${dsc} create --cleanup \
-  --region-dir "$REGION_ROOT" \
+  --region-dir "$MY_REGION_ROOT" \
   --region-count "$region_count" \
+  --output-dir "$dsc_ds_log" \
   --ds-bin "$downstairs" \
   --extent-count 400 \
   --block-size 4096 >> "$test_log"; then
@@ -83,7 +101,8 @@ if ! ${dsc} create --cleanup \
     exit 1
 fi
 ${dsc} start --ds-bin "$downstairs" \
-  --region-dir "$REGION_ROOT" \
+  --region-dir "$MY_REGION_ROOT" \
+  --output-dir "$dsc_ds_log" \
   --region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
@@ -109,7 +128,7 @@ replacement_port=$(${dsc} cmd port -c $last_client)
 
 # Now run the crutest replace-reconcile test
 SECONDS=0
-cp "$test_log" "$test_log".last
+cp "$test_log" "$test_log".fill
 echo "" > "$test_log"
 echo "$(date) replace-reconcile starts now" | tee -a "$test_log"
 "$crucible_test" replace-reconcile -c "$loops" --dsc 127.0.0.1:9998 \
@@ -130,4 +149,11 @@ ${dsc} cmd shutdown
 wait "$dsc_pid"
 
 echo "$(date) Test ends with $result" | tee -a "$test_log"
+
+if [[ $result -eq 0 ]]; then
+    # Cleanup
+    echo "$(date) Cleanup for $0" | tee -a "$test_log"
+    rm -rf "$MY_REGION_ROOT"
+    rm -rf "$TEST_ROOT"
+fi
 exit $result
