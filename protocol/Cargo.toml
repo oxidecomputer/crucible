@@ -13,6 +13,7 @@ crucible-common.workspace = true
 num_enum.workspace = true
 schemars.workspace = true
 serde.workspace = true
+strum.workspace = true
 strum_macros.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
