@@ -13,9 +13,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 
 export BINDIR=${BINDIR:-$ROOT/target/debug}
-hammer="$BINDIR/crucible-hammer"
-cds="$BINDIR/crucible-downstairs"
-dsc="$BINDIR/dsc"
+hammer="${BINDIR}/crucible-hammer"
+cds="${BINDIR}/crucible-downstairs"
+dsc="${BINDIR}/dsc"
 for bin in $hammer $cds $dsc; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
@@ -30,7 +30,7 @@ if pgrep -fl -U "$(id -u)" "$cds"; then
 fi
 
 WORK_ROOT=${WORK_ROOT:-/tmp}
-TEST_ROOT="$WORK_ROOT/hammer_loop"
+TEST_ROOT="${WORK_ROOT}/hammer_loop"
 if [[ -d "$TEST_ROOT" ]]; then
     # Delete previous test data
     rm -r "$TEST_ROOT"
@@ -52,9 +52,9 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
-loop_log="$TEST_ROOT/hammer_loop.log"
-test_log="$TEST_ROOT/hammer_loop_test.log"
-dsc_ds_log="$TEST_ROOT/hammer_loop_dsc.log"
+loop_log="${TEST_ROOT}/hammer_loop.log"
+test_log="${TEST_ROOT}/hammer_loop_test.log"
+dsc_ds_log="${TEST_ROOT}/hammer_loop_dsc.log"
 
 loops=20
 

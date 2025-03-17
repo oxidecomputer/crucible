@@ -28,9 +28,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
-cds="$BINDIR/crucible-downstairs"
-ct="$BINDIR/crutest"
-dsc="$BINDIR/dsc"
+cds="${BINDIR}/crucible-downstairs"
+ct="${BINDIR}/crutest"
+dsc="${BINDIR}/dsc"
 
 for bin in $cds $ct $dsc; do
     if [[ ! -f "$bin" ]]; then
@@ -65,10 +65,10 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
-verify_file="$TEST_ROOT/test_repair_verify.data"
-test_log="$TEST_ROOT/test_repair_out.txt"
-ds_log_prefix="$TEST_ROOT/test_repair_ds"
-dsc_output_dir="$TEST_ROOT/test_repair_dsc"
+verify_file="${TEST_ROOT}/test_repair_verify.data"
+test_log="${TEST_ROOT}/test_repair_out.txt"
+ds_log_prefix="${TEST_ROOT}/test_repair_ds"
+dsc_output_dir="${TEST_ROOT}/test_repair_dsc"
 loops=100
 
 usage () {

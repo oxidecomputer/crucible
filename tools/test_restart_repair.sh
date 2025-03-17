@@ -63,9 +63,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
-cds="$BINDIR/crucible-downstairs"
-ct="$BINDIR/crutest"
-dsc="$BINDIR/dsc"
+cds="${BINDIR}/crucible-downstairs"
+ct="${BINDIR}/crutest"
+dsc="${BINDIR}/dsc"
 for bin in $cds $ct $dsc; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
@@ -120,11 +120,11 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
-export loop_log="$TEST_ROOT/test_restart_repair.log"
-export test_log="$TEST_ROOT/test_restart_repair_test.log"
-export verify_log="$TEST_ROOT/test_restart_repair_verify.log"
-export dsc_log="$TEST_ROOT/test_restart_repair_dsc.log"
-export dsc_ds_log="$TEST_ROOT/dsc"
+export loop_log="${TEST_ROOT}/test_restart_repair.log"
+export test_log="${TEST_ROOT}/test_restart_repair_test.log"
+export verify_log="${TEST_ROOT}/test_restart_repair_verify.log"
+export dsc_log="${TEST_ROOT}/test_restart_repair_dsc.log"
+export dsc_ds_log="${TEST_ROOT}/dsc"
 
 touch "$loop_log"
 echo "starting $(date)" | tee "$loop_log"

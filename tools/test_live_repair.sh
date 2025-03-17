@@ -45,17 +45,17 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
-loop_log="$TEST_ROOT"/test_live_repair_summary.log
-test_log="$TEST_ROOT"/test_live_repair.log
-verify_log="$TEST_ROOT/test_live_repair_verify.log"
-dsc_ds_log="$TEST_ROOT/test_live_repair_dsc.log"
+loop_log="${TEST_ROOT}/test_live_repair_summary.log"
+test_log="${TEST_ROOT}/test_live_repair.log"
+verify_log="${TEST_ROOT}/test_live_repair_verify.log"
+dsc_ds_log="${TEST_ROOT}/test_live_repair_dsc.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
-crucible_test="$BINDIR/crutest"
-dsc="$BINDIR/dsc"
-downstairs="$BINDIR/crucible-downstairs"
+crucible_test="${BINDIR}/crutest"
+dsc="${BINDIR}/dsc"
+downstairs="${BINDIR}/crucible-downstairs"
 if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]]; then
     echo "Can't find required binaries"
     echo "Missing $crucible_test or $dsc or $downstairs"
