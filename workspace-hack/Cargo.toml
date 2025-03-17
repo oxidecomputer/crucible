@@ -16,7 +16,7 @@ publish = false
 ### BEGIN HAKARI SECTION
 [dependencies]
 arrayvec = { version = "0.7", default-features = false, features = ["std"] }
-bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["serde", "std"] }
+bitflags = { version = "2", default-features = false, features = ["serde"] }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive", "env", "wrap_help"] }
@@ -65,7 +65,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 zerocopy = { version = "0.7", features = ["derive", "simd"] }
 
 [build-dependencies]
-bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["serde", "std"] }
+bitflags = { version = "2", default-features = false, features = ["serde"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -115,13 +115,14 @@ uuid = { version = "1", features = ["serde", "v4"] }
 zerocopy = { version = "0.7", features = ["derive", "simd"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
-bitflags-dff4ba8e3ae991db = { package = "bitflags", version = "1" }
+bitflags = { version = "2", default-features = false, features = ["std"] }
 dof = { version = "0.3", default-features = false, features = ["des"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
+nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
 once_cell = { version = "1", features = ["unstable"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
@@ -129,6 +130,7 @@ spin = { version = "0.9", default-features = false, features = ["once", "spin_mu
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
 dof = { version = "0.3", default-features = false, features = ["des"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
@@ -142,17 +144,20 @@ spin = { version = "0.9", default-features = false, features = ["once", "spin_mu
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.aarch64-apple-darwin.dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
+nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
 once_cell = { version = "1", features = ["unstable"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
@@ -164,13 +169,14 @@ rustls-pki-types = { version = "1", features = ["std"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-unknown-illumos.dependencies]
-bitflags-dff4ba8e3ae991db = { package = "bitflags", version = "1" }
+bitflags = { version = "2", default-features = false, features = ["std"] }
 dof = { version = "0.3", default-features = false, features = ["des"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
+nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
 once_cell = { version = "1", features = ["unstable"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
@@ -179,6 +185,7 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml_edit = { version = "0.19", features = ["serde"] }
 
 [target.x86_64-unknown-illumos.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
 dof = { version = "0.3", default-features = false, features = ["des"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
