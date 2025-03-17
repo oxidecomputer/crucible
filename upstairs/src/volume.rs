@@ -1447,6 +1447,8 @@ impl Volume {
         }
 
         if all_same {
+            // The caller should have already compared original and replacement
+            // VCRs. This function expects there to be some difference.
             crucible_bail!(ReplaceRequestInvalid, "The VCRs have no difference")
         }
 
@@ -1619,27 +1621,27 @@ impl Volume {
         }
     }
 
-    // Given two VCRs where we expect the only type to be a
-    // VolumeConstructionRequest::Region.  The VCR can be from a sub_volume
-    // or a read_only_parent.  The caller is expected to know how to
-    // handle the result depending on what it sends us.
-    //
-    // We return:
-    // VCRDelta::Same
-    // If the two VCRs are identical
-    //
-    // VCRDelta::Generation
-    // If it's just a generation number increase in the new VCR.
-    //
-    // VCRDelta::NewMissing
-    // If the new VCR is missing (None).
-    //
-    // VCRDelta::Target(old_target, new_target)
-    // If we have both a generation number increase, and one and only
-    // one target is different in the new VCR.
-    //
-    // Any other difference is an error, and an error returned here means the
-    // VCRs are incompatible in a way that prevents one from replacing another.
+    /// Given two VCRs where we expect the only type to be a
+    /// VolumeConstructionRequest::Region.  The VCR can be from a sub_volume
+    /// or a read_only_parent.  The caller is expected to know how to
+    /// handle the result depending on what it sends us.
+    ///
+    /// We return:
+    /// VCRDelta::Same
+    /// If the two VCRs are identical
+    ///
+    /// VCRDelta::Generation
+    /// If it's just a generation number increase in the new VCR.
+    ///
+    /// VCRDelta::NewMissing
+    /// If the new VCR is missing (None).
+    ///
+    /// VCRDelta::Target(old_target, new_target)
+    /// If we have both a generation number increase, and one and only
+    /// one target is different in the new VCR.
+    ///
+    /// Any other difference is an error, and an error returned here means the
+    /// VCRs are incompatible in a way that prevents one from replacing another.
     fn compare_vcr_region_for_replacement(
         log: &Logger,
         o_vol: &VolumeConstructionRequest,
@@ -1867,6 +1869,10 @@ impl Volume {
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
     ) -> Result<ReplaceResult, CrucibleError> {
+        if original == replacement {
+            return Ok(ReplaceResult::VcrMatches);
+        }
+
         let (original_target, new_target) =
             match Self::compare_vcr_for_target_replacement(
                 original,

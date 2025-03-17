@@ -5747,6 +5747,75 @@ mod test {
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
     }
 
+    #[tokio::test]
+    async fn test_volume_replace_vcr_rerun_ok() {
+        const BLOCK_SIZE: usize = 512;
+        let log = csl();
+
+        // Make three downstairs
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let opts = tds.opts();
+        let volume_id = Uuid::new_v4();
+
+        let original = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: opts.clone(),
+                gen: 2,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Volume::construct(original.clone(), None, log.clone())
+            .await
+            .unwrap();
+        volume.activate().await.unwrap();
+
+        // Make one new downstairs
+        let new_downstairs = tds.new_downstairs().await.unwrap();
+
+        let mut new_opts = tds.opts().clone();
+        new_opts.target[0] = new_downstairs.address();
+
+        // Our "new" VCR must have a new downstairs in the opts, and have
+        // the generation number be larger than the original.
+        let replacement = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: new_opts.clone(),
+                gen: 3,
+            }],
+            read_only_parent: None,
+        };
+
+        // If the caller (eg Propolis) is polled by Nexus with a `replacement`
+        // VCR, the first call will modify the block backend's VCR, and the
+        // subsequent polls will eventually be comparing two VCRs that are
+        // equal. Test that this doesn't produce an Err.
+        assert_eq!(
+            ReplaceResult::Started,
+            volume
+                .target_replace(original, replacement.clone())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            ReplaceResult::VcrMatches,
+            volume
+                .target_replace(replacement.clone(), replacement)
+                .await
+                .unwrap(),
+        );
+    }
+
     /// Getting a volume's status should work even if something else took over
     #[tokio::test]
     async fn test_pantry_get_status_after_activation() {
