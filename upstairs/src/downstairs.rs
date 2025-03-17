@@ -11,7 +11,7 @@ use crate::{
     client::{
         ClientAction, ClientFaultReason, ClientNegotiationFailed,
         ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
-        NegotiationState,
+        NegotiationState, ShouldSendError,
     },
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
@@ -1016,11 +1016,7 @@ impl Downstairs {
     ///
     /// This function is idempotent; it returns without doing anything if
     /// live-repair either can't be started or is already running.
-    pub(crate) fn check_live_repair_start(
-        &mut self,
-        up_state: &UpstairsState,
-        extent_count: u32,
-    ) {
+    pub(crate) fn check_live_repair_start(&mut self, up_state: &UpstairsState) {
         // If we're already doing live-repair, then we can't start live-repair
         if self.live_repair_in_progress() {
             return;
@@ -1067,7 +1063,7 @@ impl Downstairs {
         // Submit the initial repair jobs, which kicks everything off
         self.begin_repair_for(
             ExtentId(0),
-            Some(extent_count),
+            Some(self.ddef.unwrap().extent_count()),
             false,
             &repair_downstairs,
             source_downstairs,
@@ -2292,7 +2288,17 @@ impl Downstairs {
         // Send the job to each client!
         let state = ClientData::from_fn(|cid| {
             let client = &mut self.clients[cid];
-            let r = client.enqueue(ds_id, &io, last_repair_extent);
+            let r = match client.should_send() {
+                Ok(r) => r,
+                Err(ShouldSendError::InLiveRepair) => {
+                    if io.send_io_live_repair(last_repair_extent) {
+                        EnqueueResult::Send
+                    } else {
+                        EnqueueResult::Skip
+                    }
+                }
+            };
+            client.apply_enqueue_result(ds_id, &io, r);
             match r {
                 EnqueueResult::Send => self.send(ds_id, io.clone(), cid),
                 EnqueueResult::Hold => (),
@@ -9760,7 +9766,7 @@ pub(crate) mod test {
 
         // Start the repair normally. This enqueues the close & reopen jobs, and
         // reserves Job IDs for the repair/noop
-        ds.check_live_repair_start(&UpstairsState::Active, 3);
+        ds.check_live_repair_start(&UpstairsState::Active);
         assert!(ds.live_repair_in_progress());
 
         // Submit a write.
