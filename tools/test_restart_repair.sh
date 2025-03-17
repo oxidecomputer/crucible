@@ -98,7 +98,7 @@ while getopts 'l:' opt; do
 done
 
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
-MY_REGION_ROOT=${REGION_ROOT}/test_restart_repair
+MY_REGION_ROOT="${REGION_ROOT}/test_restart_repair"
 if [[ -d "$MY_REGION_ROOT" ]]; then
     rm -rf "$MY_REGION_ROOT"
 fi
@@ -109,7 +109,7 @@ if [[ $? -ne 0 ]]; then
 fi
 
 WORK_ROOT=${WORK_ROOT:-/tmp}
-TEST_ROOT="$WORK_ROOT/test_restart_repair"
+TEST_ROOT="${WORK_ROOT}/test_restart_repair"
 if [[ -d "$TEST_ROOT" ]]; then
     # Delete previous test data
     rm -r "$TEST_ROOT"

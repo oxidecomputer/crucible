@@ -18,7 +18,7 @@ function ctrl_c() {
 }
 
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
-MY_REGION_ROOT=${REGION_ROOT}/test_replace_special
+MY_REGION_ROOT="${REGION_ROOT}/test_replace_special"
 if [[ -d "$MY_REGION_ROOT" ]]; then
     rm -rf "$MY_REGION_ROOT"
 fi

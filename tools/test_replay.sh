@@ -16,7 +16,7 @@ function ctrl_c() {
 }
 
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
-MY_REGION_ROOT=${REGION_ROOT}/test_replay
+MY_REGION_ROOT="${REGION_ROOT}/test_replay"
 if [[ -d "$MY_REGION_ROOT" ]]; then
     rm -rf "$MY_REGION_ROOT"
 fi
@@ -27,7 +27,7 @@ if [[ $? -ne 0 ]]; then
 fi
 
 WORK_ROOT=${WORK_ROOT:-/tmp}
-TEST_ROOT="$WORK_ROOT/test_replay"
+TEST_ROOT="${WORK_ROOT}/test_replay"
 if [[ -d "$TEST_ROOT" ]]; then
     # Delete previous test data
     rm -r "$TEST_ROOT"

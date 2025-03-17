@@ -22,7 +22,7 @@ function ctrl_c() {
 }
 
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
-MY_REGION_ROOT=${REGION_ROOT}/test_live_repair
+MY_REGION_ROOT="${REGION_ROOT}/test_live_repair"
 if [[ -d "$MY_REGION_ROOT" ]]; then
     rm -rf "$MY_REGION_ROOT"
 fi
@@ -34,7 +34,7 @@ fi
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
-TEST_ROOT="$WORK_ROOT/test_live_repair"
+TEST_ROOT="${WORK_ROOT}/test_live_repair"
 if [[ -d "$TEST_ROOT" ]]; then
     # Delete previous test data
     rm -r "$TEST_ROOT"

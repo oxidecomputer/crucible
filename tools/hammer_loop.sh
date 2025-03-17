@@ -42,7 +42,7 @@ if [[ $? -ne 0 ]]; then
 fi
 
 REGION_ROOT=${REGION_ROOT:-/var/tmp}
-MY_REGION_ROOT=${REGION_ROOT}/hammer_loop
+MY_REGION_ROOT="${REGION_ROOT}/hammer_loop"
 if [[ -d "$MY_REGION_ROOT" ]]; then
     rm -rf "$MY_REGION_ROOT"
 fi
