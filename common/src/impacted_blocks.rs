@@ -2,7 +2,7 @@
 
 use super::*;
 
-use std::{iter::FusedIterator, ops::RangeInclusive};
+use std::iter::FusedIterator;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ImpactedAddr {
@@ -137,12 +137,11 @@ impl ImpactedBlocks {
         self == &ImpactedBlocks::Empty
     }
 
-    /// Return a range of impacted extents
+    /// Return an iterator over impacted extents
     pub fn extents(
         &self,
         ddef: &RegionDefinition,
-    ) -> Option<RangeInclusive<u32>> {
-        // XXX return a range of `ExtentId` once `std::iter::Step` is stable
+    ) -> impl Iterator<Item = ExtentId> {
         let blocks_per_extent = ddef.extent_size().value;
         match self {
             ImpactedBlocks::Empty => None, /* empty range */
@@ -151,6 +150,9 @@ impl ImpactedBlocks {
                     ..=((lst.0 / blocks_per_extent) as u32),
             ),
         }
+        .into_iter()
+        .flatten()
+        .map(ExtentId)
     }
 
     pub fn blocks(&self) -> ImpactedBlockIter {

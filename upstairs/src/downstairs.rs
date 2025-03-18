@@ -2081,12 +2081,7 @@ impl Downstairs {
         };
         let ddef = self.ddef.as_ref().unwrap();
         let mut future_repair = false;
-        for eid in impacted_blocks
-            .extents(ddef)
-            .into_iter()
-            .flatten()
-            .map(ExtentId)
-        {
+        for eid in impacted_blocks.extents(ddef) {
             if eid == *eur.start() {
                 future_repair = true;
             } else if eid > *eur.start() && (eid <= *eur.end() || future_repair)
@@ -3511,17 +3506,14 @@ impl Downstairs {
         self.ds_active.get_blocks_for(ds_id)
     }
 
-    /// Return the extent range covered by the given job
+    /// Returns a list of extents covered by the given job
     ///
     /// # Panics
     /// If the job is not stored in our `Downstairs`
     #[cfg(test)]
-    pub fn get_extents_for(
-        &self,
-        ds_id: JobId,
-    ) -> std::ops::RangeInclusive<u32> {
+    pub fn get_extents_for(&self, ds_id: JobId) -> Vec<ExtentId> {
         let ddef = self.ddef.as_ref().unwrap();
-        self.get_blocks_for(ds_id).extents(ddef).unwrap()
+        self.get_blocks_for(ds_id).extents(ddef).collect()
     }
 
     #[cfg(test)]
