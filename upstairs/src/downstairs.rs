@@ -1372,9 +1372,8 @@ impl Downstairs {
         up_state: &UpstairsState,
     ) {
         let extent_count = self.ddef.unwrap().extent_count();
-        // Load a partially valid repair state (`min_id` and `state` are bogus);
-        // `state` will be updated in `send_live_repair_jobs`, and `min_jobs`
-        // will be set once we know the close job ID.
+        // Load a partially valid repair state, with a dummy `state` (to be
+        // updated in `send_live_repair_jobs`).
         self.repair = Some(LiveRepairData {
             id: Uuid::new_v4(),
             extent_count,
@@ -1382,12 +1381,11 @@ impl Downstairs {
             source_downstairs,
             aborting_repair: false,
             active_extent: ExtentId(0),
-            min_id: JobId(0), // fixed below
+            min_id: self.peek_next_id(), // upcoming close_id
             repair_job_ids: BTreeMap::new(),
             state: LiveRepairState::dummy(), // fixed when sending jobs
         });
-        let extent_repair_ids = self.send_live_repair_jobs(up_state);
-        self.repair.as_mut().unwrap().min_id = extent_repair_ids.close_id;
+        self.send_live_repair_jobs(up_state);
     }
 
     /// Increments `self.repair.active_extent` and sends new jobs
@@ -1413,10 +1411,7 @@ impl Downstairs {
     ///   aborting the repair but either (1) the source downstairs is not
     ///   `DsState::Active`, or (2) the repair downstairs are not all
     ///   `DsState::LiveRepair`.
-    fn send_live_repair_jobs(
-        &mut self,
-        up_state: &UpstairsState,
-    ) -> ExtentRepairIDs {
+    fn send_live_repair_jobs(&mut self, up_state: &UpstairsState) {
         // Keep going!
         let repair = self.repair.as_mut().unwrap();
 
@@ -1488,7 +1483,6 @@ impl Downstairs {
                 &repair_downstairs,
             )
         };
-        extent_repair_ids
     }
 
     /// Creates a [DownstairsIO] job for an [IOop::ExtentLiveReopen], and
