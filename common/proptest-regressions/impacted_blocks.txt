@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a0eeb2a4e85b48b2bc28fd4353784f7f4a587cd07b624761558a41e2cc981e6c # shrinks to input = _IblocksNewPanicsForFlippedPolarityArgs { start_block: 198292286474641, end_block: 198292286474884 }
+cc 71508540f37d62051cb8623d470e89dd6af7571763083f694fcf728e43550bfe # shrinks to input = _IblocksBlocksIteratesOverAllBlocksArgs { extent_count: 2, extent_size: 76, start_eid: 0, start_block: 56, end_eid: 1, end_block: 63 }

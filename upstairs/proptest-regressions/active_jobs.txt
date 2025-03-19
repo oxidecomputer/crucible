@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 124286ecc9750bc4c0f7f95be4cec889b7f1a29a8a3cd5714cc834e9144f518e # shrinks to a = InclusiveRange(BlockIndex(64), BlockIndex(64)), a_type = true, b = Empty, b_type = false, c = Empty, c_type = false, remove = 1001, read = InclusiveRange(BlockIndex(0), BlockIndex(64)), read_type = false
+cc 86445fd7899695fd2fc64ef55b3acc14a34f466893469135a4119f94dea74940 # shrinks to a = Empty, a_type = false, b = InclusiveRange(BlockIndex(29), BlockIndex(29)), b_type = true, c = Empty, c_type = false, read = InclusiveRange(BlockIndex(0), BlockIndex(29)), read_type = false
