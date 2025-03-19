@@ -1365,7 +1365,6 @@ dependencies = [
  "usdt",
  "usdt-impl",
  "uuid",
- "zerocopy 0.7.32",
 ]
 
 [[package]]
