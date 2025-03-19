@@ -412,8 +412,8 @@ pub(crate) async fn get_nexus_client(
     client: reqwest::Client,
     addr: Ipv6Addr,
 ) -> Option<nexus_client::Client> {
-    use internal_dns::resolver::Resolver;
-    use internal_dns::ServiceName;
+    use internal_dns_resolver::Resolver;
+    use internal_dns_types::names::ServiceName;
 
     // Use any rack internal address for `Resolver::new_from_ip`, as that will
     // use the AZ_PREFIX to find internal DNS servers.
