@@ -14,7 +14,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/release}
 
-echo "Nightly starts at $(date)" | tee "$output_file"
+echo "Nightly starts at $(date) - $(TZ=America/Los_Angeles date -R)" | tee "$output_file"
 echo "Running on $(git log -1 | head -20)" | tee -a "$output_file"
 echo "$(date) hammer start" >> "$output_file"
 banner hammer
