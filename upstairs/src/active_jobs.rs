@@ -3,7 +3,10 @@
 use crucible_common::{BlockIndex, ExtentId, RegionDefinition};
 use crucible_protocol::JobId;
 
-use crate::{DownstairsIO, ExtentRepairIDs, IOop, ImpactedBlocks};
+use crate::{
+    extent_to_impacted_blocks, DownstairsIO, ExtentRepairIDs, IOop,
+    ImpactedBlocks,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `ActiveJobs` tracks active jobs (and associated metadata) by job ID
@@ -165,13 +168,7 @@ impl ActiveJobs {
         extent: ExtentId,
         ddef: &RegionDefinition,
     ) -> Vec<JobId> {
-        let blocks_per_extent = ddef.extent_size().value;
-        let blocks = ImpactedBlocks::InclusiveRange(
-            BlockIndex(u64::from(extent.0) * blocks_per_extent),
-            BlockIndex(
-                u64::from(extent.0) * blocks_per_extent + blocks_per_extent - 1,
-            ),
-        );
+        let blocks = extent_to_impacted_blocks(ddef, extent);
         let dep = self.block_to_active.check_range(blocks, true);
         self.block_to_active
             .insert_range(blocks, repair_ids.reopen_id, true);
