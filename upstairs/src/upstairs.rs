@@ -3375,9 +3375,9 @@ pub(crate) mod test {
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
-        assert_eq!(ds.get_extents_for(jobs[0]).extents().unwrap().count(), 1);
-        assert_eq!(ds.get_extents_for(jobs[1]).extents().unwrap().count(), 2);
-        assert_eq!(ds.get_extents_for(jobs[2]).extents().unwrap().count(), 1);
+        assert_eq!(ds.get_extents_for(jobs[0]).len(), 1);
+        assert_eq!(ds.get_extents_for(jobs[1]).len(), 2);
+        assert_eq!(ds.get_extents_for(jobs[2]).len(), 1);
         assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[2]));
 
         // confirm deps
@@ -3438,11 +3438,11 @@ pub(crate) mod test {
         assert_eq!(jobs.len(), 5);
 
         // confirm which extents are impacted (in case make_upstairs changes)
-        assert_eq!(ds.get_extents_for(jobs[0]).extents().unwrap().count(), 1);
-        assert_eq!(ds.get_extents_for(jobs[1]).extents().unwrap().count(), 2);
-        assert_eq!(ds.get_extents_for(jobs[2]).extents().unwrap().count(), 1);
-        assert_eq!(ds.get_extents_for(jobs[3]).extents().unwrap().count(), 2);
-        assert_eq!(ds.get_extents_for(jobs[4]).extents().unwrap().count(), 1);
+        assert_eq!(ds.get_extents_for(jobs[0]).len(), 1);
+        assert_eq!(ds.get_extents_for(jobs[1]).len(), 2);
+        assert_eq!(ds.get_extents_for(jobs[2]).len(), 1);
+        assert_eq!(ds.get_extents_for(jobs[3]).len(), 2);
+        assert_eq!(ds.get_extents_for(jobs[4]).len(), 1);
 
         assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[2]));
         assert_ne!(ds.get_extents_for(jobs[4]), ds.get_extents_for(jobs[2]));
@@ -3494,9 +3494,9 @@ pub(crate) mod test {
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
-        assert_eq!(ds.get_extents_for(jobs[0]).extents().unwrap().count(), 1);
-        assert_eq!(ds.get_extents_for(jobs[1]).extents().unwrap().count(), 1);
-        assert_eq!(ds.get_extents_for(jobs[2]).extents().unwrap().count(), 2);
+        assert_eq!(ds.get_extents_for(jobs[0]).len(), 1);
+        assert_eq!(ds.get_extents_for(jobs[1]).len(), 1);
+        assert_eq!(ds.get_extents_for(jobs[2]).len(), 2);
 
         assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[1]));
 

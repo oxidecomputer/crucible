@@ -26,10 +26,7 @@ use crate::{
     RawWrite, ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
     SnapshotDetails, WorkSummary,
 };
-use crucible_common::{
-    impacted_blocks::ImpactedAddr, BlockIndex, BlockOffset, ExtentId,
-    NegotiationError,
-};
+use crucible_common::{BlockIndex, BlockOffset, ExtentId, NegotiationError};
 use crucible_protocol::WriteHeader;
 
 use ringbuffer::RingBuffer;
@@ -1505,16 +1502,7 @@ impl Downstairs {
 
     #[cfg(test)]
     fn create_and_enqueue_generic_read_eob(&mut self) -> JobId {
-        let iblocks = ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(7),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(7),
-            },
-        );
+        let iblocks = ImpactedBlocks::new(BlockIndex(7), BlockIndex(7));
 
         let ds_id = self.next_id();
         let dependencies = self.ds_active.deps_for_read(ds_id, iblocks);
@@ -1545,16 +1533,7 @@ impl Downstairs {
                 hash: 0,
             }],
         };
-        let iblocks = ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(7),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(7),
-            },
-        );
+        let iblocks = ImpactedBlocks::new(BlockIndex(7), BlockIndex(7));
         self.create_and_enqueue_write_eob(
             iblocks,
             request,
@@ -1585,23 +1564,26 @@ impl Downstairs {
         debug!(self.log, "IO Write {} has deps {:?}", ds_id, dependencies);
 
         // TODO: can anyone actually give us an empty write?
-        let start = blocks.start().unwrap_or(ImpactedAddr {
-            extent_id: ExtentId(0),
-            block: BlockOffset(0),
-        });
+        let start = blocks.start().unwrap_or(BlockIndex(0));
+
+        // XXX change IOop to take `BlockIndex` instead?
+        let extent_size = self.ddef.unwrap().extent_size().value;
+        let start_eid = ExtentId((start.0 / extent_size) as u32);
+        let start_offset = BlockOffset(start.0 % extent_size);
+
         let awrite = if is_write_unwritten {
             IOop::WriteUnwritten {
                 dependencies,
-                start_eid: start.extent_id,
-                start_offset: start.block,
+                start_eid,
+                start_offset,
                 data: write.data.freeze(),
                 blocks: write.blocks,
             }
         } else {
             IOop::Write {
                 dependencies,
-                start_eid: start.extent_id,
-                start_offset: start.block,
+                start_eid,
+                start_offset,
                 data: write.data.freeze(),
                 blocks: write.blocks,
             }
@@ -1676,7 +1658,8 @@ impl Downstairs {
             };
             info!(self.log, "Create new job ids for {}: {repair_ids:?}", eid);
 
-            let deps = self.ds_active.deps_for_repair(repair_ids, eid);
+            let ddef = self.ddef.as_ref().unwrap();
+            let deps = self.ds_active.deps_for_repair(repair_ids, eid, ddef);
             (repair_ids, deps)
         }
     }
@@ -2096,13 +2079,9 @@ impl Downstairs {
         let Some(eur) = self.get_extent_under_repair() else {
             return;
         };
+        let ddef = self.ddef.as_ref().unwrap();
         let mut future_repair = false;
-        for eid in impacted_blocks
-            .extents()
-            .into_iter()
-            .flatten()
-            .map(ExtentId)
-        {
+        for eid in impacted_blocks.extents(ddef) {
             if eid == *eur.start() {
                 future_repair = true;
             } else if eid > *eur.start() && (eid <= *eur.end() || future_repair)
@@ -2148,7 +2127,8 @@ impl Downstairs {
             noop_id,
             reopen_id,
         };
-        let deps = self.ds_active.deps_for_repair(repair_ids, eid);
+        let ddef = self.ddef.as_ref().unwrap();
+        let deps = self.ds_active.deps_for_repair(repair_ids, eid, ddef);
         info!(
             self.log,
             "reserving repair IDs for {eid}: {repair_ids:?}; got dep {deps:?}"
@@ -2182,16 +2162,19 @@ impl Downstairs {
         debug!(self.log, "IO Read  {} has deps {:?}", ds_id, dependencies);
 
         // TODO: can anyone actually give us an empty write?
-        let start = blocks.start().unwrap_or(ImpactedAddr {
-            extent_id: ExtentId(0),
-            block: BlockOffset(0),
-        });
+        let start = blocks.start().unwrap_or(BlockIndex(0));
         let ddef = self.ddef.unwrap();
+
+        // XXX change IOop to take `BlockIndex` instead?
+        let extent_size = ddef.extent_size().value;
+        let start_eid = ExtentId((start.0 / extent_size) as u32);
+        let start_offset = BlockOffset(start.0 % extent_size);
+
         let aread = IOop::Read {
             dependencies,
-            start_eid: start.extent_id,
-            start_offset: start.block,
-            count: blocks.blocks(&ddef).len() as u64,
+            start_eid,
+            start_offset,
+            count: blocks.blocks().len() as u64,
             block_size: ddef.block_size(),
         };
 
@@ -3514,13 +3497,23 @@ impl Downstairs {
         self.ds_active.keys().cloned().collect()
     }
 
-    /// Return the extent range covered by the given job
+    /// Return the block range covered by the given job
     ///
     /// # Panics
     /// If the job is not stored in our `Downstairs`
     #[cfg(test)]
-    pub fn get_extents_for(&self, ds_id: JobId) -> ImpactedBlocks {
-        self.ds_active.get_extents_for(ds_id)
+    pub fn get_blocks_for(&self, ds_id: JobId) -> ImpactedBlocks {
+        self.ds_active.get_blocks_for(ds_id)
+    }
+
+    /// Returns a list of extents covered by the given job
+    ///
+    /// # Panics
+    /// If the job is not stored in our `Downstairs`
+    #[cfg(test)]
+    pub fn get_extents_for(&self, ds_id: JobId) -> Vec<ExtentId> {
+        let ddef = self.ddef.as_ref().unwrap();
+        self.get_blocks_for(ds_id).extents(ddef).collect()
     }
 
     #[cfg(test)]
@@ -3545,7 +3538,8 @@ impl Downstairs {
 
     /// Submit a write to this downstairs. Use when you don't care about what
     /// the data you're writing is, and only care about getting some write-jobs
-    /// enqueued. The write will be to a single extent, as specified by eid
+    /// enqueued. The write will be to a single block, as specified by `eid` and
+    /// `block`
     #[cfg(test)]
     fn submit_test_write_block(
         &mut self,
@@ -3553,16 +3547,9 @@ impl Downstairs {
         block: BlockOffset,
         is_write_unwritten: bool,
     ) -> JobId {
-        let blocks = ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: eid,
-                block,
-            },
-            ImpactedAddr {
-                extent_id: eid,
-                block,
-            },
-        );
+        let extent_size = self.ddef.unwrap().extent_size().value;
+        let block = BlockIndex(u64::from(eid.0) * extent_size + block.0);
+        let blocks = ImpactedBlocks::new(block, block);
 
         // Extent size doesn't matter as long as it can contain our write
         self.submit_test_write(blocks, is_write_unwritten)
@@ -3570,7 +3557,8 @@ impl Downstairs {
 
     /// Submit a write to this downstairs. Use when you don't care about what
     /// the data you're writing is, and only care about getting some write-jobs
-    /// enqueued. The write will be to a single extent, as specified by eid
+    /// enqueued. The write will be to a range of blocks, as specified by
+    /// `blocks`
     #[cfg(test)]
     fn submit_test_write(
         &mut self,
@@ -3580,10 +3568,9 @@ impl Downstairs {
         use bytes::BytesMut;
         use crucible_protocol::BlockContext;
 
-        let ddef = self.ddef.unwrap();
         let write_blocks: Vec<_> = blocks
-            .blocks(&ddef)
-            .map(|(_eid, _b)| BlockContext {
+            .blocks()
+            .map(|_b| BlockContext {
                 hash: crucible_common::integrity_hash(&[&vec![0xff; 512]]),
                 encryption_context: None,
             })
@@ -3602,32 +3589,26 @@ impl Downstairs {
         )
     }
 
-    #[cfg(test)]
     /// Submit a read to this downstairs. Use when you don't care about what
     /// the data you're read is, and only care about getting some read-jobs
-    /// enqueued. The read will be to a single extent, as specified by eid
+    /// enqueued. The read will be to a single block, as specified by `eid` and
+    /// `block`
+    #[cfg(test)]
     fn submit_read_block(
         &mut self,
         eid: ExtentId,
         block: BlockOffset,
     ) -> JobId {
-        let blocks = ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: eid,
-                block,
-            },
-            ImpactedAddr {
-                extent_id: eid,
-                block,
-            },
-        );
+        let extent_size = self.ddef.unwrap().extent_size().value;
+        let block = BlockIndex(u64::from(eid.0) * extent_size + block.0);
+        let blocks = ImpactedBlocks::new(block, block);
         self.submit_dummy_read(blocks)
     }
 
     #[cfg(test)]
     fn submit_dummy_read(&mut self, blocks: ImpactedBlocks) -> JobId {
         let ddef = self.ddef.as_ref().unwrap();
-        let block_count = blocks.blocks(ddef).len();
+        let block_count = blocks.blocks().len();
         let buf = Buffer::new(block_count, ddef.block_size() as usize);
         self.submit_read(blocks, buf, BlockRes::dummy(), IOLimitGuard::dummy())
     }
@@ -4015,13 +3996,12 @@ pub(crate) mod test {
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
         BlockOpWaiter, BlockRes, ClientId, CrucibleError, DsState, ExtentFix,
-        ExtentRepairIDs, IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId,
-        RawReadResponse, ReconcileIO, ReconcileIOState, ReconciliationId,
-        SnapshotDetails,
+        ExtentRepairIDs, IOState, IOop, ImpactedBlocks, JobId, RawReadResponse,
+        ReconcileIO, ReconcileIOState, ReconciliationId, SnapshotDetails,
     };
 
     use bytes::BytesMut;
-    use crucible_common::{BlockOffset, ExtentId};
+    use crucible_common::{BlockIndex, BlockOffset, ExtentId};
     use crucible_protocol::{Message, ReadBlockContext};
     use ringbuffer::RingBuffer;
 
@@ -8701,16 +8681,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::repair_test_one_repair();
 
         let write_id = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(1),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(1), BlockIndex(3)),
             false,
         );
 
@@ -8737,16 +8708,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::repair_test_one_repair();
 
         let write_id = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(1),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(2), BlockIndex(4)),
             false,
         );
 
@@ -8774,14 +8736,8 @@ pub(crate) mod test {
         let mut ds = Downstairs::repair_test_one_repair();
 
         let read_id = ds.submit_dummy_read(ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(1),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(1),
-                block: BlockOffset(0),
-            },
+            BlockIndex(1),
+            BlockIndex(3),
         ));
 
         let repair_ids = create_and_enqueue_repair_ops(&mut ds, ExtentId(1));
@@ -8807,14 +8763,8 @@ pub(crate) mod test {
         let mut ds = Downstairs::repair_test_one_repair();
 
         let read_id = ds.submit_dummy_read(ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(2),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(1),
-                block: BlockOffset(1),
-            },
+            BlockIndex(2),
+            BlockIndex(4),
         ));
 
         let repair_ids = create_and_enqueue_repair_ops(&mut ds, ExtentId(0));
@@ -8846,16 +8796,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::repair_test_one_repair();
 
         let write_id = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(2), BlockIndex(3)),
             false,
         );
 
@@ -8883,14 +8824,8 @@ pub(crate) mod test {
         let mut ds = Downstairs::repair_test_one_repair();
 
         let read_id = ds.submit_dummy_read(ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(0),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(2),
-                block: BlockOffset(2),
-            },
+            BlockIndex(0),
+            BlockIndex(8),
         ));
 
         let repair_ids = create_and_enqueue_repair_ops(&mut ds, ExtentId(1));
@@ -8954,16 +8889,7 @@ pub(crate) mod test {
 
         // A write of blocks 2,3,4 which spans extent 0 and extent 1.
         let write_id = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(1),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(2), BlockIndex(4)),
             false,
         );
 
@@ -8994,14 +8920,8 @@ pub(crate) mod test {
         let repair_ids = create_and_enqueue_repair_ops(&mut ds, ExtentId(1));
 
         let read_id = ds.submit_dummy_read(ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(1),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(1),
-                block: BlockOffset(0),
-            },
+            BlockIndex(1),
+            BlockIndex(3),
         ));
 
         assert_eq!(ds.ds_active.len(), 5);
@@ -9028,27 +8948,12 @@ pub(crate) mod test {
         let mut ds = Downstairs::repair_test_one_repair();
 
         let read_id = ds.submit_dummy_read(ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(0),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(1),
-                block: BlockOffset(0),
-            },
+            BlockIndex(0),
+            BlockIndex(3),
         ));
 
         let write_id = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(2),
-                    block: BlockOffset(2),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(5), BlockIndex(8)),
             false,
         );
 
@@ -9151,16 +9056,7 @@ pub(crate) mod test {
 
         // A write of blocks 2,3,4 which spans the extent.
         let write_id = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(1),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(2), BlockIndex(4)),
             false,
         );
 
@@ -9227,16 +9123,7 @@ pub(crate) mod test {
 
         // A write of blocks 2,3,4 which spans extents.
         let write_id = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(1),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(2), BlockIndex(4)),
             false,
         );
         assert_eq!(ds.ds_active.len(), 1);
@@ -9293,14 +9180,8 @@ pub(crate) mod test {
 
         // A read of blocks 2,3,4 which spans extents.
         let read_id = ds.submit_dummy_read(ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(0),
-                block: BlockOffset(2),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(1),
-                block: BlockOffset(1),
-            },
+            BlockIndex(2),
+            BlockIndex(4),
         ));
 
         // Now enqueue the repair on extent 1, it should populate one of the
@@ -9570,42 +9451,15 @@ pub(crate) mod test {
 
         // Now, put three IOs on the queue
         ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(1),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(1), BlockIndex(3)),
             false,
         );
         ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(1),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(2), BlockIndex(4)),
             false,
         );
         ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(2),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(3), BlockIndex(5)),
             false,
         );
 
@@ -9637,16 +9491,7 @@ pub(crate) mod test {
 
         // Create a write on extent 1 (not yet repaired)
         ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(2),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(3), BlockIndex(5)),
             false,
         );
 
@@ -9658,16 +9503,7 @@ pub(crate) mod test {
         // IO submitted so far, and will also require creation of
         // space for future repair work.
         ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(1),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(1), BlockIndex(3)),
             false,
         );
 
@@ -9885,16 +9721,7 @@ pub(crate) mod test {
 
         // A write of blocks 2,3,4 which spans extents 0-1.
         let write_id1 = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(1),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(2), BlockIndex(4)),
             false,
         );
 
@@ -9980,46 +9807,22 @@ pub(crate) mod test {
 
         // A write of blocks 3,4,5,6 which spans extents 1-2.
         let write_id1 = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(2),
-                    block: BlockOffset(0),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(3), BlockIndex(6)),
             false,
         );
 
         // A write of block 2-3, which overlaps the previous write and should
         // also trigger a repair.
         let write_id2 = ds.submit_test_write(
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-            ),
+            ImpactedBlocks::new(BlockIndex(2), BlockIndex(3)),
             false,
         );
 
         // A read of block 5-7, which overlaps the previous repair and should
         // also force waiting on a new repair.
         let read_id = ds.submit_dummy_read(ImpactedBlocks::new(
-            ImpactedAddr {
-                extent_id: ExtentId(1),
-                block: BlockOffset(2),
-            },
-            ImpactedAddr {
-                extent_id: ExtentId(2),
-                block: BlockOffset(1),
-            },
+            BlockIndex(5),
+            BlockIndex(7),
         ));
 
         assert_eq!(ds.ds_active.len(), 3);
