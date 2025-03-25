@@ -4,12 +4,6 @@ use super::*;
 
 use std::iter::FusedIterator;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ImpactedAddr {
-    pub extent_id: ExtentId,
-    pub block: BlockOffset,
-}
-
 /// Store a list of impacted blocks for later job dependency calculation
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ImpactedBlocks {
@@ -118,7 +112,7 @@ impl ImpactedBlocks {
     }
 
     /// Create a new [`ImpactedBlocks`] range starting at a given block, and
-    /// stretching `n_blocks` further into the extent.  Returns
+    /// stretching `n_blocks` further into the region.  Returns
     /// [`ImpactedBlocks::Empty`] if `n_blocks` is 0.
     pub fn from_offset(start_block: BlockIndex, n_blocks: u64) -> Self {
         if n_blocks == 0 {
@@ -186,7 +180,7 @@ impl ImpactedBlocks {
 /// the numbers at the bottom of the diagram are block numbers).
 ///
 /// Return an [`ImpactedBlocks`] object that stores the affected region as a range
-/// of [`ImpactedAddr`] values (which are `(ExtentId, BlockOffset)` tuples)
+/// of [`BlockIndex`] values
 pub fn extent_from_offset(
     ddef: &RegionDefinition,
     offset: BlockIndex,
@@ -525,10 +519,8 @@ mod test {
         // Weighted this way because we want to test lots of InclusiveRanges
         // against each other, since Empty is a very simple case.
         #[weight(19)]
-        InclusiveRange(
-            (proptest::sample::Index, proptest::sample::Index),
-            (proptest::sample::Index, proptest::sample::Index),
-        ),
+        // will be scaled a given region's size as necessary
+        InclusiveRange(u64, u64),
 
         #[weight(1)]
         Empty,
@@ -547,67 +539,33 @@ mod test {
         ddef
     }
 
+    /// Scale a generated ArbitraryImpactedBlocks to fit within a given region,
+    /// providing the final ImpactedBlocks.
     fn reify_impacted_blocks(
-        test_iblocks: ArbitraryImpactedBlocks,
-        extent_count: u32,
-        extent_size: usize,
-    ) -> ImpactedBlocks {
-        match test_iblocks {
-            ArbitraryImpactedBlocks::Empty => ImpactedBlocks::Empty,
-            ArbitraryImpactedBlocks::InclusiveRange(
-                (left_eid, left_block),
-                (right_eid_offset, right_block_offset),
-            ) => {
-                let left_addr = ImpactedAddr {
-                    extent_id: ExtentId(
-                        left_eid
-                            .index(extent_count as usize)
-                            .try_into()
-                            .unwrap(),
-                    ),
-                    block: BlockOffset(left_block.index(extent_size) as u64),
-                };
-
-                let extent_offset: u32 = right_eid_offset
-                    .index(
-                        extent_count as usize - left_addr.extent_id.0 as usize,
-                    )
-                    .try_into()
-                    .unwrap();
-                let right_addr = ImpactedAddr {
-                    extent_id: left_addr.extent_id + extent_offset,
-                    block: BlockOffset(
-                        right_block_offset
-                            .index(extent_size - left_addr.block.0 as usize)
-                            as u64
-                            + left_addr.block.0,
-                    ),
-                };
-
-                let left_block = BlockIndex(
-                    u64::from(left_addr.extent_id.0) * extent_size as u64
-                        + left_addr.block.0,
-                );
-                let right_block = BlockIndex(
-                    u64::from(right_addr.extent_id.0) * extent_size as u64
-                        + right_addr.block.0,
-                );
-
-                ImpactedBlocks::InclusiveRange(left_block, right_block)
-            }
-        }
-    }
-
-    /// Map the index of a TestImpactedBlocks to fit within the region
-    fn reify_impacted_blocks_in_region(
         test_iblocks: ArbitraryImpactedBlocks,
         ddef: &RegionDefinition,
     ) -> ImpactedBlocks {
-        reify_impacted_blocks(
-            test_iblocks,
-            ddef.extent_count(),
-            ddef.extent_size().value as usize,
-        )
+        let ecount = ddef.extent_count() as u64;
+        let esize = ddef.extent_size().value;
+        let region_size = ecount * esize;
+
+        match test_iblocks {
+            ArbitraryImpactedBlocks::Empty => ImpactedBlocks::Empty,
+            ArbitraryImpactedBlocks::InclusiveRange(l, r) => {
+                // Scale down full-range randomly generated u64s to fit within the given region size
+                let l = (((l as u128) * (region_size as u128)) >> 64) as u64;
+                let r = (((r as u128) * (region_size as u128)) >> 64) as u64;
+
+                // The range must be within the region after scaling
+                assert!(l < region_size);
+                assert!(r < region_size);
+
+                // Ensure left comes before right, swap if necessary.
+                let (l, r) = if l <= r { (l, r) } else { (r, l) };
+
+                ImpactedBlocks::InclusiveRange(BlockIndex(l), BlockIndex(r))
+            }
+        }
     }
 
     fn region_def_strategy() -> impl Strategy<Value = RegionDefinition> {
@@ -621,8 +579,7 @@ mod test {
         any::<(ArbitraryRegionDefinition, ArbitraryImpactedBlocks)>().prop_map(
             |(test_ddef, test_iblocks)| {
                 let ddef = reify_region_definition(test_ddef);
-                let iblocks =
-                    reify_impacted_blocks_in_region(test_iblocks, &ddef);
+                let iblocks = reify_impacted_blocks(test_iblocks, &ddef);
                 (ddef, iblocks)
             },
         )
@@ -630,15 +587,10 @@ mod test {
 
     #[proptest]
     fn iblocks_from_offset_is_empty_for_zero_blocks(
-        #[strategy(1..=u32::MAX as u64)] extent_size: u64,
-        start_eid: u32,
-        #[strategy(0..#extent_size)] start_block: u64,
+        #[strategy(0..=u64::MAX)] start_block: u64,
     ) {
         prop_assert_eq!(
-            ImpactedBlocks::from_offset(
-                BlockIndex(u64::from(start_eid) * extent_size + start_block),
-                0
-            ),
+            ImpactedBlocks::from_offset(BlockIndex(start_block), 0),
             ImpactedBlocks::Empty
         );
     }
@@ -658,41 +610,19 @@ mod test {
     #[proptest]
     fn iblocks_blocks_iterates_over_all_blocks(
         // Keep these reasonably sized so we don't OOM running this test
-        #[strategy(1..=128u32)] extent_count: u32,
-        #[strategy(1..=128u64)] extent_size: u64,
-
-        #[strategy(0..#extent_count)] start_eid: u32,
-        #[strategy(0..#extent_size)] start_block: u64,
-
-        #[strategy(#start_eid..#extent_count)] end_eid: u32,
-        #[strategy(#start_block..#extent_size)] end_block: u64,
+        #[strategy(1..=0x4000u64)] _block_count: u64,
+        #[strategy(0..#_block_count)] start_block: u64,
+        #[strategy(#start_block..#_block_count)] end_block: u64,
     ) {
-        let start_eid = ExtentId(start_eid);
-        let end_eid = ExtentId(end_eid);
-
         // Set up our iblocks
-        let iblocks = ImpactedBlocks::new(
-            BlockIndex(u64::from(start_eid.0) * extent_size + start_block),
-            BlockIndex(u64::from(end_eid.0) * extent_size + end_block),
-        );
-
-        let mut ddef = RegionDefinition::default();
-        ddef.set_extent_count(extent_count);
-        ddef.set_extent_size(Block::new_512(extent_size));
-        ddef.set_block_size(512);
+        let iblocks =
+            ImpactedBlocks::new(BlockIndex(start_block), BlockIndex(end_block));
 
         // Generate reference data
-        let mut expected_addresses = Vec::new();
-        let mut cur_block = u64::from(start_eid.0) * extent_size + start_block;
-        let end_block = u64::from(end_eid.0) * extent_size + end_block;
-        loop {
-            expected_addresses.push(BlockIndex(cur_block));
-            if cur_block == end_block {
-                break;
-            }
-
-            cur_block += 1;
-        }
+        let expected_addresses: Vec<BlockIndex> = (start_block..=end_block)
+            .into_iter()
+            .map(|b| BlockIndex(b))
+            .collect();
 
         prop_assert_eq!(
             iblocks.blocks().collect::<Vec<_>>(),
