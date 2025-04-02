@@ -35,7 +35,7 @@ pub async fn start(
      */
     let config_dropshot = ConfigDropshot {
         bind_address: addr,
-        request_body_max_bytes: 1024,
+        default_request_body_max_bytes: 1024,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
     };
@@ -186,6 +186,7 @@ async fn downstairs_work_queue(
 #[cfg(test)]
 mod test {
     use openapiv3::OpenAPI;
+    use semver::Version;
 
     use super::build_api;
 
@@ -193,7 +194,7 @@ mod test {
     fn test_crucible_control_openapi() {
         let api = build_api();
         let mut raw = Vec::new();
-        api.openapi("Crucible Control", "0.0.0")
+        api.openapi("Crucible Control", Version::new(0, 0, 1))
             .write(&mut raw)
             .unwrap();
         let actual = String::from_utf8(raw).unwrap();

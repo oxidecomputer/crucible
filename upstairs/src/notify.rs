@@ -5,6 +5,7 @@
 //! Nexus-flavored types internally.
 
 use chrono::{DateTime, Utc};
+use rand::prelude::SliceRandom;
 use slog::{debug, error, info, o, warn, Logger};
 use std::net::{Ipv6Addr, SocketAddr};
 use tokio::sync::mpsc;
@@ -17,6 +18,12 @@ use nexus_client::types::{
     UpstairsRepairType,
 };
 use omicron_uuid_kinds::{GenericUuid, TypedUuid};
+
+#[derive(Debug)]
+pub(crate) enum NotifyQos {
+    High,
+    Low,
+}
 
 #[derive(Debug)]
 pub(crate) enum NotifyRequest {
@@ -65,8 +72,24 @@ pub(crate) enum NotifyRequest {
     },
 }
 
+impl NotifyRequest {
+    pub(crate) fn qos(&self) -> NotifyQos {
+        match &self {
+            NotifyRequest::LiveRepairStart { .. }
+            | NotifyRequest::LiveRepairFinish { .. }
+            | NotifyRequest::ReconcileStart { .. }
+            | NotifyRequest::ReconcileFinish { .. } => NotifyQos::High,
+
+            NotifyRequest::ClientTaskStopped { .. }
+            | NotifyRequest::LiveRepairProgress { .. }
+            | NotifyRequest::ReconcileProgress { .. } => NotifyQos::Low,
+        }
+    }
+}
+
 pub(crate) struct NotifyQueue {
-    tx: mpsc::Sender<(DateTime<Utc>, NotifyRequest)>,
+    tx_high: mpsc::Sender<(DateTime<Utc>, NotifyRequest)>,
+    tx_low: mpsc::Sender<(DateTime<Utc>, NotifyRequest)>,
     log: Logger,
 }
 
@@ -74,33 +97,86 @@ impl NotifyQueue {
     /// Insert a time-stamped request into the queue
     pub fn send(&self, r: NotifyRequest) {
         let now = Utc::now();
-        if let Err(r) = self.tx.try_send((now, r)) {
-            warn!(self.log, "could not send notify {r:?}; queue is full");
+        let qos = r.qos();
+        let queue = match &qos {
+            NotifyQos::High => &self.tx_high,
+            NotifyQos::Low => &self.tx_low,
+        };
+
+        if let Err(e) = queue.try_send((now, r)) {
+            warn!(self.log, "could not send {qos:?} notify: {e}",);
         }
     }
 }
 
 pub(crate) fn spawn_notify_task(addr: Ipv6Addr, log: &Logger) -> NotifyQueue {
-    let (tx, rx) = mpsc::channel(128);
+    let (tx_high, rx_high) = mpsc::channel(128);
+    let (tx_low, rx_low) = mpsc::channel(128);
     let task_log = log.new(slog::o!("job" => "notify"));
-    tokio::spawn(async move { notify_task_nexus(addr, rx, task_log).await });
+
+    tokio::spawn(async move {
+        notify_task_nexus(addr, rx_high, rx_low, task_log).await
+    });
+
     NotifyQueue {
-        tx,
+        tx_high,
+        tx_low,
         log: log.new(o!("job" => "notify_queue")),
     }
 }
 
+struct Notification {
+    message: (DateTime<Utc>, NotifyRequest),
+    qos: NotifyQos,
+    retries: usize,
+}
+
 async fn notify_task_nexus(
     addr: Ipv6Addr,
-    mut rx: mpsc::Receiver<(DateTime<Utc>, NotifyRequest)>,
+    mut rx_high: mpsc::Receiver<(DateTime<Utc>, NotifyRequest)>,
+    mut rx_low: mpsc::Receiver<(DateTime<Utc>, NotifyRequest)>,
     log: Logger,
 ) {
+    info!(log, "notify_task started");
+
+    // Store high QoS messages if they can't be sent
+    let mut stored_notification: Option<Notification> = None;
+
     let reqwest_client = reqwest::ClientBuilder::new()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap();
-    while let Some((time, m)) = rx.recv().await {
+
+    loop {
+        let r = tokio::select! {
+            biased;
+
+            Some(n) = async { stored_notification.take() } => Some(n),
+
+            i = rx_high.recv() => i.map(|message| Notification {
+                message,
+                qos: NotifyQos::High,
+                retries: 0,
+            }),
+
+            i = rx_low.recv() => i.map(|message| Notification {
+                message,
+                qos: NotifyQos::Low,
+                retries: 0,
+            }),
+        };
+
+        let Some(Notification {
+            message: (time, m),
+            qos,
+            retries,
+        }) = r
+        else {
+            error!(log, "one of the notify channels was closed!");
+            break;
+        };
+
         debug!(log, "notify {m:?}");
         let client = reqwest_client.clone();
         let Some(nexus_client) = get_nexus_client(&log, client, addr).await
@@ -114,21 +190,23 @@ async fn notify_task_nexus(
             );
             continue;
         };
-        let (r, s) = match m {
+
+        let (r, s) = match &m {
             NotifyRequest::ClientTaskStopped {
                 upstairs_id,
                 downstairs_id,
                 reason,
             } => {
-                let upstairs_id = TypedUuid::from_untyped_uuid(upstairs_id);
-                let downstairs_id = TypedUuid::from_untyped_uuid(downstairs_id);
+                let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
+                let downstairs_id =
+                    TypedUuid::from_untyped_uuid(*downstairs_id);
                 let reason = match reason {
                     ClientRunResult::ConnectionTimeout => {
                         DownstairsClientStoppedReason::ConnectionTimeout
                     }
                     ClientRunResult::ConnectionFailed(_) => {
-                        // skip this notification, it's too noisy during connection
-                        // retries
+                        // skip this notification, it's too noisy during
+                        // connection retries
                         //DownstairsClientStoppedReason::ConnectionFailed
                         continue;
                     }
@@ -159,16 +237,13 @@ async fn notify_task_nexus(
                 };
 
                 (
-                    omicron_common::retry_until_known_result(&log, || async {
-                        nexus_client
-                            .cpapi_downstairs_client_stopped(
-                                &upstairs_id,
-                                &downstairs_id,
-                                &DownstairsClientStopped { time, reason },
-                            )
-                            .await
-                    })
-                    .await,
+                    nexus_client
+                        .cpapi_downstairs_client_stopped(
+                            &upstairs_id,
+                            &downstairs_id,
+                            &DownstairsClientStopped { time, reason },
+                        )
+                        .await,
                     "client stopped",
                 )
             }
@@ -184,7 +259,7 @@ async fn notify_task_nexus(
                 session_id,
                 ref repairs,
             } => {
-                let upstairs_id = TypedUuid::from_untyped_uuid(upstairs_id);
+                let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
                 let (description, repair_type) =
                     if matches!(m, NotifyRequest::LiveRepairStart { .. }) {
                         ("live repair start", UpstairsRepairType::Live)
@@ -193,9 +268,9 @@ async fn notify_task_nexus(
                     };
                 let info = RepairStartInfo {
                     time,
-                    repair_id: TypedUuid::from_untyped_uuid(repair_id),
+                    repair_id: TypedUuid::from_untyped_uuid(*repair_id),
                     repair_type,
-                    session_id: TypedUuid::from_untyped_uuid(session_id),
+                    session_id: TypedUuid::from_untyped_uuid(*session_id),
                     repairs: repairs
                         .iter()
                         .map(|(region_uuid, target_addr)| {
@@ -208,12 +283,9 @@ async fn notify_task_nexus(
                 };
 
                 (
-                    omicron_common::retry_until_known_result(&log, || async {
-                        nexus_client
-                            .cpapi_upstairs_repair_start(&upstairs_id, &info)
-                            .await
-                    })
-                    .await,
+                    nexus_client
+                        .cpapi_upstairs_repair_start(&upstairs_id, &info)
+                        .await,
                     description,
                 )
             }
@@ -229,8 +301,8 @@ async fn notify_task_nexus(
                 current_item,
                 total_items,
             } => {
-                let upstairs_id = TypedUuid::from_untyped_uuid(upstairs_id);
-                let repair_id = TypedUuid::from_untyped_uuid(repair_id);
+                let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
+                let repair_id = TypedUuid::from_untyped_uuid(*repair_id);
                 let description =
                     if matches!(m, NotifyRequest::LiveRepairProgress { .. }) {
                         "live repair progress"
@@ -239,20 +311,17 @@ async fn notify_task_nexus(
                     };
 
                 (
-                    omicron_common::retry_until_known_result(&log, || async {
-                        nexus_client
-                            .cpapi_upstairs_repair_progress(
-                                &upstairs_id,
-                                &repair_id,
-                                &RepairProgress {
-                                    current_item,
-                                    total_items,
-                                    time,
-                                },
-                            )
-                            .await
-                    })
-                    .await,
+                    nexus_client
+                        .cpapi_upstairs_repair_progress(
+                            &upstairs_id,
+                            &repair_id,
+                            &RepairProgress {
+                                current_item: *current_item,
+                                total_items: *total_items,
+                                time,
+                            },
+                        )
+                        .await,
                     description,
                 )
             }
@@ -270,7 +339,7 @@ async fn notify_task_nexus(
                 aborted,
                 ref repairs,
             } => {
-                let upstairs_id = TypedUuid::from_untyped_uuid(upstairs_id);
+                let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
                 let (description, repair_type) =
                     if matches!(m, NotifyRequest::LiveRepairFinish { .. }) {
                         ("live repair finish", UpstairsRepairType::Live)
@@ -279,9 +348,9 @@ async fn notify_task_nexus(
                     };
                 let info = RepairFinishInfo {
                     time,
-                    repair_id: TypedUuid::from_untyped_uuid(repair_id),
+                    repair_id: TypedUuid::from_untyped_uuid(*repair_id),
                     repair_type,
-                    session_id: TypedUuid::from_untyped_uuid(session_id),
+                    session_id: TypedUuid::from_untyped_uuid(*session_id),
                     repairs: repairs
                         .iter()
                         .map(|(region_uuid, target_addr)| {
@@ -291,20 +360,18 @@ async fn notify_task_nexus(
                             }
                         })
                         .collect(),
-                    aborted,
+                    aborted: *aborted,
                 };
 
                 (
-                    omicron_common::retry_until_known_result(&log, || async {
-                        nexus_client
-                            .cpapi_upstairs_repair_finish(&upstairs_id, &info)
-                            .await
-                    })
-                    .await,
+                    nexus_client
+                        .cpapi_upstairs_repair_finish(&upstairs_id, &info)
+                        .await,
                     description,
                 )
             }
         };
+
         match r {
             Ok(_) => {
                 info!(log, "notified Nexus of {s}");
@@ -312,9 +379,30 @@ async fn notify_task_nexus(
 
             Err(e) => {
                 error!(log, "failed to notify Nexus of {s}: {e}");
+
+                // If there's a problem notifying Nexus, it could be due to
+                // Nexus being gone before the DNS was updated. If this is the
+                // case, then retrying should eventually pick a different Nexus
+                // and succeed. Store high priority messages so they can be
+                // resent.
+                if matches!(qos, NotifyQos::High) {
+                    // If we've retried too many times, then drop this message.
+                    // Unfortunately if this is true then other notifications
+                    // will also likely fail.
+                    if retries > 3 {
+                        warn!(log, "retries > 3, dropping {m:?}");
+                    } else {
+                        stored_notification = Some(Notification {
+                            message: (time, m),
+                            qos,
+                            retries: retries + 1,
+                        });
+                    }
+                }
             }
         }
     }
+
     info!(log, "notify_task exiting");
 }
 
@@ -324,8 +412,8 @@ pub(crate) async fn get_nexus_client(
     client: reqwest::Client,
     addr: Ipv6Addr,
 ) -> Option<nexus_client::Client> {
-    use internal_dns::resolver::Resolver;
-    use internal_dns::ServiceName;
+    use internal_dns_resolver::Resolver;
+    use internal_dns_types::names::ServiceName;
 
     // Use any rack internal address for `Resolver::new_from_ip`, as that will
     // use the AZ_PREFIX to find internal DNS servers.
@@ -338,8 +426,21 @@ pub(crate) async fn get_nexus_client(
     };
 
     let nexus_address =
-        match resolver.lookup_socket_v6(ServiceName::Nexus).await {
-            Ok(addr) => addr,
+        match resolver.lookup_all_socket_v6(ServiceName::Nexus).await {
+            Ok(addrs) => {
+                if addrs.is_empty() {
+                    error!(log, "no Nexus addresses returned!");
+                    return None;
+                }
+
+                let Some(addr) = addrs.choose(&mut rand::thread_rng()) else {
+                    error!(log, "somehow, choose failed!");
+                    return None;
+                };
+
+                *addr
+            }
+
             Err(e) => {
                 error!(log, "lookup Nexus address failed: {e}");
                 return None;

@@ -2251,7 +2251,7 @@ async fn replay_workload(
         generic_workload(volume, &mut generic_wtq, di, false, false).await?;
 
         let res = dsc_client.dsc_start(stopped_ds).await;
-        println!("Replay: started {stopped_ds}, returned:{:?}", res);
+        println!("[{c}] Replay: started {stopped_ds}, returned:{:?}", res);
 
         // Wait for all IO to finish before we continue
         loop {

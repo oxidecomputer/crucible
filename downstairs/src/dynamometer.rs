@@ -1,6 +1,8 @@
 // Copyright 2023 Oxide Computer Company
 use super::*;
 
+use futures::TryStreamExt;
+
 pub enum DynoFlushConfig {
     FlushPerIops(usize),
     FlushPerBlocks(usize),
@@ -183,6 +185,109 @@ pub fn dynamometer(
         "BW min {} max {}",
         bws.first().unwrap(),
         bws.last().unwrap(),
+    );
+
+    Ok(())
+}
+
+pub async fn repair_dynamometer(clone_source: SocketAddr) -> Result<()> {
+    let mut bytes_received = 0;
+    let mut measurement_time = Instant::now();
+    let mut bytes_per_second: Vec<f32> = vec![];
+
+    let url = format!("http://{:?}", clone_source);
+    println!("using {url}");
+    let repair = repair_client::Client::new(&url);
+
+    let source_def = match repair.get_region_info().await {
+        Ok(def) => def.into_inner(),
+        Err(e) => {
+            bail!("Failed to get source region definition: {e}");
+        }
+    };
+
+    println!("The source RegionDefinition is: {:?}", source_def);
+
+    let source_ro_mode = match repair.get_region_mode().await {
+        Ok(ro) => ro.into_inner(),
+        Err(e) => {
+            bail!("Failed to get source mode: {e}");
+        }
+    };
+
+    println!("The source mode is: {:?}", source_ro_mode);
+    if !source_ro_mode {
+        bail!("Source downstairs is not read only");
+    }
+
+    for eid in (0..source_def.extent_count()).map(ExtentId) {
+        println!("Repair extent {eid}");
+
+        let mut repair_files = match repair.get_files_for_extent(eid.0).await {
+            Ok(f) => f.into_inner(),
+            Err(e) => {
+                bail!("Failed to get repair files: {:?}", e,);
+            }
+        };
+
+        repair_files.sort();
+        println!("eid:{} Found repair files: {:?}", eid, repair_files);
+
+        let mut stream = match repair
+            .get_extent_file(eid.0, repair_client::types::FileType::Data)
+            .await
+        {
+            Ok(rs) => rs,
+            Err(e) => {
+                bail!("Failed to get extent {} db file: {:?}", eid, e,);
+            }
+        };
+
+        loop {
+            match stream.try_next().await {
+                Ok(Some(bytes)) => {
+                    bytes_received += bytes.len();
+
+                    let elapsed = measurement_time.elapsed();
+
+                    if elapsed > Duration::from_secs(1) {
+                        let fractional_seconds: f32 = elapsed.as_secs() as f32
+                            + (elapsed.subsec_nanos() as f32 / 1e9);
+
+                        println!(
+                            "bytes per second: {}",
+                            bytes_received as f32 / fractional_seconds
+                        );
+                        bytes_per_second
+                            .push(bytes_received as f32 / fractional_seconds);
+                        bytes_received = 0;
+                        measurement_time = Instant::now();
+                    }
+                }
+
+                Ok(None) => break,
+
+                Err(e) => {
+                    bail!("repair stream error: {:?}", e);
+                }
+            }
+        }
+    }
+
+    println!("B/s: {:?}", bytes_per_second);
+    println!(
+        "B/S mean {} stddev {}",
+        statistical::mean(&bytes_per_second),
+        statistical::standard_deviation(&bytes_per_second, None),
+    );
+
+    bytes_per_second
+        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    println!(
+        "B/s min {} max {}",
+        bytes_per_second.first().unwrap(),
+        bytes_per_second.last().unwrap(),
     );
 
     Ok(())

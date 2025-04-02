@@ -28,56 +28,73 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
-cds="$BINDIR/crucible-downstairs"
-ct="$BINDIR/crutest"
-dsc="$BINDIR/dsc"
+cds="${BINDIR}/crucible-downstairs"
+ct="${BINDIR}/crutest"
+dsc="${BINDIR}/dsc"
 
 for bin in $cds $ct $dsc; do
     if [[ ! -f "$bin" ]]; then
-        echo "Can't find crucible binary at $bin" >&2
+        echo "Can't find required binary at $bin" >&2
         exit 1
     fi
 done
 
 
 # For buildomat, the regions should be in /var/tmp
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_repair}
-if [[ -d ${REGION_ROOT} ]]; then
-    rm -rf ${REGION_ROOT}
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT="${REGION_ROOT}/test_repair"
+if [[ -d "$MY_REGION_ROOT" ]]; then
+    rm -rf "$MY_REGION_ROOT"
+fi
+mkdir -p "$MY_REGION_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make region root $MY_REGION_ROOT"
+    exit 1
 fi
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
-mkdir -p "$WORK_ROOT"
+TEST_ROOT="${WORK_ROOT}/test_live_repair"
+if [[ -d "$TEST_ROOT" ]]; then
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
+mkdir -p "$TEST_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make test root $TEST_ROOT"
+    exit 1
+fi
 
-verify_file="$WORK_ROOT/test_repair_verify.data"
-test_log="$WORK_ROOT/test_repair_out.txt"
-ds_log_prefix="$WORK_ROOT/test_repair_ds"
-dsc_output_dir="$WORK_ROOT/dsc"
+verify_file="${TEST_ROOT}/test_repair_verify.data"
+test_log="${TEST_ROOT}/test_repair_out.txt"
+ds_log_prefix="${TEST_ROOT}/test_repair_ds"
+dsc_output_dir="${TEST_ROOT}/test_repair_dsc"
 loops=100
 
 usage () {
     echo "Usage: $0 [-l #] [N]" >&2
     echo " -l loops   Number of test loops to perform (default 100)" >&2
-	echo " -N         Don't dump color output"
+    echo " -N         Don't dump color output"
 }
 
 dump_args=()
 while getopts 'l:N' opt; do
-	case "$opt" in
+    case "$opt" in
         l)  loops=$OPTARG
             ;;
-		N)  echo "Turn off color for downstairs dump"
+        N)  echo "Turn off color for downstairs dump"
             dump_args+=(" --no-color")
             ;;
         *)  echo "Invalid option"
             usage
-			exit 1
-			;;
-	esac
+            exit 1
+            ;;
+    esac
 done
 
-if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 30 --extent-size 20 --region-dir "$REGION_ROOT" --output-dir "$dsc_output_dir"; then
+if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 30 \
+        --extent-size 20 --region-dir "$MY_REGION_ROOT" \
+        --output-dir "$dsc_output_dir"; then
     echo "Failed to create region"
     exit 1
 fi
@@ -86,9 +103,9 @@ fi
 # are the same as what DSC uses by default.  If either side changes, then
 # the other will need to be update manually.
 target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
-dump_args+=("-d ${REGION_ROOT}/8810")
-dump_args+=("-d ${REGION_ROOT}/8820")
-dump_args+=("-d ${REGION_ROOT}/8830")
+dump_args+=("-d ${MY_REGION_ROOT}/8810")
+dump_args+=("-d ${MY_REGION_ROOT}/8820")
+dump_args+=("-d ${MY_REGION_ROOT}/8830")
 
 if pgrep -fl -U "$(id -u)" "$cds"; then
     echo "Downstairs already running" >&2
@@ -97,12 +114,16 @@ if pgrep -fl -U "$(id -u)" "$cds"; then
 fi
 
 # Start all three downstairs
-${cds} run -d "${REGION_ROOT}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
+${cds} run -d "${MY_REGION_ROOT}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
 ds0_pid=$!
-${cds} run -d "${REGION_ROOT}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
+${cds} run -d "${MY_REGION_ROOT}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
 ds1_pid=$!
-${cds} run -d "${REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
+${cds} run -d "${MY_REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
 ds2_pid=$!
+
+# TODO: Some programatic way to wait for all the downstairs to start before we
+# continue here.
+sleep 20
 
 os_name=$(uname)
 if [[ "$os_name" == 'Darwin' ]]; then
@@ -136,17 +157,17 @@ while [[ $count -lt $loops ]]; do
     if [[ $choice -eq 0 ]]; then
         kill "$ds0_pid"
         wait "$ds0_pid" || true
-        ${cds} run -d "${REGION_ROOT}/8810" -p 8810 --lossy &> "$ds_log_prefix"8810.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8810" -p 8810 --lossy &> "$ds_log_prefix"8810.txt &
         ds0_pid=$!
     elif [[ $choice -eq 1 ]]; then
         kill "$ds1_pid"
         wait "$ds1_pid" || true
-        ${cds} run -d "${REGION_ROOT}/8820" -p 8820 --lossy &> "$ds_log_prefix"8820.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8820" -p 8820 --lossy &> "$ds_log_prefix"8820.txt &
         ds1_pid=$!
     else
         kill "$ds2_pid"
         wait "$ds2_pid" || true
-        ${cds} run -d "${REGION_ROOT}/8830" -p 8830 --lossy &> "$ds_log_prefix"8830.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8830" -p 8830 --lossy &> "$ds_log_prefix"8830.txt &
         ds2_pid=$!
     fi
 
@@ -182,13 +203,13 @@ while [[ $count -lt $loops ]]; do
     echo ""
     # Start downstairs without lossy
     if [[ $choice -eq 0 ]]; then
-        ${cds} run -d "${REGION_ROOT}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8810" -p 8810 &> "$ds_log_prefix"8810.txt &
         ds0_pid=$!
     elif [[ $choice -eq 1 ]]; then
-        ${cds} run -d "${REGION_ROOT}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8820" -p 8820 &> "$ds_log_prefix"8820.txt &
         ds1_pid=$!
     else
-        ${cds} run -d "${REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
+        ${cds} run -d "${MY_REGION_ROOT}/8830" -p 8830 &> "$ds_log_prefix"8830.txt &
         ds2_pid=$!
     fi
 
@@ -199,7 +220,7 @@ while [[ $count -lt $loops ]]; do
     then
         echo "Exit on verify fail, loop: $count, choice: $choice"
         echo "Check $test_log for details"
-        cleanup
+	cleanup
         exit 1
     fi
     set +o errexit
@@ -224,3 +245,7 @@ duration=$SECONDS
 printf "%d:%02d Test duration\n" $((duration / 60)) $((duration % 60))
 echo "Test completed"
 cleanup
+
+# Errors exit directly, so arrival here indicates success.
+rm -rf "$TEST_ROOT"
+rm -rf "$MY_REGION_ROOT"
