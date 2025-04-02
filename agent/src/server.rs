@@ -363,7 +363,7 @@ pub async fn run_server(
     let server = dropshot::HttpServerStarter::new(
         &dropshot::ConfigDropshot {
             bind_address,
-            request_body_max_bytes: 1024 * 10,
+            default_request_body_max_bytes: 1024 * 10,
             default_handler_task_mode: HandlerTaskMode::Detached,
             log_headers: vec![],
         },

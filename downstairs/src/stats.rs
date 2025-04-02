@@ -190,7 +190,7 @@ pub async fn ox_stats(
     let config = Config {
         server_info,
         registration_address: Some(registration_address),
-        request_body_max_bytes: 2048,
+        default_request_body_max_bytes: 2048,
         log: LogConfig::Config(logging_config),
     };
 

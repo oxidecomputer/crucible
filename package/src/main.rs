@@ -3,7 +3,7 @@
 use anyhow::Result;
 use camino::Utf8Path;
 use omicron_zone_package::config;
-use omicron_zone_package::target::Target;
+use omicron_zone_package::target::TargetMap;
 use std::fs::create_dir_all;
 
 #[tokio::main]
@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
     let output_dir = Utf8Path::new("out");
     create_dir_all(output_dir)?;
 
-    let packages = cfg.packages_to_deploy(&Target::default());
+    let packages = cfg.packages_to_deploy(&TargetMap::default());
     let package_iter = packages.build_order();
 
     for batch in package_iter {

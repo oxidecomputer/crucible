@@ -13,9 +13,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 
 export BINDIR=${BINDIR:-$ROOT/target/debug}
-hammer="$BINDIR/crucible-hammer"
-cds="$BINDIR/crucible-downstairs"
-dsc="$BINDIR/dsc"
+hammer="${BINDIR}/crucible-hammer"
+cds="${BINDIR}/crucible-downstairs"
+dsc="${BINDIR}/dsc"
 for bin in $hammer $cds $dsc; do
     if [[ ! -f "$bin" ]]; then
         echo "Can't find crucible binary at $bin" >&2
@@ -29,6 +29,33 @@ if pgrep -fl -U "$(id -u)" "$cds"; then
     exit 1
 fi
 
+WORK_ROOT=${WORK_ROOT:-/tmp}
+TEST_ROOT="${WORK_ROOT}/hammer_loop"
+if [[ -d "$TEST_ROOT" ]]; then
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
+mkdir -p "$TEST_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make test root $TEST_ROOT"
+    exit 1
+fi
+
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT="${REGION_ROOT}/hammer_loop"
+if [[ -d "$MY_REGION_ROOT" ]]; then
+    rm -rf "$MY_REGION_ROOT"
+fi
+mkdir -p "$MY_REGION_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make region root $MY_REGION_ROOT"
+    exit 1
+fi
+
+loop_log="${TEST_ROOT}/hammer_loop.log"
+test_log="${TEST_ROOT}/hammer_loop_test.log"
+dsc_ds_log="${TEST_ROOT}/hammer_loop_dsc.log"
+
 loops=20
 
 usage () {
@@ -37,23 +64,27 @@ usage () {
 }
 
 while getopts 'l:' opt; do
-	case "$opt" in
+    case "$opt" in
         l)  loops=$OPTARG
             ;;
         *)  echo "Invalid option"
             usage
-			exit 1
-			;;
-	esac
+            exit 1
+            ;;
+    esac
 done
 
-if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 60 --extent-size 50; then
+if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 60 \
+    --output-dir "$dsc_ds_log" \
+    --extent-size 50 --region-dir "$MY_REGION_ROOT"
+then
     echo "Failed to create region"
     exit 1
 fi
 
 # Start up dsc, verify it really did start.
-"$dsc" start --ds-bin "$cds" &
+"$dsc" start --ds-bin "$cds" --region-dir "$MY_REGION_ROOT" \
+    --output-dir "$dsc_ds_log" &
 dsc_pid=$!
 sleep 5
 if ! pgrep -P $dsc_pid; then
@@ -78,9 +109,6 @@ function ctrl_c() {
     fi
     exit 1
 }
-
-loop_log=/tmp/hammer_loop.log
-test_log=/tmp/hammer_loop_test.log
 echo "" > ${loop_log}
 echo "starting Hammer test on $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
@@ -138,12 +166,17 @@ printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d
   "$err" $duration | tee -a ${loop_log}
 
 echo "Stopping dsc"
-kill $dsc_pid 2> /dev/null
+"$dsc" cmd shutdown
 wait $dsc_pid
+
 # Also remove any leftover downstairs
 if pgrep -fl -U "$(id -u)" "$cds" > /dev/null; then
     pkill -f -U "$(id -u)" "$cds"
 fi
 
+if [[ $err -eq 0 ]]; then
+    # No errors, then cleanup all our logs and the region directories.
+    rm -r "$TEST_ROOT"
+    rm -rf "$MY_REGION_ROOT"
+fi
 exit "$err"
-

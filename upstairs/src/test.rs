@@ -59,10 +59,6 @@ pub(crate) mod up_test {
         build_logger()
     }
 
-    fn extent_tuple(eid: u32, offset: u64) -> (ExtentId, BlockOffset) {
-        (ExtentId(eid), BlockOffset(offset))
-    }
-
     #[test]
     fn test_iospan() {
         let span = IOSpan::new(512, 1024, 512);
@@ -131,10 +127,10 @@ pub(crate) mod up_test {
         up: &Upstairs,
         offset: BlockIndex,
         num_blocks: u64,
-    ) -> Vec<(ExtentId, BlockOffset)> {
+    ) -> Vec<BlockIndex> {
         let ddef = up.get_region_definition();
         extent_from_offset(&ddef, offset, num_blocks)
-            .blocks(&ddef)
+            .blocks()
             .collect()
     }
 
@@ -143,19 +139,19 @@ pub(crate) mod up_test {
         let up = make_upstairs();
 
         for i in 0..100 {
-            let exv = vec![extent_tuple(0, i)];
+            let exv = vec![BlockIndex(i)];
             assert_eq!(up_efo(&up, BlockIndex(i), 1), exv);
         }
 
         for i in 0..100 {
-            let exv = vec![extent_tuple(1, i)];
+            let exv = vec![BlockIndex(100 + i)];
             assert_eq!(up_efo(&up, BlockIndex(100 + i), 1), exv);
         }
 
-        let exv = vec![extent_tuple(2, 0)];
+        let exv = vec![BlockIndex(200)];
         assert_eq!(up_efo(&up, BlockIndex(200), 1), exv);
 
-        let exv = vec![extent_tuple(9, 99)];
+        let exv = vec![BlockIndex(999)];
         assert_eq!(up_efo(&up, BlockIndex(999), 1), exv);
     }
 
@@ -164,25 +160,25 @@ pub(crate) mod up_test {
         let up = make_upstairs();
 
         for i in 0..99 {
-            let exv = vec![extent_tuple(0, i), extent_tuple(0, i + 1)];
+            let exv = vec![BlockIndex(i), BlockIndex(i + 1)];
             assert_eq!(up_efo(&up, BlockIndex(i), 2), exv);
         }
 
-        let exv = vec![extent_tuple(0, 99), extent_tuple(1, 0)];
+        let exv = vec![BlockIndex(99), BlockIndex(100)];
         assert_eq!(up_efo(&up, BlockIndex(99), 2), exv);
 
         for i in 0..99 {
-            let exv = vec![extent_tuple(1, i)];
+            let exv = vec![BlockIndex(100 + i)];
             assert_eq!(up_efo(&up, BlockIndex(100 + i), 1), exv);
         }
 
-        let exv = vec![extent_tuple(1, 99), extent_tuple(2, 0)];
+        let exv = vec![BlockIndex(199), BlockIndex(200)];
         assert_eq!(up_efo(&up, BlockIndex(199), 2), exv);
 
-        let exv = vec![extent_tuple(2, 0), extent_tuple(2, 1)];
+        let exv = vec![BlockIndex(200), BlockIndex(201)];
         assert_eq!(up_efo(&up, BlockIndex(200), 2), exv);
 
-        let exv = vec![extent_tuple(9, 98), extent_tuple(9, 99)];
+        let exv = vec![BlockIndex(998), BlockIndex(999)];
         assert_eq!(up_efo(&up, BlockIndex(998), 2), exv);
     }
 
@@ -198,15 +194,15 @@ pub(crate) mod up_test {
          */
         assert_eq!(
             up_efo(&up, BlockIndex(99), 2),
-            vec![extent_tuple(0, 99), extent_tuple(1, 0)],
+            vec![BlockIndex(99), BlockIndex(100)],
         );
         assert_eq!(
             up_efo(&up, BlockIndex(98), 4),
             vec![
-                extent_tuple(0, 98),
-                extent_tuple(0, 99),
-                extent_tuple(1, 0),
-                extent_tuple(1, 1),
+                BlockIndex(98),
+                BlockIndex(99),
+                BlockIndex(100),
+                BlockIndex(101)
             ],
         );
 
@@ -214,18 +210,9 @@ pub(crate) mod up_test {
          * Largest buffer at different offsets
          */
         for offset in 0..100 {
-            let expected: Vec<_> = (0..100)
-                .map(|i| {
-                    extent_tuple(
-                        (offset + i) / 100,
-                        u64::from((offset + i) % 100),
-                    )
-                })
-                .collect();
-            assert_eq!(
-                up_efo(&up, BlockIndex(u64::from(offset)), 100),
-                expected
-            );
+            let expected: Vec<_> =
+                (0..100).map(|i| BlockIndex(offset + i)).collect();
+            assert_eq!(up_efo(&up, BlockIndex(offset), 100), expected);
         }
     }
 
