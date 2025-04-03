@@ -473,8 +473,6 @@ pub(crate) mod up_test {
     }
 
     fn test_ddef(blocks_per_extent: u64) -> RegionDefinition {
-        // Check the send_io_live_repair for a read below extent limit,
-        // at extent limit, and above extent limit.
         let mut region_options = RegionOptions::default();
         region_options.set_block_size(512);
         region_options.set_extent_size(Block::new(blocks_per_extent, 9));
@@ -489,6 +487,8 @@ pub(crate) mod up_test {
 
     #[test]
     fn send_io_live_repair_read() {
+        // Check the send_io_live_repair for a read below extent limit,
+        // at extent limit, and above extent limit.
         const BLOCKS_PER_EXTENT: u64 = 8;
         let ddef = test_ddef(BLOCKS_PER_EXTENT);
 
