@@ -390,8 +390,8 @@ echo "Begin replace reconcile test" >> "${log_prefix}_out.txt"
 # region so we have one to use for replacement.
 ((region_count+=1))
 echo "Creating $region_count larger downstairs regions"
-echo "${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 300 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
-"${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 100 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output" 2>&1
+echo "${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 400 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
+"${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 400 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output" 2>&1
 
 echo "Starting $region_count downstairs"
 echo "${dsc}" start --region-count $region_count "${dsc_args[@]}" >> "$dsc_output"
