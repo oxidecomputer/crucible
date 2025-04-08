@@ -472,69 +472,85 @@ pub(crate) mod up_test {
         Ok(())
     }
 
+    fn test_ddef(blocks_per_extent: u64) -> RegionDefinition {
+        let mut region_options = RegionOptions::default();
+        region_options.set_block_size(512);
+        region_options.set_extent_size(Block::new(blocks_per_extent, 9));
+        region_options.set_uuid(Uuid::new_v4());
+        region_options.set_encrypted(false);
+        region_options.validate().unwrap();
+
+        let mut ddef = RegionDefinition::from_options(&region_options).unwrap();
+        ddef.set_extent_count(15);
+        ddef
+    }
+
     #[test]
     fn send_io_live_repair_read() {
         // Check the send_io_live_repair for a read below extent limit,
         // at extent limit, and above extent limit.
+        const BLOCKS_PER_EXTENT: u64 = 8;
+        let ddef = test_ddef(BLOCKS_PER_EXTENT);
 
         // Below limit
         let op = IOop::Read {
             dependencies: vec![],
-            start_eid: ExtentId(0),
-            start_offset: BlockOffset(7),
+            start_block: BlockIndex(7),
             count: 1,
             block_size: 512,
         };
-        assert!(op.send_io_live_repair(Some(ExtentId(2))));
+        assert!(op.send_io_live_repair(Some(ExtentId(2)), &ddef));
 
         // At limit
         let op = IOop::Read {
             dependencies: vec![],
-            start_eid: ExtentId(2),
-            start_offset: BlockOffset(7),
+            start_block: BlockIndex(2 * BLOCKS_PER_EXTENT + 7),
             count: 1,
             block_size: 512,
         };
-        assert!(op.send_io_live_repair(Some(ExtentId(2))));
+        assert!(op.send_io_live_repair(Some(ExtentId(2)), &ddef));
 
         let op = IOop::Read {
             dependencies: vec![],
-            start_eid: ExtentId(3),
-            start_offset: BlockOffset(7),
+            start_block: BlockIndex(3 * BLOCKS_PER_EXTENT + 7),
             count: 1,
             block_size: 512,
         };
         // We are past the extent limit, so this should return false
-        assert!(!op.send_io_live_repair(Some(ExtentId(2))));
+        assert!(!op.send_io_live_repair(Some(ExtentId(2)), &ddef));
 
         // If we change the extent limit, it should become true
-        assert!(op.send_io_live_repair(Some(ExtentId(3))));
+        assert!(op.send_io_live_repair(Some(ExtentId(3)), &ddef));
     }
 
     // Construct an IOop::Write or IOop::WriteUnwritten at the given extent
-    fn write_at_extent(eid: ExtentId, wu: bool) -> IOop {
+    fn write_at_extent(
+        eid: ExtentId,
+        wu: bool,
+        ddef: &RegionDefinition,
+    ) -> IOop {
+        let blocks_per_extent = ddef.extent_size().value;
         let request = BlockContext {
             encryption_context: None,
             hash: 0,
         };
-        let data = BytesMut::from(vec![1].as_slice());
+        let data = BytesMut::from(vec![1].as_slice()).freeze();
         let blocks = vec![request];
+        let start_block = BlockIndex(u64::from(eid.0) * blocks_per_extent + 7);
 
         if wu {
             IOop::WriteUnwritten {
                 dependencies: vec![],
                 blocks,
-                start_eid: eid,
-                start_offset: BlockOffset(7),
-                data: data.freeze(),
+                start_block,
+                data,
             }
         } else {
             IOop::Write {
                 dependencies: vec![],
                 blocks,
-                start_eid: eid,
-                start_offset: BlockOffset(7),
-                data: data.freeze(),
+                start_block,
+                data,
             }
         }
     }
@@ -543,41 +559,45 @@ pub(crate) mod up_test {
     fn send_io_live_repair_write() {
         // Check the send_io_live_repair for a write below extent limit,
         // at extent limit, and above extent limit.
+        const BLOCKS_PER_EXTENT: u64 = 8;
+        let ddef = test_ddef(BLOCKS_PER_EXTENT);
 
         // Below limit
-        let wr = write_at_extent(ExtentId(0), false);
-        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
+        let wr = write_at_extent(ExtentId(0), false, &ddef);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2)), &ddef));
 
         // At the limit
-        let wr = write_at_extent(ExtentId(2), false);
-        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
+        let wr = write_at_extent(ExtentId(2), false, &ddef);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2)), &ddef));
 
         // Above the limit
-        let wr = write_at_extent(ExtentId(3), false);
-        assert!(!wr.send_io_live_repair(Some(ExtentId(2))));
+        let wr = write_at_extent(ExtentId(3), false, &ddef);
+        assert!(!wr.send_io_live_repair(Some(ExtentId(2)), &ddef));
 
         // Back to being below the limit
-        assert!(wr.send_io_live_repair(Some(ExtentId(3))));
+        assert!(wr.send_io_live_repair(Some(ExtentId(3)), &ddef));
     }
 
     #[test]
     fn send_io_live_repair_unwritten_write() {
         // Check the send_io_live_repair for a write unwritten below extent
         // at extent limit, and above extent limit.
+        const BLOCKS_PER_EXTENT: u64 = 8;
+        let ddef = test_ddef(BLOCKS_PER_EXTENT);
 
         // Below limit
-        let wr = write_at_extent(ExtentId(0), true);
-        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
+        let wr = write_at_extent(ExtentId(0), true, &ddef);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2)), &ddef));
 
         // At the limit
-        let wr = write_at_extent(ExtentId(2), true);
-        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
+        let wr = write_at_extent(ExtentId(2), true, &ddef);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2)), &ddef));
 
         // Above the limit
-        let wr = write_at_extent(ExtentId(3), true);
-        assert!(!wr.send_io_live_repair(Some(ExtentId(2))));
+        let wr = write_at_extent(ExtentId(3), true, &ddef);
+        assert!(!wr.send_io_live_repair(Some(ExtentId(2)), &ddef));
 
         // Back to being below the limit
-        assert!(wr.send_io_live_repair(Some(ExtentId(3))));
+        assert!(wr.send_io_live_repair(Some(ExtentId(3)), &ddef));
     }
 }
