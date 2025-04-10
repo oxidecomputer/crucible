@@ -356,7 +356,6 @@ impl DownstairsClient {
     }
 
     /// Returns the number of bytes associated with each IO state
-    #[allow(unused)] // XXX this will be used in the future!
     pub(crate) fn io_state_byte_count(&self) -> ClientIOStateCount<u64> {
         self.io_state_byte_count
     }
@@ -1283,10 +1282,6 @@ impl DownstairsClient {
         /*
          * Either we get all the way through the negotiation, or we hit the
          * timeout and exit to retry.
-         *
-         * XXX There are many ways we can handle this, but as we figure out
-         * how the upstairs is notified that a DS is new or moving, or other
-         * things, this way will work. We will revisit when we have more info.
          *
          * The negotiation flow starts as follows, with the value of the
          * negotiated variable on the left:
