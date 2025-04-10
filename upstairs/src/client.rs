@@ -499,15 +499,15 @@ impl DownstairsClient {
         up_state: &UpstairsState,
         can_replay: bool,
     ) {
-        // Clear this Downstair's repair address, and let the YesItsMe set it.
+        // Clear this Downstairs' repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
         // entirely; the repair address could have changed in any of these
         // cases.
         self.repair_addr = None;
 
         // If the upstairs is already active (or trying to go active), then the
-        // downstairs should automatically call PromoteToActive when it reaches
-        // the relevant state.
+        // downstairs should automatically send the PromoteToActive message when
+        // it reaches the relevant state.
         let auto_promote = match up_state {
             UpstairsState::Active | UpstairsState::GoActive(..) => !matches!(
                 self.state,
