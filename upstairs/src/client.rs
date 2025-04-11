@@ -356,7 +356,6 @@ impl DownstairsClient {
     }
 
     /// Returns the number of bytes associated with each IO state
-    #[allow(unused)] // XXX this will be used in the future!
     pub(crate) fn io_state_byte_count(&self) -> ClientIOStateCount<u64> {
         self.io_state_byte_count
     }
@@ -500,15 +499,15 @@ impl DownstairsClient {
         up_state: &UpstairsState,
         can_replay: bool,
     ) {
-        // Clear this Downstair's repair address, and let the YesItsMe set it.
+        // Clear this Downstairs' repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
         // entirely; the repair address could have changed in any of these
         // cases.
         self.repair_addr = None;
 
         // If the upstairs is already active (or trying to go active), then the
-        // downstairs should automatically call PromoteToActive when it reaches
-        // the relevant state.
+        // downstairs should automatically send the PromoteToActive message when
+        // it reaches the relevant state.
         let auto_promote = match up_state {
             UpstairsState::Active | UpstairsState::GoActive(..) => !matches!(
                 self.state,
@@ -1283,10 +1282,6 @@ impl DownstairsClient {
         /*
          * Either we get all the way through the negotiation, or we hit the
          * timeout and exit to retry.
-         *
-         * XXX There are many ways we can handle this, but as we figure out
-         * how the upstairs is notified that a DS is new or moving, or other
-         * things, this way will work. We will revisit when we have more info.
          *
          * The negotiation flow starts as follows, with the value of the
          * negotiated variable on the left:
