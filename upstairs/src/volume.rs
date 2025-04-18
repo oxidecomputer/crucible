@@ -1539,6 +1539,8 @@ impl Volume {
         n_vol: &VolumeConstructionRequest,
         read_only: bool,
     ) -> Result<CompareResult, CrucibleError> {
+        info!(log, "Compare VCRS: from {:?}", o_vol);
+        info!(log, "Compare VCRS:   to {:?}", n_vol);
         match (o_vol, n_vol) {
             (
                 VolumeConstructionRequest::Volume {
@@ -1671,6 +1673,7 @@ impl Volume {
         n_vol: &VolumeConstructionRequest,
         read_only: bool,
     ) -> Result<VCRDelta, CrucibleError> {
+        info!(log, "Compare VCR regions: {:?} to {:?}", o_vol, n_vol);
         // Volumes to compare must all be VolumeConstructionRequest::Region
         let (
             o_sv_block_size,
