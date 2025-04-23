@@ -45,7 +45,8 @@ enum VCRDelta {
     Same,
     /// The newer Region only has a higher generation number.
     Generation,
-    /// The newer Region has higher generation and just one target different.
+    /// The newer Region has just one target different.
+    /// Generation number is >= the current generation.
     Target { old: SocketAddr, new: SocketAddr },
 }
 
@@ -1321,23 +1322,25 @@ impl Volume {
     // The requirements to allow a new VCR are:
     // 1. Only VolumeConstructionRequests::Volume type is supported.
     // 2. Sub volumes must all be VolumeConstructionRequest::Region
-    // 3. Everything must be the same between the two Volumes, except:
-    //    A. The new generation number must be greater than or equal to the old.
-    //    B. The new Volume can have None for read only parent if the
-    //       original had Some(), or it must match the Some().
+    // 3. Everything must be the same between the two Volumes except:
+    //    The new Volume can have None for read only parent if the
+    //    original had Some(), or it must match the Some().
     //
-    //  Specifically for the downstairs target replacement case we also require
+    // Specifically for the migration case.
+    //    A. The new generation number must be greater than to the old.
+    //
+    // Specifically for the downstairs target replacement case we also require
     //  this difference:
-    //    C. Only one CrucibleOpts::target[] is different.
+    //    B. Only one CrucibleOpts::target[] is different.
     //
     // Any other difference between the two volumes is considered a failure.
     //
-    // We return Ok(None) if requirements 1, 2, 3A, 3B are met.  This would
+    // We return Ok(None) if requirements 1, 2, 3A, are met.  This would
     // mean a migration using the old/new VCRs are acceptable.
     //
-    // We return Ok(Some(old_target, new_target)) if requirements 1, 2, 3A,
-    // 3B, and 3C are all met.  This would mean that the VCRs are valid for
-    // a downstairs replacement.
+    // We return Ok(Some(old_target, new_target)) if requirements 1, 2, 3B,
+    // are all met, 3A is not required in this case.  This would mean that the
+    // VCRs are valid for a downstairs replacement.
 
     pub fn compare_vcr_for_migration(
         original: VolumeConstructionRequest,
@@ -1362,7 +1365,6 @@ impl Volume {
             Some((o, n)) => {
                 Ok(ReplacementRequestCheck::Valid { old: o, new: n })
             }
-
             None => Ok(ReplacementRequestCheck::ReplacementMatchesOriginal),
         }
     }
@@ -1372,9 +1374,8 @@ impl Volume {
     /// - Ok(Some(old, new)) if there's a single target difference in one of the
     ///   Region variants, and the replacement argument is a valid replacement
     ///   for the original argument. This also requires that the generation
-    ///   numbers for the replacement VCR's subvolumes are higher than the
-    ///   original VCR's subvolumes. Read-only parent generation numbers are
-    ///   ignored.
+    ///   numbers for the replacement VCR's subvolumes are greater than or
+    ///   equal to the original VCR's subvolumes.
     ///
     /// - Ok(None) if there are no differences between them, but the
     ///   generation number of the subvolumes is higher in the replacement VCR.
@@ -1487,7 +1488,6 @@ impl Volume {
                                     "SubVolumes don't have generation bump"
                                 );
                             }
-                            // XXX Do we care if target.
                             VCRDelta::Generation | VCRDelta::Target { .. } => {}
                         },
                         r => {
@@ -1631,9 +1631,7 @@ impl Volume {
                 VolumeConstructionRequest::Region { .. },
                 VolumeConstructionRequest::Region { .. },
             ) => Ok(CompareResult::Region {
-                delta: Self::compare_vcr_region_for_replacement(
-                    o_vol, n_vol,
-                )?,
+                delta: Self::compare_vcr_region_for_replacement(o_vol, n_vol)?,
             }),
 
             _ => {
@@ -1646,7 +1644,7 @@ impl Volume {
     // VolumeConstructionRequest::Region.  The VCR can be from a sub_volume
     // or a read_only_parent.  The caller is expected to know how to
     // handle the result depending on what it sends us.
-    // Generation numbers can be >= in the new VCR.
+    // New VCR generation numbers must be >= to the original VCR.
     //
     // We return:
     // VCRDelta::Same
@@ -1714,6 +1712,8 @@ impl Volume {
             }
         };
 
+        // IF the two VCRs are identical, then return now.  Otherwise we find
+        // the difference.
         if n_vol == o_vol {
             return Ok(VCRDelta::Same);
         }
@@ -3786,7 +3786,7 @@ mod test {
         Ok(())
     }
 
-    // XXX This can go away as the larger wrapper now does it.
+    // Test that a lower generation number in the new VCR will return error.
     #[test]
     fn test_volume_replace_low_gen() {
         // We need at least two sub_volumes for this test.
@@ -3849,7 +3849,7 @@ mod test {
         };
         let log = csl();
 
-        // Change just the target and gen for one subvolume, but not the others.
+        // Change just a target for one subvolume.
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
 
         let replacement_sub_volumes = (0..sv_count)
@@ -4362,13 +4362,19 @@ mod test {
     // Verify VCR replacement passes with a valid difference in
     // just the read_only_parents.
     // Test with 1, 2, and 3 sub_volumes.
+    // Test with and without a generation number bump.
     fn volume_replace_read_only_parent_ok() {
         for sv in 1..4 {
-            volume_replace_read_only_parent_ok_inner(sv);
+            for gen_bump in [true, false] {
+                volume_replace_read_only_parent_ok_inner(sv, gen_bump);
+            }
         }
     }
 
-    fn volume_replace_read_only_parent_ok_inner(sv_count: usize) {
+    fn volume_replace_read_only_parent_ok_inner(
+        sv_count: usize,
+        gen_bump: bool,
+    ) {
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let rop_id = Uuid::new_v4();
@@ -4411,14 +4417,16 @@ mod test {
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
         rop_opts.target[1] = new_target;
 
-        // Use the same sub-volume, just bump the generation numbers
-        for sv in sub_volumes.iter_mut() {
-            match sv {
-                VolumeConstructionRequest::Region { gen, .. } => {
-                    *gen += 1;
-                }
-                _ => {
-                    panic!("Unsupported VCR");
+        if gen_bump {
+            // Use the same sub-volume, just bump the generation numbers
+            for sv in sub_volumes.iter_mut() {
+                match sv {
+                    VolumeConstructionRequest::Region { gen, .. } => {
+                        *gen += 1;
+                    }
+                    _ => {
+                        panic!("Unsupported VCR");
+                    }
                 }
             }
         }
@@ -5363,25 +5371,13 @@ mod test {
             )),
         };
 
-        // Replace one of the deeper ROP's subvolume targets, and don't bump the
-        // gen
+        // Replace one of the deeper ROP's subvolume targets, for this test
+        // we also don't bump the generation number.
         let mut replacement = original.clone();
         match &mut replacement {
             VolumeConstructionRequest::Volume {
-                sub_volumes,
-                read_only_parent,
-                ..
+                read_only_parent, ..
             } => {
-                match &mut sub_volumes[0] {
-                    VolumeConstructionRequest::Region { gen, .. } => {
-                        *gen += 1;
-                    }
-
-                    _ => {
-                        panic!("how?!");
-                    }
-                }
-
                 let Some(read_only_parent) = read_only_parent.as_mut() else {
                     panic!("how?!");
                 };
@@ -5727,25 +5723,13 @@ mod test {
             )),
         };
 
-        // Replace one of the ROP subvolume targets, and bump the gen of the sub
-        // volume region.
+        // Replace one of the ROP subvolume targets, this time we don't bump
+        // the gen of the sub volume region.
         let mut replacement = original.clone();
         match &mut replacement {
             VolumeConstructionRequest::Volume {
-                sub_volumes,
-                read_only_parent,
-                ..
+                read_only_parent, ..
             } => {
-                match &mut sub_volumes[0] {
-                    VolumeConstructionRequest::Region { gen, .. } => {
-                        *gen += 1;
-                    }
-
-                    _ => {
-                        panic!("how?!");
-                    }
-                }
-
                 let Some(read_only_parent) = read_only_parent.as_mut() else {
                     panic!("how?!");
                 };
