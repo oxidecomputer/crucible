@@ -144,7 +144,6 @@ impl Debug for ReplaceResult {
 
 /// Result of comparing an original volume construction request to a candidate
 /// replacement one.
-#[derive(Debug)]
 pub enum ReplacementRequestCheck {
     /// The replacement was validated, and this variant holds the old downstairs
     /// target and the new one replacing it.
