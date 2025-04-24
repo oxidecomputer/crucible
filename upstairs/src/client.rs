@@ -2158,7 +2158,7 @@ impl From<NegotiationError> for ClientNegotiationFailed {
             | NegotiationError::EncryptionMismatch { .. } => {
                 Self::IncompatibleSettings
             }
-            NegotiationError::GenerationZeroIsIllegal { .. }
+            NegotiationError::GenerationZeroIsIllegal
             | NegotiationError::GenerationNumberTooLow { .. }
             | NegotiationError::UpstairsIdMismatch { .. }
             | NegotiationError::SessionIdMismatch { .. } => {

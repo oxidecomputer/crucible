@@ -135,7 +135,7 @@ impl Debug for ReplaceResult {
             ReplaceResult::Missing => {
                 write!(f, "Missing")
             }
-            ReplaceResult::VcrMatches { .. } => {
+            ReplaceResult::VcrMatches => {
                 write!(f, "VcrMatches")
             }
         }

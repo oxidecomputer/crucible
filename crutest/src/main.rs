@@ -3913,7 +3913,7 @@ async fn dep_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
                  */
                 let mut data = BytesMut::with_capacity(block_size as usize);
                 let seed = ((my_offset % 254) + 1) as u8;
-                data.extend(std::iter::repeat(seed).take(block_size as usize));
+                data.extend(std::iter::repeat_n(seed, block_size as usize));
 
                 println!(
                     "Loop:{} send write {} @ offset:{}  len:{}",
