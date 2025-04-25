@@ -65,7 +65,7 @@ impl<T, E> BlockOpWaiter<T, E> {
     ///
     /// Returns `None` if the other side drops without a reply
     pub async fn wait_raw(self) -> Option<Result<T, E>> {
-        (self.recv.await).ok()
+        self.recv.await.ok()
     }
 }
 
