@@ -1322,25 +1322,25 @@ impl Volume {
     // The requirements to allow a new VCR are:
     // 1. Only VolumeConstructionRequests::Volume type is supported.
     // 2. Sub volumes must all be VolumeConstructionRequest::Region
-    // 3. Everything must be the same between the two Volumes except:
-    //    The new Volume can have None for read only parent if the
-    //    original had Some(), or it must match the Some().
+    // 3. The new Volume can have None for read only parent if the original
+    //    had Some(), or it must match the Some().
+    // 4. Everything else must be the same between the two Volumes except:
+    //    For the migration case this is a requirement.
+    //        A. The new generation number must be greater than to the old.
     //
-    // Specifically for the migration case.
-    //    A. The new generation number must be greater than to the old.
-    //
-    // Specifically for the downstairs target replacement case we also require
-    //  this difference:
-    //    B. Only one CrucibleOpts::target[] is different.
+    //    For the downstairs target replacement we require that:
+    //        B. Only one CrucibleOpts::target[] is different.
+    //        C. The new generation number is greater or equal to the old.
     //
     // Any other difference between the two volumes is considered a failure.
     //
-    // We return Ok(None) if requirements 1, 2, 3A, are met.  This would
-    // mean a migration using the old/new VCRs are acceptable.
+    // We return Ok(None) if requirements 1, 2, 3, 4A, are met.  4B must not be
+    // true for this check.  Acceptance here would mean a migration using the
+    // provided old/new VCRs are acceptable.
     //
-    // We return Ok(Some(old_target, new_target)) if requirements 1, 2, 3B,
-    // are all met, 3A is not required in this case.  This would mean that the
-    // VCRs are valid for a downstairs replacement.
+    // We return Ok(Some(old_target, new_target)) if the requirements in
+    // 1, 2, 3, 4B, and 4C are all met.  Acceptance here would mean that the
+    // provided VCRs are valid for a downstairs replacement.
 
     pub fn compare_vcr_for_migration(
         original: VolumeConstructionRequest,
@@ -1476,20 +1476,10 @@ impl Volume {
                 };
 
                 // We know we have one target that is different.  Verify that
-                // all the rest of the sub_volumes have a generation number
-                // difference.
+                // is the only difference.
                 for sc in sub_compares {
                     match sc {
-                        CompareResult::Region { delta } => match delta {
-                            VCRDelta::Same => {
-                                // SV targets are unchanged.
-                                info!(
-                                    log,
-                                    "SubVolumes don't have generation bump"
-                                );
-                            }
-                            VCRDelta::Generation | VCRDelta::Target { .. } => {}
-                        },
+                        CompareResult::Region { .. } => {}
                         r => {
                             crucible_bail!(
                                 ReplaceRequestInvalid,
@@ -1536,8 +1526,6 @@ impl Volume {
         o_vol: &VolumeConstructionRequest,
         n_vol: &VolumeConstructionRequest,
     ) -> Result<CompareResult, CrucibleError> {
-        info!(log, "Compare VCRS: from {:?}", o_vol);
-        info!(log, "Compare VCRS:   to {:?}", n_vol);
         match (o_vol, n_vol) {
             (
                 VolumeConstructionRequest::Volume {
@@ -1652,9 +1640,6 @@ impl Volume {
     //
     // VCRDelta::Generation
     // If it's just a generation number increase in the new VCR.
-    //
-    // VCRDelta::NewMissing
-    // If the new VCR is missing (None).
     //
     // VCRDelta::Target(old_target, new_target)
     // If we have one and only one target is different in the new VCR.
