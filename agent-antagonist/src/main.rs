@@ -740,7 +740,7 @@ async fn main() -> Result<()> {
                     &["-s", "agent:default", "listprop", "config/listen_addr"],
                 )?;
                 let listen_addr =
-                    listen_addr.split(' ').last().unwrap().to_string();
+                    listen_addr.split(' ').next_back().unwrap().to_string();
                 info!(log, "using listen_addr {:?}", listen_addr);
 
                 info!(log, "finding listen_port from smf");
@@ -750,7 +750,7 @@ async fn main() -> Result<()> {
                     &["-s", "agent:default", "listprop", "config/listen_port"],
                 )?;
                 let listen_port =
-                    listen_port.split(' ').last().unwrap().to_string();
+                    listen_port.split(' ').next_back().unwrap().to_string();
                 info!(log, "using listen_port {:?}", listen_port);
 
                 format!("[{}]:{}", listen_addr, listen_port).parse()?
@@ -766,7 +766,8 @@ async fn main() -> Result<()> {
                     "/usr/sbin/svccfg",
                     &["-s", "agent:default", "listprop", "config/dataset"],
                 )?;
-                let dataset = dataset.split(' ').last().unwrap().to_string();
+                let dataset =
+                    dataset.split(' ').next_back().unwrap().to_string();
                 info!(log, "using dataset {:?}", dataset);
                 dataset
             };

@@ -1804,7 +1804,7 @@ impl Upstairs {
             | Message::Write { .. }
             | Message::WriteUnwritten { .. }
             | Message::ReadRequest { .. }
-            | Message::RegionInfoPlease { .. }
+            | Message::RegionInfoPlease
             | Message::ExtentLiveFlushClose { .. }
             | Message::ExtentLiveClose { .. }
             | Message::ExtentLiveRepair { .. }
