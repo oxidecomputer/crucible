@@ -916,6 +916,7 @@ dependencies = [
  "crucible-workspace-hack",
  "dropshot",
  "expectorate",
+ "fakedata_generator",
  "futures",
  "futures-core",
  "humantime",
@@ -1880,6 +1881,18 @@ dependencies = [
  "console",
  "newline-converter",
  "similar",
+]
+
+[[package]]
+name = "fakedata_generator"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57b82fba4b485b819fde74012109688a9d2bd4ce7b22583ac12c9fa239f74a02"
+dependencies = [
+ "passt",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4182,6 +4195,12 @@ dependencies = [
  "structmeta",
  "syn 2.0.99",
 ]
+
+[[package]]
+name = "passt"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13242a5ce97f39a8095d03c8b273e91d09f2690c0b7d69a2af844941115bab24"
 
 [[package]]
 name = "password-hash"
