@@ -995,6 +995,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "crucible-workspace-hack",
+ "omicron-common",
  "percent-encoding",
  "progenitor 0.10.0",
  "reqwest",
