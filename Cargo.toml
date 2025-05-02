@@ -72,8 +72,8 @@ openapiv3 = "2.0.0"
 opentelemetry = "0.29.1"
 opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
-progenitor = "0.9.1"
-progenitor-client = "0.9.1"
+progenitor = "0.10.0"
+progenitor-client = "0.10.0"
 proptest = "1.6.0"
 rayon = "1.10.0"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
