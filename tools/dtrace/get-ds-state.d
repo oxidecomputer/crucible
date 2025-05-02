@@ -24,6 +24,7 @@ inline string short_state[string ss] =
 
 crucible_upstairs*:::up-status
 {
+    my_id = json(copyinstr(arg1), "ok.upstairs_id");
     my_sesh = json(copyinstr(arg1), "ok.session_id");
 
     this->ds0state = json(copyinstr(arg1), "ok.ds_state[0].type");
@@ -35,8 +36,9 @@ crucible_upstairs*:::up-status
     this->ds2state = json(copyinstr(arg1), "ok.ds_state[2].type");
     this->d2 = short_state[this->ds2state];
 
-    printf("%6d %8s %3s %3s %3s\n",
+    printf("%6d %8s %8s %3s %3s %3s\n",
         pid,
+        substr(my_id, 0, 8),
         substr(my_sesh, 0, 8),
         this->d0,
         this->d1,
