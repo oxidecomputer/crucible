@@ -770,7 +770,8 @@ impl Upstairs {
     /// Fires the `up-status` DTrace probe
     fn on_stat_update(&self) {
         cdt::up__status!(|| {
-            let arg = Arg {
+            let arg = DtraceInfo {
+                upstairs_id: self.cfg.upstairs_id.to_string(),
                 session_id: self.cfg.session_id.to_string(),
                 up_count: self.downstairs.gw_active.len() as u32,
                 up_counters: self.counters,

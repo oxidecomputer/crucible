@@ -554,8 +554,9 @@ alan@cat:crucible$ pfexec dtrace -s upstairs_count.d
            repair            repair            repair     1    1    1    0    0    0    0    0    0    0    0    0
 ```
 ## upstairs_raw.d
-This is a dtrace script that just dumps the `Arg` structure in json format.
-The output of this can be sent to other commands for additional processing.
+This is a dtrace script that just dumps the `DtraceInfo` structure in json
+format.  The output of this can be sent to other commands for additional
+processing.
 
 ## tracegw.d
 This is a dtrace example script for counting IOs into and out of

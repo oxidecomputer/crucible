@@ -23,7 +23,7 @@ dtrace:::BEGIN
 dtrace:::BEGIN, tick-1s
 /show > 20/
 {
-    printf("%8s ", "SESSION");
+    printf("%8s %8s ", "UUID", "SESSION");
     printf("%3s %3s %3s", "DS0", "DS1", "DS2");
     printf(" %5s %5s %10s %6s", "UPW", "DSW", "NEXT_JOB", "DELTA");
     printf(" %10s", "WRITE_BO");
@@ -70,6 +70,9 @@ crucible_upstairs*:::up-status
     this->ds2state = json(copyinstr(arg1), "ok.ds_state[2].type");
     this->d2 = short_state[this->ds2state];
 
+    this->full_upstairs_id = json(copyinstr(arg1), "ok.upstairs_id");
+    this->upstairs_id = substr(this->full_upstairs_id, 0, 8);
+
     this->full_session_id = json(copyinstr(arg1), "ok.session_id");
     this->session_id = substr(this->full_session_id, 0, 8);
 
@@ -84,8 +87,9 @@ crucible_upstairs*:::up-status
      * I'm not very happy about this, but if we don't print it all on one
      * line, then multiple sessions will clobber each others output.
      */
-    printf("%8s %3s %3s %3s %5s %5s %10s %6d %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
+    printf("%8s %8s %3s %3s %3s %5s %5s %10s %6d %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
 
+    this->upstairs_id,
     this->session_id,
     /*
      * State for the three downstairs

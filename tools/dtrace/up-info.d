@@ -26,7 +26,7 @@ dtrace:::BEGIN,
 tick-1s
 /show > 20/
 {
-    printf("%5s %8s ", "PID", "SESSION");
+    printf("%5s %8s %8s ", "PID", "UUID", "SESSION");
     printf("%3s %3s %3s", "DS0", "DS1", "DS2");
     printf(" %10s %6s %4s", "NEXT_JOB", "DELTA", "CONN");
     printf(" %5s %5s", "ELR", "ELC");
@@ -74,6 +74,9 @@ crucible_upstairs*:::up-status
     this->ds2state = json(copyinstr(arg1), "ok.ds_state[2].type");
     this->d2 = short_state[this->ds2state];
 
+    this->full_upstairs_id = json(copyinstr(arg1), "ok.upstairs_id");
+    this->upstairs_id = substr(this->full_upstairs_id, 0, 8);
+
     this->full_session_id = json(copyinstr(arg1), "ok.session_id");
     this->session_id = substr(this->full_session_id, 0, 8);
 
@@ -105,8 +108,9 @@ crucible_upstairs*:::up-status
         strtoll(json(copyinstr(arg1), "ok.ds_extents_confirmed[1]")) +
         strtoll(json(copyinstr(arg1), "ok.ds_extents_confirmed[2]"));
 
-    printf("%5d %8s %3s %3s %3s %10d %6d %4d %5d %5d %5s %5s\n",
+    printf("%5d %8s %8s %3s %3s %3s %10d %6d %4d %5d %5d %5s %5s\n",
         pid,
+        this->upstairs_id,
         this->session_id,
         this->d0,
         this->d1,

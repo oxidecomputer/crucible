@@ -321,8 +321,8 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
 /// volume__*__done: An IO is completed at the volume layer.
 #[usdt::provider(provider = "crucible_upstairs")]
 mod cdt {
-    use crate::Arg;
-    fn up__status(_: String, arg: Arg) {}
+    use crate::DtraceInfo;
+    fn up__status(_: String, arg: DtraceInfo) {}
     fn ds__ping__sent(_: u64, _: u8) {}
     fn up__apply(_: u64) {}
     fn up__action_downstairs(_: u64) {}
@@ -1508,7 +1508,9 @@ pub(crate) enum BlockOp {
  * Stat counters struct used by DTrace
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Arg {
+pub struct DtraceInfo {
+    /// Upstairs UUID
+    pub upstairs_id: String,
     /// Upstairs session UUID
     pub session_id: String,
     /// Jobs on the upstairs guest work queue.
