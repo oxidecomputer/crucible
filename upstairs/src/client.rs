@@ -783,6 +783,14 @@ impl DownstairsClient {
                     mode: ConnectionMode::New,
                 };
             }
+            DsState::Stopping(reason) => {
+                // We're in the process of stopping, so we can't honor an
+                // activation request. Log this event but don't panic.
+                info!(
+                    self.log,
+                    "ignoring activation request while client is in Stopping({reason:?}) state"
+                );
+            }
             s => panic!("invalid state for set_active_request: {s:?}"),
         }
     }
@@ -2033,6 +2041,39 @@ impl EnqueueResult {
             EnqueueResult::Send | EnqueueResult::Hold => IOState::InProgress,
             EnqueueResult::Skip => IOState::Skipped,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use slog::Discard;
+
+    #[test]
+    fn test_set_active_request_while_replacing() {
+        let mut client = DownstairsClient::new(
+            ClientId::new(0),
+            Arc::new(UpstairsConfig {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                generation: AtomicU64::new(1),
+                read_only: false,
+                encryption_context: None,
+            }),
+            None,
+            ClientIOLimits::new(100, 1024 * 1024),
+            Logger::root(Discard, o!()),
+            None,
+        );
+
+        let upstairs_state = UpstairsState::Initializing;
+        client.checked_state_transition(
+            &upstairs_state,
+            DsState::Stopping(ClientStopReason::Replacing),
+        );
+
+        // This should not panic when a client is in Stopping(Replacing) state
+        client.set_active_request();
     }
 }
 
