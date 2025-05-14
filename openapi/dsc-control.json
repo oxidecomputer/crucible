@@ -30,6 +30,31 @@
         }
       }
     },
+    "/allstopped": {
+      "get": {
+        "summary": "Return true if all downstairs are stopped",
+        "operationId": "dsc_all_stopped",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Boolean",
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/disablerestart/all": {
       "post": {
         "summary": "Disable automatic restart on all downstairs",
