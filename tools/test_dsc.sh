@@ -266,26 +266,13 @@ fi
 # downstairs should automatically restart.
 sleep 4
 echo "Verify all ds are stopped"
-for cid in {0..2}; do
-    retry=1
-    # Loop until we find exit, or have exhausted our retry count
-	while :; do
-		state=$(curl -s "${dsc_url}"state/cid/0 | tr -d \")
-		if [[ "$state" == "exit" ]]; then
-			echo "cid $cid in $state after $retry attempt(s)"
-			break;
-		fi
-		echo "cid $cid Failed to stop: $state, try:$retry" | tee -a "$fail_log"
-		if [[ "$retry" -ge 10 ]]; then
-			echo "cid $cid Failed to stop: $state, abort" | tee -a "$fail_log"
-			(( res += 1 ))
-			exit 1
-			break;
-		fi
-		(( retry += 1 ))
-		sleep 3
-	done
-done
+all_stopped_check=$("${dsc}" cmd all-stopped)
+if [[ "$all_stopped_check" != "true" ]]; then
+    echo "Failed: all-stopped returned $all_stopped_check" | tee -a "$fail_log"
+    (( res += 1 ))
+else
+    echo "All downstairs are stopped"
+fi
 
 echo "Start up ds 1 manually"
 hc=$(curl ${curl_flags} -X POST -H "Content-Type: application/json" -w "%{http_code}\n" "${dsc_url}"start/cid/1)

@@ -10,6 +10,8 @@ use anyhow::Result;
 pub enum ClientCommand {
     /// Returns true if all downstairs are running
     AllRunning,
+    /// Returns true if all downstairs are stopped
+    AllStopped,
     /// Disable random stopping of downstairs
     DisableRandomStop,
     /// Disable auto restart on the given downstairs client ID
@@ -89,6 +91,10 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
     match cmd {
         ClientCommand::AllRunning => {
             let res = dsc.dsc_all_running().await.unwrap();
+            println!("{:?}", res);
+        }
+        ClientCommand::AllStopped => {
+            let res = dsc.dsc_all_stopped().await.unwrap();
             println!("{:?}", res);
         }
         ClientCommand::DisableRandomStop => {
