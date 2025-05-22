@@ -59,12 +59,12 @@ if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]];
 fi
 
 loops=5
-region_sets=1
+region_sets=${REGION_SETS:-1}
 
 usage () {
     echo "Usage: $0 [-l #] [-r #]" >&2
     echo " -l loops       Number of test loops to perform (default 5)" >&2
-    echo " -r region_sets Number of region sets to create (default 1)" >&2
+    echo ' -r region_sets Number of region sets to create (default 1, or $REGION_SETS)' >&2
 }
 
 while getopts 'l:r:' opt; do
@@ -149,6 +149,7 @@ ${dsc} cmd shutdown
 wait "$dsc_pid"
 
 echo "$(date) Test ends with $result" | tee -a "$test_log"
+echo "copied log"
 
 if [[ $result -eq 0 ]]; then
     # Cleanup

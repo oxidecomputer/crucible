@@ -17,6 +17,11 @@ export BINDIR=${BINDIR:-$ROOT/target/release}
 echo "Nightly starts at $(date)" | tee "$output_file"
 echo "Running on $(git log -1 --no-color | head -20)" | tee -a "$output_file"
 echo "" >> "$output_file"
+echo "Environment settings are (Some may be unset):" | tee -a "$output_file"
+echo "BINDIR is: $BINDIR" | tee -a "$output_file"
+echo "REGION_ROOT is: $REGION_ROOT" | tee -a "$output_file"
+echo "WORK_ROOT is: $WORK_ROOT" | tee -a "$output_file"
+echo "REGION_SETS is: $REGION_SETS" | tee -a "$output_file"
 echo "$(date) hammer start" >> "$output_file"
 banner hammer
 banner loop
@@ -93,7 +98,7 @@ sleep 1
 banner replace
 banner special
 echo "$(date) test_replace_special start" >> "$output_file"
-./tools/test_replace_special.sh -l 30
+./tools/test_replace_special.sh -l 50
 res=$?
 if [[ "$res" -eq 0 ]]; then
     echo "$(date) test_replace_special pass" >> "$output_file"
