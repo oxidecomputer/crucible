@@ -4029,7 +4029,8 @@ pub(crate) mod test {
         );
         let mode = ConnectionMode::Faulted;
         for state in [
-            NegotiationState::Start { auto_promote: true },
+            NegotiationState::Start,
+            NegotiationState::WaitActive,
             NegotiationState::WaitForPromote,
             NegotiationState::WaitForRegionInfo,
             NegotiationState::GetExtentVersions,
