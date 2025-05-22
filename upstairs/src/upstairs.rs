@@ -1744,20 +1744,6 @@ impl Upstairs {
                         }
                     }
                     Ok(NegotiationResult::NotDone) => (),
-                    Ok(NegotiationResult::WaitActive) => {
-                        match self.state {
-                            UpstairsState::Active
-                            | UpstairsState::GoActive(..) => {
-                                self.downstairs.clients[client_id]
-                                    .promote_to_active()
-                            }
-                            UpstairsState::Initializing
-                            | UpstairsState::Disabled
-                            | UpstairsState::Deactivating(..) => {
-                                // don't do anything here
-                            }
-                        }
-                    }
                     Ok(NegotiationResult::WaitQuorum) => {
                         // Copy the region definition into the Downstairs
                         self.downstairs.set_ddef(self.ddef.get_def().unwrap());
@@ -2303,7 +2289,6 @@ pub(crate) mod test {
         }));
         let mode = ConnectionMode::Faulted;
         for state in [
-            NegotiationState::WaitActive,
             NegotiationState::WaitForPromote,
             NegotiationState::WaitForRegionInfo,
             NegotiationState::GetExtentVersions,
@@ -2322,7 +2307,6 @@ pub(crate) mod test {
         let mut up = Upstairs::test_default(None, false);
         for cid in [ClientId::new(0), ClientId::new(1)] {
             for state in [
-                NegotiationState::WaitActive,
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
@@ -2352,7 +2336,6 @@ pub(crate) mod test {
         for cid in ClientId::iter() {
             let mut up = Upstairs::test_default(None, true);
             for state in [
-                NegotiationState::WaitActive,
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
@@ -2381,7 +2364,6 @@ pub(crate) mod test {
         let mut up = Upstairs::test_default(None, true);
         for cid in [ClientId::new(0), ClientId::new(1)] {
             for state in [
-                NegotiationState::WaitActive,
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
