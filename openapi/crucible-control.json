@@ -408,7 +408,7 @@
         "description": "Tracks client negotiation progress\n\nThe exact path through negotiation depends on the [`ConnectionMode`].\n\nThere are three main paths, shown below:\n\n```text ┌───────┐ │ Start ├────────┐ └───┬───┘        │ │            │ ┌─────▼──────┐     │ │ WaitActive │     │ auto-promote └─────┬──────┘     │ │            │ ┌───────▼────────┐   │ │ WaitForPromote ◄───┘ └───────┬────────┘ │ ┌────────▼──────────┐ │ WaitForRegionInfo │ └──┬──────────────┬─┘ Offline │              │ New / Faulted / Replaced (replay) │         ┌────▼────────────┐ │         │GetExtentVersions│ │         └─┬─────────────┬─┘ │           │ New         │ Faulted / Replaced │    ┌──────▼───┐    ┌────▼──────────┐ │    │WaitQuorum│    │LiveRepairReady│ │    └────┬─────┘    └────┬──────────┘ │         │               │ │    ┌────▼────┐          │ │    │Reconcile│          │ │    └────┬────┘          │ │         │               │ │     ┌───▼──┐            │ └─────► Done ◄────────────┘ └──────┘ ```\n\n`Done` isn't actually present in the state machine; it's indicated by returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].",
         "oneOf": [
           {
-            "description": "Initial state, waiting to hear `YesItsMe` from the client\n\nOnce this message is heard, transitions to either `WaitActive` (if `auto_promote` is `false`) or `WaitQuorum` (if `auto_promote` is `true`)",
+            "description": "Initial state, waiting to hear `YesItsMe` from the client\n\nOnce this message is heard, transitions to either `WaitActive` and wait for the Upstairs to decide whether to promote.",
             "type": "object",
             "properties": {
               "type": {
@@ -416,22 +416,10 @@
                 "enum": [
                   "start"
                 ]
-              },
-              "value": {
-                "type": "object",
-                "properties": {
-                  "auto_promote": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "auto_promote"
-                ]
               }
             },
             "required": [
-              "type",
-              "value"
+              "type"
             ]
           },
           {
