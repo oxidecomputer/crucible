@@ -202,6 +202,7 @@ impl CreateRegion {
     Clone,
     PartialOrd,
     Ord,
+    Hash,
 )]
 pub struct RegionId(pub String);
 
