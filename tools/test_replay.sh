@@ -60,7 +60,7 @@ region_sets=${REGION_SETS:-1}
 usage () {
     echo "Usage: $0 [-l #]]" >&2
     echo " -l loops     Number of times to cause a replay." >&2
-    echo " -r regions   Number of region sets to create (default 1)" >&2
+    echo ' -r regions   Number of region sets to create (default 1, or $REGION_SETS)' >&2
 }
 
 while getopts 'l:r:' opt; do
