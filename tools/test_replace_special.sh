@@ -59,7 +59,7 @@ if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]];
 fi
 
 loops=5
-region_sets=1
+region_sets=${REGION_SETS:-1}
 
 usage () {
     echo "Usage: $0 [-l #] [-r #]" >&2
@@ -149,6 +149,8 @@ ${dsc} cmd shutdown
 wait "$dsc_pid"
 
 echo "$(date) Test ends with $result" | tee -a "$test_log"
+cp /tmp/test_replace_special/test_replace_special.log ~
+echo "copied log"
 
 if [[ $result -eq 0 ]]; then
     # Cleanup

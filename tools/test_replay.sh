@@ -55,7 +55,7 @@ if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]];
 fi
 
 loops=30
-region_sets=1
+region_sets=${REGION_SETS:-1}
 
 usage () {
     echo "Usage: $0 [-l #]]" >&2
