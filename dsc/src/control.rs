@@ -19,6 +19,7 @@ use super::*;
 pub(crate) fn build_api() -> ApiDescription<Arc<DownstairsControl>> {
     let mut api = ApiDescription::new();
     api.register(dsc_all_running).unwrap();
+    api.register(dsc_all_stopped).unwrap();
     api.register(dsc_get_ds_state).unwrap();
     api.register(dsc_get_pid).unwrap();
     api.register(dsc_get_port).unwrap();
@@ -202,6 +203,22 @@ async fn dsc_all_running(
     let api_context = rqctx.context();
 
     let all_state = api_context.dsci.all_running().await;
+    Ok(HttpResponseOk(all_state))
+}
+
+/**
+ * Return true if all downstairs are stopped
+ */
+#[endpoint {
+    method = GET,
+    path = "/allstopped",
+}]
+async fn dsc_all_stopped(
+    rqctx: RequestContext<Arc<DownstairsControl>>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let api_context = rqctx.context();
+
+    let all_state = api_context.dsci.all_stopped().await;
     Ok(HttpResponseOk(all_state))
 }
 
