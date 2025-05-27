@@ -26,7 +26,7 @@ use crate::{
     RawWrite, ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
     SnapshotDetails, WorkSummary,
 };
-use crucible_common::{BlockIndex, BlockOffset, ExtentId, NegotiationError};
+use crucible_common::{BlockIndex, ExtentId, NegotiationError};
 use crucible_protocol::WriteHeader;
 
 use ringbuffer::RingBuffer;
@@ -1510,8 +1510,7 @@ impl Downstairs {
 
         let aread = IOop::Read {
             dependencies,
-            start_eid: ExtentId(0),
-            start_offset: BlockOffset(7),
+            start_block: BlockIndex(7),
             count: 1,
             block_size: 512,
         };
@@ -1565,25 +1564,17 @@ impl Downstairs {
 
         // TODO: can anyone actually give us an empty write?
         let start = blocks.start().unwrap_or(BlockIndex(0));
-
-        // XXX change IOop to take `BlockIndex` instead?
-        let extent_size = self.ddef.unwrap().extent_size().value;
-        let start_eid = ExtentId((start.0 / extent_size) as u32);
-        let start_offset = BlockOffset(start.0 % extent_size);
-
         let awrite = if is_write_unwritten {
             IOop::WriteUnwritten {
                 dependencies,
-                start_eid,
-                start_offset,
+                start_block: start,
                 data: write.data.freeze(),
                 blocks: write.blocks,
             }
         } else {
             IOop::Write {
                 dependencies,
-                start_eid,
-                start_offset,
+                start_block: start,
                 data: write.data.freeze(),
                 blocks: write.blocks,
             }
@@ -2164,16 +2155,9 @@ impl Downstairs {
         // TODO: can anyone actually give us an empty write?
         let start = blocks.start().unwrap_or(BlockIndex(0));
         let ddef = self.ddef.unwrap();
-
-        // XXX change IOop to take `BlockIndex` instead?
-        let extent_size = ddef.extent_size().value;
-        let start_eid = ExtentId((start.0 / extent_size) as u32);
-        let start_offset = BlockOffset(start.0 % extent_size);
-
         let aread = IOop::Read {
             dependencies,
-            start_eid,
-            start_offset,
+            start_block: start,
             count: blocks.blocks().len() as u64,
             block_size: ddef.block_size(),
         };
@@ -2267,7 +2251,10 @@ impl Downstairs {
             let r = match client.should_send() {
                 Ok(r) => r,
                 Err(ShouldSendError::InLiveRepair) => {
-                    if io.send_io_live_repair(last_repair_extent) {
+                    if io.send_io_live_repair(
+                        last_repair_extent,
+                        self.ddef.as_ref().unwrap(),
+                    ) {
                         EnqueueResult::Send
                     } else {
                         EnqueueResult::Skip
@@ -2320,9 +2307,6 @@ impl Downstairs {
 
     /// Sends the given job to the given client
     fn send(&mut self, ds_id: JobId, io: IOop, client_id: ClientId) {
-        let def = self.ddef.unwrap();
-        let blocks_per_extent = def.extent_size().value;
-
         let job = self.clients[client_id].prune_deps(
             ds_id,
             io,
@@ -2331,8 +2315,7 @@ impl Downstairs {
         let message = match job {
             IOop::Write {
                 dependencies,
-                start_eid,
-                start_offset,
+                start_block,
                 blocks,
                 data,
             } => {
@@ -2343,18 +2326,14 @@ impl Downstairs {
                         session_id: self.cfg.session_id,
                         job_id: ds_id,
                         dependencies,
-                        start: BlockIndex(
-                            start_eid.0 as u64 * blocks_per_extent
-                                + start_offset.0,
-                        ),
+                        start: start_block,
                         contexts: blocks,
                     },
                     data,
                 }
             }
             IOop::WriteUnwritten {
-                start_eid,
-                start_offset,
+                start_block,
                 blocks,
                 dependencies,
                 data,
@@ -2369,10 +2348,7 @@ impl Downstairs {
                         session_id: self.cfg.session_id,
                         job_id: ds_id,
                         dependencies,
-                        start: BlockIndex(
-                            start_eid.0 as u64 * blocks_per_extent
-                                + start_offset.0,
-                        ),
+                        start: start_block,
                         contexts: blocks,
                     },
                     data,
@@ -2408,8 +2384,7 @@ impl Downstairs {
             }
             IOop::Read {
                 dependencies,
-                start_eid,
-                start_offset,
+                start_block,
                 count,
                 ..
             } => {
@@ -2419,9 +2394,7 @@ impl Downstairs {
                     session_id: self.cfg.session_id,
                     job_id: ds_id,
                     dependencies,
-                    start: BlockIndex(
-                        start_eid.0 as u64 * blocks_per_extent + start_offset.0,
-                    ),
+                    start: start_block,
                     count,
                 }
             }
@@ -3206,9 +3179,6 @@ impl Downstairs {
                         // processing code work.
                         cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
                         (upstairs_id, session_id, job_id, Err(error), None)
-
-                        // XXX return Ok(()) here to make the upstairs stuck in
-                        // test_error_during_live_repair_no_halt
                     } else {
                         return Ok(());
                     }
@@ -3544,7 +3514,7 @@ impl Downstairs {
     fn submit_test_write_block(
         &mut self,
         eid: ExtentId,
-        block: BlockOffset,
+        block: crucible_common::BlockOffset,
         is_write_unwritten: bool,
     ) -> JobId {
         let extent_size = self.ddef.unwrap().extent_size().value;
@@ -3597,7 +3567,7 @@ impl Downstairs {
     fn submit_read_block(
         &mut self,
         eid: ExtentId,
-        block: BlockOffset,
+        block: crucible_common::BlockOffset,
     ) -> JobId {
         let extent_size = self.ddef.unwrap().extent_size().value;
         let block = BlockIndex(u64::from(eid.0) * extent_size + block.0);

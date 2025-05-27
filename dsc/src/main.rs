@@ -715,6 +715,19 @@ impl DscInfo {
         true
     }
 
+    async fn all_stopped(&self) -> bool {
+        let rs = self.rs.lock().await;
+        for state in rs.ds_state.iter() {
+            if *state == DownstairsState::Running
+                || *state == DownstairsState::Starting
+                || *state == DownstairsState::Stopping
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     async fn get_ds_state(&self, client_id: usize) -> Result<DownstairsState> {
         let rs = self.rs.lock().await;
         if rs.ds_state.len() <= client_id {

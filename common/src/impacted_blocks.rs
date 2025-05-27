@@ -619,10 +619,8 @@ mod test {
             ImpactedBlocks::new(BlockIndex(start_block), BlockIndex(end_block));
 
         // Generate reference data
-        let expected_addresses: Vec<BlockIndex> = (start_block..=end_block)
-            .into_iter()
-            .map(|b| BlockIndex(b))
-            .collect();
+        let expected_addresses: Vec<BlockIndex> =
+            (start_block..=end_block).map(BlockIndex).collect();
 
         prop_assert_eq!(
             iblocks.blocks().collect::<Vec<_>>(),

@@ -7,10 +7,12 @@
 
 crucible_upstairs*:::up-status
 {
+    my_id = json(copyinstr(arg1), "ok.upstairs_id");
     my_sesh = json(copyinstr(arg1), "ok.session_id");
 
-    printf("%6d %8s %s %s %s %s %s %s\n",
+    printf("%6d %8s %8s %s %s %s %s %s %s\n",
         pid,
+        substr(my_id, 0, 8),
         substr(my_sesh, 0, 8),
         json(copyinstr(arg1), "ok.ds_live_repair_completed[0]"),
         json(copyinstr(arg1), "ok.ds_live_repair_completed[1]"),

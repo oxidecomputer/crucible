@@ -356,7 +356,6 @@ impl DownstairsClient {
     }
 
     /// Returns the number of bytes associated with each IO state
-    #[allow(unused)] // XXX this will be used in the future!
     pub(crate) fn io_state_byte_count(&self) -> ClientIOStateCount<u64> {
         self.io_state_byte_count
     }
@@ -500,15 +499,15 @@ impl DownstairsClient {
         up_state: &UpstairsState,
         can_replay: bool,
     ) {
-        // Clear this Downstair's repair address, and let the YesItsMe set it.
+        // Clear this Downstairs' repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
         // entirely; the repair address could have changed in any of these
         // cases.
         self.repair_addr = None;
 
         // If the upstairs is already active (or trying to go active), then the
-        // downstairs should automatically call PromoteToActive when it reaches
-        // the relevant state.
+        // downstairs should automatically send the PromoteToActive message when
+        // it reaches the relevant state.
         let auto_promote = match up_state {
             UpstairsState::Active | UpstairsState::GoActive(..) => !matches!(
                 self.state,
@@ -783,6 +782,37 @@ impl DownstairsClient {
                     state: NegotiationState::WaitForPromote,
                     mode: ConnectionMode::New,
                 };
+            }
+            // This client is currently being stopped to be replaced. If an activation
+            // request (from `UpstairsState::GoActive`) arrives now, we cannot
+            // process it immediately and must avoid panicking.
+            //
+            // This is safe due to the following recovery path:
+            // 1. The client will complete its stopping sequence.
+            // 2. `DownstairsClient::reinitialize` will be called.
+            // 3. `reinitialize` inspects the current `UpstairsState`:
+            //    - If `UpstairsState` is `GoActive` or `Active` at the time of
+            //      `reinitialize`, then `auto_promote = true` is set for the
+            //      new connection. This ensures the client attempts to activate
+            //      upon reconnecting.
+            //    - If `UpstairsState` is not `GoActive` at that specific moment
+            //      (e.g., if this client is lagging or the `GoActive` call hasn't
+            //      been processed for it yet), `auto_promote` might be `false`.
+            //      However, the `set_active_request` method (this very method)
+            //      will be called again for this client once it's in a suitable
+            //      `Connecting` state (like `Start { auto_promote: false }` or
+            //      `WaitActive`). At that point, this method will correctly
+            //      set `auto_promote = true` or send `PromoteToActive` directly.
+            //
+            // In essence, the activation request isn't lost; its processing is deferred
+            // until the client is in a state capable of handling it, ensuring that
+            // region replacement before overall volume activation is supported.
+            DsState::Stopping(ClientStopReason::Replacing) => {
+                info!(
+                    self.log,
+                    "ignoring activation request while client is in Stopping(ClientStopReason::Replacing) state; \
+                     activation will be handled post-reinitialization"
+                );
             }
             s => panic!("invalid state for set_active_request: {s:?}"),
         }
@@ -1283,10 +1313,6 @@ impl DownstairsClient {
         /*
          * Either we get all the way through the negotiation, or we hit the
          * timeout and exit to retry.
-         *
-         * XXX There are many ways we can handle this, but as we figure out
-         * how the upstairs is notified that a DS is new or moving, or other
-         * things, this way will work. We will revisit when we have more info.
          *
          * The negotiation flow starts as follows, with the value of the
          * negotiated variable on the left:
@@ -2041,6 +2067,39 @@ impl EnqueueResult {
     }
 }
 
+#[cfg(test)]
+mod test {
+    use super::*;
+    use slog::Discard;
+
+    #[test]
+    fn test_set_active_request_while_replacing() {
+        let mut client = DownstairsClient::new(
+            ClientId::new(0),
+            Arc::new(UpstairsConfig {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                generation: AtomicU64::new(1),
+                read_only: false,
+                encryption_context: None,
+            }),
+            None,
+            ClientIOLimits::new(100, 1024 * 1024),
+            Logger::root(Discard, o!()),
+            None,
+        );
+
+        let upstairs_state = UpstairsState::Initializing;
+        client.checked_state_transition(
+            &upstairs_state,
+            DsState::Stopping(ClientStopReason::Replacing),
+        );
+
+        // This should not panic when a client is in Stopping(Replacing) state
+        client.set_active_request();
+    }
+}
+
 /// Action requested by `DownstairsClient::select`
 ///
 /// This is split into a separate data structure because we need to distinguish
@@ -2163,7 +2222,7 @@ impl From<NegotiationError> for ClientNegotiationFailed {
             | NegotiationError::EncryptionMismatch { .. } => {
                 Self::IncompatibleSettings
             }
-            NegotiationError::GenerationZeroIsIllegal { .. }
+            NegotiationError::GenerationZeroIsIllegal
             | NegotiationError::GenerationNumberTooLow { .. }
             | NegotiationError::UpstairsIdMismatch { .. }
             | NegotiationError::SessionIdMismatch { .. } => {

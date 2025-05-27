@@ -616,16 +616,16 @@ impl Message {
             | Message::YouAreNowActive { .. }
             | Message::YouAreNoLongerActive { .. }
             | Message::UuidMismatch { .. }
-            | Message::Ruok { .. }
-            | Message::Imok { .. }
+            | Message::Ruok
+            | Message::Imok
             | Message::ExtentClose { .. }
             | Message::ExtentReopen { .. }
             | Message::ExtentFlush { .. }
             | Message::ExtentRepair { .. }
             | Message::RepairAckId { .. }
-            | Message::RegionInfoPlease { .. }
+            | Message::RegionInfoPlease
             | Message::RegionInfo { .. }
-            | Message::ExtentVersionsPlease { .. }
+            | Message::ExtentVersionsPlease
             | Message::ExtentVersions { .. }
             | Message::LastFlush { .. }
             | Message::Write { .. }

@@ -9,7 +9,7 @@ use strum_macros::EnumIter;
 use tokio::time::{sleep, Duration};
 
 use crucible::{
-    Arg, ClientStopReason, ConnectionMode, DsState, NegotiationState,
+    ClientStopReason, ConnectionMode, DsState, DtraceInfo, NegotiationState,
 };
 
 /// Connect to crucible control server
@@ -272,7 +272,11 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
 
 // Print out the values in the dtrace output based on what the DtraceDisplay
 // enums are set in the given Vec.
-fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay], last_job_id: &mut u64) {
+fn print_dtrace_row(
+    d_out: DtraceInfo,
+    dd: &[DtraceDisplay],
+    last_job_id: &mut u64,
+) {
     for display_item in dd.iter() {
         match display_item {
             DtraceDisplay::State => {
@@ -412,7 +416,8 @@ fn dtrace_loop(output: Vec<DtraceDisplay>) {
                     print_dtrace_header(&output);
                 }
                 count = (count + 1) % 20;
-                let d_out: Arg = match serde_json::from_str(&dtrace_out) {
+                let d_out: DtraceInfo = match serde_json::from_str(&dtrace_out)
+                {
                     Ok(a) => a,
                     Err(e) => {
                         println!("Err {:?}", e);

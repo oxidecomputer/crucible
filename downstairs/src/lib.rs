@@ -3331,10 +3331,7 @@ impl Work {
         // Before we can do work for this job, we have to check the dep list if
         // there is one and make sure all dependencies are completed.
         //
-        // XXX Make this better/faster by removing the ones that are met, so
-        // next lap we don't have to check again?  There may be some debug value
-        // to knowing what the dep list was, so consider that before making this
-        // faster.
+        // Remove dependencies that are already met.
         let num_deps_outstanding = work
             .io
             .deps()
@@ -4143,7 +4140,7 @@ mod test {
 
         // add work for flush 1001
         let rio = IOop::Flush {
-            dependencies: vec![], // XXX why doesn't this depend on the write?
+            dependencies: vec![JobId(1000)],
             flush_number: 3,
             gen_number: gen,
             snapshot_details: None,

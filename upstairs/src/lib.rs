@@ -321,8 +321,8 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
 /// volume__*__done: An IO is completed at the volume layer.
 #[usdt::provider(provider = "crucible_upstairs")]
 mod cdt {
-    use crate::Arg;
-    fn up__status(_: String, arg: Arg) {}
+    use crate::DtraceInfo;
+    fn up__status(_: String, arg: DtraceInfo) {}
     fn ds__ping__sent(_: u64, _: u8) {}
     fn up__apply(_: u64) {}
     fn up__action_downstairs(_: u64) {}
@@ -1018,10 +1018,8 @@ enum IOop {
     Write {
         /// Jobs that mush finish before this
         dependencies: Vec<JobId>,
-        /// Extent in which the write starts
-        start_eid: ExtentId,
-        /// Relative offset (within that extent) to start writing
-        start_offset: BlockOffset,
+        /// Absolute block at which the write starts
+        start_block: BlockIndex,
         /// Per-block context
         blocks: Vec<BlockContext>,
         /// Raw data, tightly packed
@@ -1030,10 +1028,8 @@ enum IOop {
     WriteUnwritten {
         /// Jobs that mush finish before this
         dependencies: Vec<JobId>,
-        /// Extent in which the write starts
-        start_eid: ExtentId,
-        /// Relative offset (within that extent) to start writing
-        start_offset: BlockOffset,
+        /// Absolute block at which the write starts
+        start_block: BlockIndex,
         /// Per-block context
         blocks: Vec<BlockContext>,
         /// Raw data, tightly packed
@@ -1042,10 +1038,8 @@ enum IOop {
     Read {
         /// Jobs that must finish before this
         dependencies: Vec<JobId>,
-        /// Extent in which the read starts
-        start_eid: ExtentId,
-        /// Relative offset (within that extent) to start reading
-        start_offset: BlockOffset,
+        /// Absolute block at which the read starts
+        start_block: BlockIndex,
         /// Number of blocks to read
         count: u64,
         /// Block size for this region (stored here for convenience)
@@ -1197,7 +1191,11 @@ impl IOop {
     // repair), and determine if this IO should be sent to the downstairs or not
     // (skipped).
     // Return true if we should send it.
-    fn send_io_live_repair(&self, extent_limit: Option<ExtentId>) -> bool {
+    fn send_io_live_repair(
+        &self,
+        extent_limit: Option<ExtentId>,
+        ddef: &RegionDefinition,
+    ) -> bool {
         // Always send live-repair IOs
         if matches!(
             self,
@@ -1216,9 +1214,12 @@ impl IOop {
             // repaired is handled with dependencies, and IOs should arrive
             // here with those dependencies already set.
             match &self {
-                IOop::Write { start_eid, .. }
-                | IOop::WriteUnwritten { start_eid, .. }
-                | IOop::Read { start_eid, .. } => *start_eid <= extent_limit,
+                IOop::Write { start_block, .. }
+                | IOop::WriteUnwritten { start_block, .. }
+                | IOop::Read { start_block, .. } => {
+                    let start_eid = start_block.0 / ddef.extent_size().value;
+                    start_eid as u32 <= extent_limit.0
+                }
                 IOop::Flush { .. } => {
                     // If we have set extent limit, then we go ahead and
                     // send the flush with the extent_limit in it, and allow
@@ -1507,7 +1508,9 @@ pub(crate) enum BlockOp {
  * Stat counters struct used by DTrace
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Arg {
+pub struct DtraceInfo {
+    /// Upstairs UUID
+    pub upstairs_id: String,
     /// Upstairs session UUID
     pub session_id: String,
     /// Jobs on the upstairs guest work queue.
