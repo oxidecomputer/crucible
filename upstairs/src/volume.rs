@@ -1390,7 +1390,7 @@ impl Volume {
         log: &Logger,
     ) -> Result<Option<(SocketAddr, SocketAddr)>, CrucibleError> {
         let compare_result =
-            Self::compare_vcr_for_replacement(log, &original, &replacement)?;
+            Self::compare_vcr_for_replacement(&original, &replacement)?;
 
         info!(log, "compare result is {:?}", compare_result);
 
@@ -1522,7 +1522,6 @@ impl Volume {
     // parsing the CompareResult and deciding what to do if there are
     // multiple changes.
     fn compare_vcr_for_replacement(
-        log: &Logger,
         o_vol: &VolumeConstructionRequest,
         n_vol: &VolumeConstructionRequest,
     ) -> Result<CompareResult, CrucibleError> {
@@ -1578,7 +1577,7 @@ impl Volume {
                     o_sub_volumes.iter().zip(n_sub_volumes.iter())
                 {
                     let sv_res =
-                        Self::compare_vcr_for_replacement(log, o_sv, new_sv)?;
+                        Self::compare_vcr_for_replacement(o_sv, new_sv)?;
                     sv_results.push(sv_res);
                 }
                 let read_only_parent_compare =
@@ -1601,9 +1600,7 @@ impl Volume {
                         }
 
                         (Some(o_vol), Some(n_vol)) => {
-                            Self::compare_vcr_for_replacement(
-                                log, o_vol, n_vol,
-                            )?
+                            Self::compare_vcr_for_replacement(o_vol, n_vol)?
                         }
                     });
 
