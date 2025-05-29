@@ -261,6 +261,8 @@ async fn main() -> Result<()> {
             }
             .to_logger(PROG)?;
 
+            let info = crucible_common::BuildInfo::default();
+            info!(log, "Crucible Version: {}", info);
             info!(log, "dataset: {:?}", dataset);
             info!(log, "listen IP: {:?}", listen);
             info!(

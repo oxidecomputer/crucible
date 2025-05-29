@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
-use slog::{o, Logger};
+use slog::{info, o, Logger};
 
 pub const PROG: &str = "crucible-pantry";
 
@@ -19,6 +19,8 @@ pub fn initialize_pantry() -> Result<(Logger, Arc<pantry::Pantry>)> {
     }
     .to_logger(PROG)?;
 
+    let info = crucible_common::BuildInfo::default();
+    info!(log, "Crucible Version: {}", info);
     let pantry =
         Arc::new(pantry::Pantry::new(log.new(o!("component" => "datafile")))?);
 
