@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# Memory usage test shell script.
-
+# Memory and space usage test shell script.
 set -o errexit
 set -o pipefail
 
@@ -17,18 +16,34 @@ function ctrl_c() {
 
 usage () {
     echo "Usage: $0 [f] [-b #] [-g <PATH>]" >&2
-    echo " -b block_size  Block size for the region        (default 4096)" >&2
+    echo " -b block_size    Block size for the region      (default 4096)" >&2
+    echo " -c extent count  Number of extent files         (default 160)" >&2
+    echo " -e extent size   Size of an extent file         (default 16384)" >&2
     echo " -g REGION_DIR  Directory where regions will be created" >&2
     echo "                                          (default /var/tmp/dsc)" >&2
+    echo ""
+    echo " 10GiB 4k  region in omicron:  -b 4096 -e 16384 -c 160"
+    echo " 10GiB 512 region in omicron:  -b 512 -e 131072 -c 160"
 }
 
 block_size=4096
+# Omicron default for 512 byte block size
+# extent_size=131072
+# Omicron default for 4k block size
+extent_size=16384
+extent_count=160
 region_dir="/var/tmp/dsc"
 
-while getopts 'b:g:h' opt; do
+while getopts 'b:c:e:g:h' opt; do
     case "$opt" in
         b)  block_size=$OPTARG
             echo "Using block size $block_size"
+            ;;
+        c)  extent_count=$OPTARG
+            echo "Using extent count $extent_count"
+            ;;
+        e)  extent_size=$OPTARG
+            echo "Using extent size $extent_size"
             ;;
         g)  region_dir=$OPTARG
             echo "Using region dir of $region_dir"
@@ -84,21 +99,23 @@ function show_mem_summary() {
 WORK_ROOT=${WORK_ROOT:-/tmp}
 mkdir -p "$WORK_ROOT"
 test_mem_log="$WORK_ROOT/test_mem_log.txt"
-# Create a region with the given extent_size ($1) and extent_count ($2)
+# Create a region with the given extent_size ($1), extent_count ($2), and
+# block_size ($3)
 # Once created, write to every block in the region, then display memory usage.
 function mem_test() {
-    if [[ $# -ne 2 ]]; then
-        echo "Missing EC and ES for mem_test()" >&2
+    if [[ $# -ne 3 ]]; then
+        echo "Missing EC, ES, or block size for mem_test()" >&2
         exit 1
     fi
     es=$1
     ec=$2
+    bs=$3
 
-    total_size=$(echo "$es * $ec * $block_size" | bc)
+    total_size=$(echo "$es * $ec * $bs" | bc)
     size_mib=$(echo "$total_size / 1024 / 1024" | bc)
     size_gib=$(echo "$size_mib / 1024" | bc)
 
-    echo -n "Region with ES:$es EC:$ec BS:$block_size  "
+    echo -n "Region with ES:$es EC:$ec BS:$bs  "
     if [[ "$size_gib" -gt 0 ]]; then
         reported_size="$size_gib GiB"
     elif [[ "$size_mib" -gt 0 ]]; then
@@ -108,7 +125,7 @@ function mem_test() {
     fi
     echo -n "Size: $reported_size  "
 
-    each_extent=$(echo "$es * $block_size" | bc)
+    each_extent=$(echo "$es * $bs" | bc)
     each_extent_mib=$(echo "$each_extent / 1024 / 1024" | bc)
     if [[ "$each_extent_mib" -gt 0 ]]; then
         reported_extent_size="$each_extent_mib MiB"
@@ -120,7 +137,7 @@ function mem_test() {
 
     "$dsc" create --ds-bin "$downstairs" --cleanup \
         --extent-size "$es" --extent-count "$ec" \
-	    --region-dir "$region_dir" --block-size "$block_size" \
+	    --region-dir "$region_dir" --block-size "$bs" \
         > "$test_mem_log" 2>&1
 
     "$dsc" start --ds-bin "$downstairs" --region-dir "$region_dir" \
@@ -139,10 +156,16 @@ function mem_test() {
     # Args for crutest.  Using the default IP:port for dsc
     args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 -q"
 
-    # Fill the region
-    echo "$ct" fill $args --skip-verify -g 1 >> "$test_mem_log" 2>&1
-    "$ct" fill $args --skip-verify -g 1 >> "$test_mem_log" 2>&1
+    # Fill the volume
+    gen=1
+    echo "$ct" fill $args --skip-verify -g $gen >> "$test_mem_log" 2>&1
+    "$ct" fill $args --skip-verify -g $gen >> "$test_mem_log" 2>&1
 
+    # Add another 50k IOs to the volume
+    ((gen+=1))
+    "$ct" generic $args -c 50000 -g $gen >> "$test_mem_log" 2>&1
+
+    # Display memory usage
     show_mem_summary "$ec"
     echo -n "Region:$reported_size  Extent:$reported_extent_size  "
     total_downstairs_mib=$(echo "$total_downstairs / 1024" | bc)
@@ -153,10 +176,22 @@ function mem_test() {
     fi
     echo "Total downstairs (pmap -x): $reported_downstairs"
 
+    # Display physical storage usage
     region_summary=$(du -sAh "$region_dir" | awk '{print $1}')
     region_size=$(du -sA "$region_dir" | awk '{print $1}')
-    echo "Size on disk of all region dirs: $region_summary or $region_size"
-
+    region_0_size=$(du -sA "$region_dir"/8810 | awk '{print $1}')
+    region_0_summary=$(du -sAh "$region_dir"/8810 | awk '{print $1}')
+    echo "Size of volume user gets       : $total_size"
+    echo "Size on disk of all region dirs: $region_size or $region_summary"
+    echo "Size on disk of a single region: $region_0_size or $region_0_summary"
+    echo "$region_size $total_size $block_size" | awk '{ \
+        percent = ($1 / $2) * 100; \
+        printf " Total Overage with %d block size:  %6.2f%%\n", $3, percent \
+    }'
+    echo "$region_0_size $total_size $block_size" | awk '{ \
+        percent = ($1 / $2) * 100; \
+        printf "Region Overage with %d block size:  %6.2f%%\n", $3, percent \
+    }'
     set +o errexit
     "$dsc" cmd shutdown >> "$test_mem_log" 2>&1
     wait $dsc_pid
@@ -191,9 +226,6 @@ fi
 echo "Memory usage test begins at $(date)"
 echo "Memory usage values in kilobytes unless specified otherwise"
 
-#            ES   EC
-mem_test 16384    16
-mem_test 16384   160
-mem_test 16384  1600
+mem_test $extent_size $extent_count $block_size
 
 echo "Memory usage test finished on $(date)"

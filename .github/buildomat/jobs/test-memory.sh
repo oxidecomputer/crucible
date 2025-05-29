@@ -59,5 +59,7 @@ vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
 pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/perf.txt 2>&1 &
 pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upinfo.txt 2>&1 &
 
-banner memtest
-ptime -m bash $input/scripts/test_mem.sh
+banner 512-memtest
+ptime -m bash $input/scripts/test_mem.sh -b 512 -e 131072 -c 160
+banner 4k-memtest
+ptime -m bash $input/scripts/test_mem.sh -b 4096 -e 16384 -c 160
