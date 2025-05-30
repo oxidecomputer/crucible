@@ -1,6 +1,8 @@
 // Copyright 2021 Oxide Computer Company
 
+use crate::model::Region;
 use anyhow::{anyhow, bail, Result};
+use chrono::Utc;
 use clap::Parser;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
 use semver::Version;
@@ -10,7 +12,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 const PROG: &str = "crucible-agent";
 const SERVICE: &str = "oxide/crucible/downstairs";
@@ -78,7 +80,7 @@ enum Args {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ZFSDataset {
     dataset: String,
 }
@@ -159,6 +161,7 @@ impl ZFSDataset {
             cmd.arg("-o").arg(format!("quota={}", quota));
         }
 
+        info!(log, "cmd is: {:?} {:?}", cmd, dataset);
         let res = cmd.arg(&dataset).output()?;
 
         if !res.status.success() {
@@ -356,6 +359,7 @@ fn apply_smf(
     downstairs_prefix: &str,
     snapshot_prefix: &str,
 ) -> Result<()> {
+    let _smf_lock = df.smf_lock.lock().unwrap();
     let scf = crucible_smf::Scf::new()?;
     let scope = scf.scope_local()?;
     let svc = scope
@@ -404,7 +408,7 @@ where
      */
     let expected_downstairs_instances = regions
         .iter()
-        .filter(|r| r.state == State::Created)
+        .filter(|r| r.state == State::Created || r.state == State::Requested)
         .map(|r| format!("{}-{}", downstairs_prefix, r.id.0))
         .collect::<HashSet<_>>();
 
@@ -412,7 +416,9 @@ where
         .iter()
         .flat_map(|(_, n)| {
             n.iter()
-                .filter(|(_, rs)| rs.state == State::Created)
+                .filter(|(_, rs)| {
+                    rs.state == State::Created || rs.state == State::Requested
+                })
                 .map(|(_, rs)| {
                     format!("{}-{}-{}", snapshot_prefix, rs.id.0, rs.name)
                 })
@@ -558,7 +564,7 @@ where
                                 reconfig = true;
                                 info!(
                                     log,
-                                    "existing {} value {} does not match {}",
+                                    "existing {} value {} doesn't match {}",
                                     property.name,
                                     val.as_string()?,
                                     property.val,
@@ -589,9 +595,9 @@ where
             }
         } else {
             /*
-             * No running snapshot means the service has never started.  Prod
-             * the restarter by disabling it, then we'll create everything
-             * from scratch.
+             * No running snapshot means the service has never started.
+             * Prod the restarter by disabling it, then we'll create
+             * everything from scratch.
              */
             inst.disable(false)?;
             true
@@ -635,7 +641,7 @@ where
                     info!(log, "ok!");
                 }
                 crucible_smf::CommitResult::OutOfDate => {
-                    error!(log, "concurrent modification?!");
+                    error!(log, "concurrent modification for: {}", r.id.0);
                 }
             }
         } else {
@@ -803,6 +809,10 @@ where
                     }
                     crucible_smf::CommitResult::OutOfDate => {
                         error!(log, "concurrent modification?!");
+                        panic!(
+                            "concurrent modification for snap: {}",
+                            snapshot.id.0
+                        );
                     }
                 }
             } else {
@@ -905,8 +915,8 @@ mod test {
         Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
     }
 
-    /// Wrap a datafile, mock SMF interface, and mock snapshot interface, in order to test the
-    /// agent's SMF related behaviour.
+    /// Wrap a datafile, mock SMF interface, and mock snapshot interface, in
+    /// order to test the agent's SMF related behaviour.
     pub struct TestSmfHarness {
         log: Logger,
         dir: TempDir,
@@ -1018,8 +1028,8 @@ mod test {
 
     impl Drop for TestSmfHarness {
         fn drop(&mut self) {
-            // If the agent zone bounces, it should read state from the datafile and recreate
-            // everything. Compare here during the drop.
+            // If the agent zone bounces, it should read state from the datafile
+            // and recreate everything. Compare here during the drop.
             let after_bounce_smf_interface = MockSmf::new(SERVICE.to_string());
 
             let mut path_buf = self.dir.path().to_path_buf();
@@ -1035,8 +1045,8 @@ mod test {
             )
             .unwrap();
 
-            // Prune disabled services: a bounced agent zone will lose all these, and the agent
-            // will not recreate them.
+            // Prune disabled services: a bounced agent zone will lose all
+            // these, and the agent will not recreate them.
             self.smf_interface.prune();
 
             assert_eq!(self.smf_interface, after_bounce_smf_interface);
@@ -1589,6 +1599,108 @@ mod test {
     }
 }
 
+/// Do all the steps required of the agent program to create a region.
+/// This is called in a thread and takes care of both the actual creating of
+/// a region, and creating the SMF service for that region.
+///
+/// The function is responsible for updating the internal Datafile structure
+/// with the results (pass or fail) from what it performs here.
+///
+/// When this function is done, signal to the worker thread that state has
+/// changed and it can cleanup this job and possibly create more work.
+#[allow(clippy::too_many_arguments)]
+fn agent_region_create(
+    log: Logger,
+    df: Arc<datafile::DataFile>,
+    regions_dataset: ZFSDataset,
+    regions_dataset_path: PathBuf,
+    downstairs_program: PathBuf,
+    downstairs_prefix: String,
+    r: Region,
+    snapshot_prefix: String,
+    done_tx: mpsc::Sender<bool>,
+) {
+    let region_id = r.id.clone();
+    info!(log, "spawned task for {:?}", region_id);
+
+    /*
+     * Compute the actual size required for a full region,
+     * then add our metadata overhead to that.
+     */
+    let region_size = r.block_size * r.extent_size * r.extent_count as u64;
+    let reservation = (region_size as f64 * RESERVATION_FACTOR).round() as u64;
+    let quota = region_size * QUOTA_FACTOR;
+
+    info!(
+        log,
+        "Region size:{} reservation:{} quota:{}",
+        region_size,
+        reservation,
+        quota,
+    );
+
+    // If regions need to be created, do that before apply_smf.
+    let region_dataset = match regions_dataset.ensure_child_dataset(
+        &r.id.0,
+        Some(reservation),
+        Some(quota),
+        &log,
+    ) {
+        Ok(region_dataset) => region_dataset,
+        Err(e) => {
+            error!(log, "Dataset {} creation failed: {}", &r.id.0, e,);
+            df.fail(&r.id);
+            df.work_done(done_tx);
+            return;
+        }
+    };
+
+    let dataset_path = match region_dataset.path() {
+        Ok(dataset_path) => dataset_path,
+        Err(e) => {
+            error!(log, "Failed to find path for dataset {}: {}", &r.id.0, e,);
+            df.fail(&r.id);
+            df.work_done(done_tx);
+            return;
+        }
+    };
+
+    // It's important that a region transition to "Created" only after it has
+    // been created as a dataset: after the crucible agent restarts,
+    // `apply_smf` will only start downstairs services for those in "Created".
+    // If the `df.created` is moved to after this function's `apply_smf` call,
+    // and there is a crash before that moved `df.created` is set, then the
+    // agent will not start a downstairs service for this region when rebooted.
+    let res =
+        worker_region_create(&log, &downstairs_program, &r, &dataset_path)
+            .and_then(|_| df.created(&r.id));
+
+    if let Err(e) = res {
+        error!(log, "Region {:?} create failed: {:?}", r.id.0, e);
+        df.fail(&r.id);
+        df.work_done(done_tx);
+        return;
+    }
+
+    info!(log, "Applying SMF actions post create {:?} ...", r.id.0);
+    let result = apply_smf(
+        &log,
+        &df,
+        regions_dataset_path.clone(),
+        &downstairs_prefix,
+        &snapshot_prefix,
+    );
+
+    if let Err(e) = result {
+        error!(log, "SMF application failure: {:?}", e);
+    } else {
+        info!(log, "SMF ok!");
+    }
+
+    info!(log, "Task for {:?} done, send notify", region_id);
+    df.work_done(done_tx);
+}
+
 /**
  * For region with state Tombstoned, destroy the region.
  *
@@ -1637,107 +1749,45 @@ fn worker(
                  * then we finish up destroying the region.
                  */
                 match &r.state {
-                    State::Requested => 'requested: {
-                        /*
-                         * Compute the actual size required for a full region,
-                         * then add our metadata overhead to that.
-                         */
-                        let region_size = r.block_size
-                            * r.extent_size
-                            * r.extent_count as u64;
-                        let reservation =
-                            (region_size as f64 * RESERVATION_FACTOR).round()
-                                as u64;
-                        let quota = region_size * QUOTA_FACTOR;
+                    State::Requested => {
+                        // first_in_states has given us a new region to create
+                        // that does not already have a job on work queue, so
+                        // now we will create that job and spawn a task for
+                        // it to do the work in.
+                        let log0 = log.new(o!("component" => "worktask"));
+                        let df_c = Arc::clone(&df);
+                        let r_c = r.clone();
+                        let rd_c = regions_dataset.clone();
+                        let rdp_c = regions_dataset_path.clone();
+                        let dp_c = downstairs_program.clone();
+                        let dpre_c = downstairs_prefix.clone();
+                        let sp_c = snapshot_prefix.clone();
+                        let request_time = Utc::now();
 
-                        info!(
-                            log,
-                            "Region size:{} reservation:{} quota:{}",
-                            region_size,
-                            reservation,
-                            quota,
-                        );
-
-                        // If regions need to be created, do that before
-                        // apply_smf.
-                        let region_dataset = match regions_dataset
-                            .ensure_child_dataset(
-                                &r.id.0,
-                                Some(reservation),
-                                Some(quota),
-                                &log,
-                            ) {
-                            Ok(region_dataset) => region_dataset,
-                            Err(e) => {
-                                error!(
-                                    log,
-                                    "Dataset {} creation failed: {}",
-                                    &r.id.0,
-                                    e,
-                                );
-                                df.fail(&r.id);
-                                break 'requested;
-                            }
-                        };
-
-                        let dataset_path = match region_dataset.path() {
-                            Ok(dataset_path) => dataset_path,
-                            Err(e) => {
-                                error!(
-                                    log,
-                                    "Failed to find path for dataset {}: {}",
-                                    &r.id.0,
-                                    e,
-                                );
-                                df.fail(&r.id);
-                                break 'requested;
-                            }
-                        };
-
-                        // It's important that a region transition to "Created"
-                        // only after it has been created as a dataset:
-                        // after the crucible agent restarts, `apply_smf` will
-                        // only start downstairs services for those in
-                        // "Created". If the `df.created` is moved to after this
-                        // function's `apply_smf` call, and there is a crash
-                        // before that moved `df.created` is set, then the agent
-                        // will not start a downstairs service for this region
-                        // when rebooted.
-                        let res = worker_region_create(
-                            &log,
-                            &downstairs_program,
-                            &r,
-                            &dataset_path,
-                        )
-                        .and_then(|_| df.created(&r.id));
-
-                        if let Err(e) = res {
-                            error!(
-                                log,
-                                "region {:?} create failed: {:?}", r.id.0, e
+                        info!(log0, "Spawing a region create for {:?}", r.id);
+                        // This channel will tell us when the job is done.
+                        let (done_tx, done_rx) = mpsc::channel();
+                        let job_handle = std::thread::spawn(move || {
+                            agent_region_create(
+                                log0, df_c, rd_c, rdp_c, dp_c, dpre_c, r_c,
+                                sp_c, done_tx,
                             );
-                            df.fail(&r.id);
-                            break 'requested;
-                        }
-
-                        info!(log, "applying SMF actions post create...");
-                        let result = apply_smf(
-                            &log,
-                            &df,
-                            regions_dataset_path.clone(),
-                            &downstairs_prefix,
-                            &snapshot_prefix,
+                            Ok(())
+                        });
+                        df.add_work(
+                            r.id.clone(),
+                            job_handle,
+                            request_time,
+                            done_rx,
                         );
-
-                        if let Err(e) = result {
-                            error!(log, "SMF application failure: {:?}", e);
-                        } else {
-                            info!(log, "SMF ok!");
-                        }
+                        info!(log, "Spawned a region create for {:?}", r.id);
                     }
 
                     State::Tombstoned => 'tombstoned: {
-                        info!(log, "applying SMF actions before removal...");
+                        info!(
+                            log,
+                            "applying SMF actions before removal of {:?}", r.id
+                        );
                         let result = apply_smf(
                             &log,
                             &df,
@@ -1805,7 +1855,9 @@ fn worker(
                  */
                 info!(
                     log,
-                    "applying SMF actions for region {} running snapshot {} (state {:?})...",
+                    "applying SMF actions for region {} with {} running \
+                    snapshot {} (state {:?})...",
+                    region_id.0,
                     rs.id.0,
                     rs.name,
                     rs.state,
@@ -1923,7 +1975,7 @@ fn worker_region_create(
     let cmd = cmd.output()?;
 
     if cmd.status.success() {
-        info!(log, "region files created ok");
+        info!(log, "region {:?} created ok", region.id.0);
     } else {
         let err = String::from_utf8_lossy(&cmd.stderr);
         let out = String::from_utf8_lossy(&cmd.stdout);
