@@ -764,6 +764,23 @@ impl DownstairsClient {
         self.state = DsState::Active;
     }
 
+    /// Sets the `DsState::Connecting` mode to `Faulted`
+    ///
+    /// This changes the subsequent path through negotiation, without restarting
+    /// the client IO task.  Doing so is safe because the faulted path is
+    /// a superset of the offline path.
+    ///
+    /// # Panics
+    /// If we are not in `DsState::Connecting { mode: ConnectionMode::Offline,
+    /// .. }`
+    pub(crate) fn set_connection_mode_faulted(&mut self) {
+        let DsState::Connecting { mode, .. } = &mut self.state else {
+            panic!("not connecting");
+        };
+        assert_eq!(*mode, ConnectionMode::Offline);
+        *mode = ConnectionMode::Faulted
+    }
+
     /// Applies an [`EnqueueResult`] for the given job
     ///
     /// If the job should be skipped, then it is added to `self.skipped_jobs`.
@@ -2067,17 +2084,8 @@ pub enum ClientFaultReason {
     /// Live-repair failed
     FailedLiveRepair,
 
-    /// Too many jobs in the queue
-    TooManyOutstandingJobs,
-
-    /// Too many bytes in the queue
-    TooManyOutstandingBytes,
-
     /// The upstairs has requested that we deactivate when we were offline
     OfflineDeactivated,
-
-    /// The Upstairs has dropped jobs that would be needed for replay
-    IneligibleForReplay,
 
     #[cfg(test)]
     RequestedFault,
