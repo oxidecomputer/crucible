@@ -80,7 +80,8 @@ pub(crate) enum UpstairsState {
     Deactivating(BlockRes),
 
     /// The upstairs has been disabled due to a likely-persistent error
-    Disabled,
+    #[allow(unused)]
+    Disabled(CrucibleError),
 }
 
 /// Crucible upstairs counters
@@ -860,7 +861,7 @@ impl Upstairs {
                 // TODO: remove this distinction?
                 let state = match &self.state {
                     UpstairsState::Initializing
-                    | UpstairsState::Disabled
+                    | UpstairsState::Disabled(..)
                     | UpstairsState::GoActive(..) => {
                         crate::UpState::Initializing
                     }
@@ -1020,7 +1021,8 @@ impl Upstairs {
                         // Don't update gen, return error
                         done.send_err(CrucibleError::UpstairsDeactivating);
                     }
-                    UpstairsState::Initializing | UpstairsState::Disabled => {
+                    UpstairsState::Initializing
+                    | UpstairsState::Disabled(..) => {
                         // This case, we update our generation and then
                         // let set_active_request handle the rest.
                         self.cfg.generation.store(gen, Ordering::Release);
@@ -1226,7 +1228,7 @@ impl Upstairs {
     /// Request that the Upstairs go active
     fn set_active_request(&mut self, res: BlockRes) {
         match &self.state {
-            UpstairsState::Initializing | UpstairsState::Disabled => {
+            UpstairsState::Initializing | UpstairsState::Disabled(..) => {
                 self.state = UpstairsState::GoActive(res);
                 info!(self.log, "{} active request set", self.cfg.upstairs_id);
 
@@ -1277,7 +1279,7 @@ impl Upstairs {
         info!(self.log, "Request to deactivate this guest");
         match &self.state {
             UpstairsState::Initializing
-            | UpstairsState::Disabled
+            | UpstairsState::Disabled(..)
             | UpstairsState::GoActive(..) => {
                 res.send_err(CrucibleError::UpstairsInactive);
                 return;
@@ -1752,7 +1754,7 @@ impl Upstairs {
                                     .promote_to_active()
                             }
                             UpstairsState::Initializing
-                            | UpstairsState::Disabled
+                            | UpstairsState::Disabled(..)
                             | UpstairsState::Deactivating(..) => {
                                 // don't do anything here
                             }
@@ -2136,8 +2138,7 @@ impl Upstairs {
             );
         };
 
-        // Restart the state machine for this downstairs client
-        self.downstairs.clients[client_id].disable(&self.state);
+        // This is likely a persistent error, so disable the whole Upstairs
         self.set_disabled(CrucibleError::NoLongerActive);
     }
 
@@ -2148,8 +2149,7 @@ impl Upstairs {
             "received UuidMismatch, expecting {expected_id:?}!"
         );
 
-        // Restart the state machine for this downstairs client
-        self.downstairs.clients[client_id].disable(&self.state);
+        // This is likely a persistent error, so disable the whole Upstairs
         self.set_disabled(CrucibleError::UuidMismatch);
     }
 
@@ -2163,7 +2163,7 @@ impl Upstairs {
     #[cfg(test)]
     pub(crate) fn force_active(&mut self) -> Result<(), CrucibleError> {
         match &self.state {
-            UpstairsState::Initializing | UpstairsState::Disabled => {
+            UpstairsState::Initializing | UpstairsState::Disabled(..) => {
                 self.downstairs.force_active();
                 self.state = UpstairsState::Active;
                 Ok(())
@@ -2184,11 +2184,17 @@ impl Upstairs {
     }
 
     fn set_disabled(&mut self, err: CrucibleError) {
-        let prev = std::mem::replace(&mut self.state, UpstairsState::Disabled);
+        warn!(self.log, "disabling clients due to {err:?}");
+        let prev = std::mem::replace(
+            &mut self.state,
+            UpstairsState::Disabled(err.clone()),
+        );
         if let UpstairsState::GoActive(res) = prev {
             res.send_err(err);
         }
-        info!(self.log, "setting inactive!");
+        for c in ClientId::iter() {
+            self.downstairs.clients[c].disable(&self.state);
+        }
     }
 
     fn on_client_task_stopped(

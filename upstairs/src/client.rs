@@ -506,7 +506,7 @@ impl DownstairsClient {
         // should automatically connect to the Downstairs.
         let auto_connect = match up_state {
             UpstairsState::Active | UpstairsState::GoActive(..) => true,
-            UpstairsState::Disabled
+            UpstairsState::Disabled(..)
             | UpstairsState::Initializing
             | UpstairsState::Deactivating { .. } => false,
         };
@@ -548,7 +548,7 @@ impl DownstairsClient {
                     // start from New
                     UpstairsState::GoActive(..)
                     | UpstairsState::Initializing
-                    | UpstairsState::Disabled
+                    | UpstairsState::Disabled(..)
                     | UpstairsState::Deactivating { .. } => ConnectionMode::New,
 
                     // Otherwise, use live-repair
@@ -561,7 +561,7 @@ impl DownstairsClient {
                 // start from New
                 UpstairsState::GoActive(..)
                 | UpstairsState::Initializing
-                | UpstairsState::Disabled
+                | UpstairsState::Disabled(..)
                 | UpstairsState::Deactivating { .. } => ConnectionMode::New,
 
                 // Otherwise, use live-repair; `ConnectionMode::Replaced`
@@ -1261,7 +1261,9 @@ impl DownstairsClient {
     ///
     /// The IO task will automatically restart in the main event handler
     pub(crate) fn disable(&mut self, up_state: &UpstairsState) {
-        self.halt_io_task(up_state, ClientStopReason::Disabled);
+        if self.client_task.client_connect_tx.is_none() {
+            self.halt_io_task(up_state, ClientStopReason::Disabled);
+        }
     }
 
     /// Skips from `LiveRepairReady` to `Active`; a no-op otherwise
