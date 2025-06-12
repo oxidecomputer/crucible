@@ -1257,11 +1257,23 @@ impl DownstairsClient {
         );
     }
 
-    /// Mark this client as disabled and halt its IO task
+    /// Halts the client IO task, if not already disabled
     ///
-    /// The IO task will automatically restart in the main event handler
+    /// The IO task will automatically restart in the main event handler, coming
+    /// back in `ConnectionMode::New`
     pub(crate) fn disable(&mut self, up_state: &UpstairsState) {
-        if self.client_task.client_connect_tx.is_none() {
+        // If the `client_connect` oneshot is present and we're in
+        // `ConnectionMode::New`, then restarting the IO task just puts us back
+        // in an identical place, so it's not necessary.
+        if self.client_task.client_connect_tx.is_none()
+            || !matches!(
+                self.state,
+                DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    ..
+                }
+            )
+        {
             self.halt_io_task(up_state, ClientStopReason::Disabled);
         }
     }
