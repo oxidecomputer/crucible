@@ -408,21 +408,6 @@
         "description": "Tracks client negotiation progress\n\nThe exact path through negotiation depends on the [`ConnectionMode`].\n\nThere are three main paths, shown below:\n\n```text ┌───────┐ │ Start │ └───┬───┘ │ ┌───────▼────────┐ │ WaitForPromote │ └───────┬────────┘ │ ┌────────▼──────────┐ │ WaitForRegionInfo │ └──┬──────────────┬─┘ Offline │              │ New / Faulted / Replaced (replay) │         ┌────▼────────────┐ │         │GetExtentVersions│ │         └─┬─────────────┬─┘ │           │ New         │ Faulted / Replaced │    ┌──────▼───┐    ┌────▼──────────┐ │    │WaitQuorum│    │LiveRepairReady│ │    └────┬─────┘    └────┬──────────┘ │         │               │ │    ┌────▼────┐          │ │    │Reconcile│          │ │    └────┬────┘          │ │         │               │ │     ┌───▼──┐            │ └─────► Done ◄────────────┘ └──────┘ ```\n\n`Done` isn't actually present in the state machine; it's indicated by returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].",
         "oneOf": [
           {
-            "description": "Waiting for the connection request to be sent",
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "wait_connect"
-                ]
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          {
             "description": "After connecting, waiting to hear `YesItsMe` from the client\n\nOnce this message is heard, sends `PromoteToActive` and transitions to `WaitForPromote`",
             "type": "object",
             "properties": {

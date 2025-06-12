@@ -1781,9 +1781,6 @@ impl DownstairsClient {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type", content = "value")]
 pub enum NegotiationState {
-    /// Waiting for the connection request to be sent
-    WaitConnect,
-
     /// After connecting, waiting to hear `YesItsMe` from the client
     ///
     /// Once this message is heard, sends `PromoteToActive` and transitions to
@@ -1821,12 +1818,7 @@ impl NegotiationState {
     ) -> bool {
         matches!(
             (prev_state, next_state, mode),
-            (NegotiationState::WaitConnect, NegotiationState::Start, _)
-                | (
-                    NegotiationState::Start,
-                    NegotiationState::WaitForPromote,
-                    _
-                )
+            (NegotiationState::Start, NegotiationState::WaitForPromote, _)
                 | (
                     NegotiationState::WaitForPromote,
                     NegotiationState::WaitForRegionInfo,
