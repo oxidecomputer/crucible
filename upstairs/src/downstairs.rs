@@ -2598,11 +2598,7 @@ impl Downstairs {
     ///
     /// # Panics
     /// If the given client is not in the `Offline` state
-    pub(crate) fn check_gone_too_long(
-        &mut self,
-        client_id: ClientId,
-        up_state: &UpstairsState,
-    ) {
+    pub(crate) fn check_gone_too_long(&mut self, client_id: ClientId) {
         assert!(matches!(
             self.clients[client_id].state(),
             DsState::Connecting {
@@ -2618,26 +2614,27 @@ impl Downstairs {
                 self.log,
                 "downstairs failed, too many outstanding jobs {work_count}"
             );
-            Some(ClientFaultReason::TooManyOutstandingJobs)
+            true
         } else if byte_count as u64 > crate::IO_OUTSTANDING_MAX_BYTES {
             warn!(
                 self.log,
                 "downstairs failed, too many outstanding bytes {byte_count}"
             );
-            Some(ClientFaultReason::TooManyOutstandingBytes)
+            true
         } else if !self.can_replay {
             // XXX can this actually happen?
             warn!(
                 self.log,
                 "downstairs became ineligible for replay while offline"
             );
-            Some(ClientFaultReason::IneligibleForReplay)
+            true
         } else {
-            None
+            false
         };
 
-        if let Some(err) = failed {
-            self.fault_client(client_id, up_state, err);
+        if failed {
+            self.skip_all_jobs(client_id);
+            self.clients[client_id].set_connection_mode_faulted();
         }
     }
 

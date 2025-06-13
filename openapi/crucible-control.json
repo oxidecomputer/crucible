@@ -89,31 +89,10 @@
             ]
           },
           {
-            "description": "Too many jobs in the queue",
-            "type": "string",
-            "enum": [
-              "too_many_outstanding_jobs"
-            ]
-          },
-          {
-            "description": "Too many bytes in the queue",
-            "type": "string",
-            "enum": [
-              "too_many_outstanding_bytes"
-            ]
-          },
-          {
             "description": "The upstairs has requested that we deactivate when we were offline",
             "type": "string",
             "enum": [
               "offline_deactivated"
-            ]
-          },
-          {
-            "description": "The Upstairs has dropped jobs that would be needed for replay",
-            "type": "string",
-            "enum": [
-              "ineligible_for_replay"
             ]
           }
         ]
