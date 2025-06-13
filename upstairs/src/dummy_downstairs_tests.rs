@@ -1615,7 +1615,7 @@ async fn test_byte_fault_condition() {
         ds[ClientId::new(0)],
         DsState::Connecting {
             mode: ConnectionMode::Faulted,
-            state: NegotiationState::Start { auto_promote: true }
+            state: NegotiationState::Start
         }
     );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -1692,7 +1692,7 @@ async fn test_byte_fault_condition_offline() {
         ds[ClientId::new(0)],
         DsState::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start { auto_promote: true }
+            state: NegotiationState::Start
         }
     );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -1727,7 +1727,7 @@ async fn test_byte_fault_condition_offline() {
                 ds[ClientId::new(0)],
                 DsState::Connecting {
                     mode: ConnectionMode::Offline,
-                    state: NegotiationState::Start { auto_promote: true }
+                    state: NegotiationState::Start
                 }
             );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -1737,7 +1737,7 @@ async fn test_byte_fault_condition_offline() {
                 ds[ClientId::new(0)],
                 DsState::Connecting {
                     mode: ConnectionMode::Faulted,
-                    state: NegotiationState::Start { auto_promote: true }
+                    state: NegotiationState::Start
                 }
             );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -1788,7 +1788,7 @@ async fn test_offline_can_deactivate() {
         ds[ClientId::new(0)],
         DsState::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start { auto_promote: true }
+            state: NegotiationState::Start
         }
     );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -1831,7 +1831,7 @@ async fn test_offline_with_io_can_deactivate() {
         ds[ClientId::new(0)],
         DsState::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start { auto_promote: true }
+            state: NegotiationState::Start
         }
     );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -1889,7 +1889,7 @@ async fn test_all_offline_with_io_can_deactivate() {
             ds[cid],
             DsState::Connecting {
                 mode: ConnectionMode::Offline,
-                state: NegotiationState::Start { auto_promote: true }
+                state: NegotiationState::Start
             }
         );
     }
@@ -1993,7 +1993,7 @@ async fn test_job_fault_condition() {
         ds[ClientId::new(0)],
         DsState::Connecting {
             mode: ConnectionMode::Faulted,
-            state: NegotiationState::Start { auto_promote: true }
+            state: NegotiationState::Start
         }
     );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -2065,7 +2065,7 @@ async fn test_job_fault_condition_offline() {
         ds[ClientId::new(0)],
         DsState::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start { auto_promote: true }
+            state: NegotiationState::Start
         }
     );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -2114,7 +2114,7 @@ async fn test_job_fault_condition_offline() {
                 ds[ClientId::new(0)],
                 DsState::Connecting {
                     mode: ConnectionMode::Offline,
-                    state: NegotiationState::Start { auto_promote: true }
+                    state: NegotiationState::Start
                 }
             );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -2125,7 +2125,7 @@ async fn test_job_fault_condition_offline() {
                 ds[ClientId::new(0)],
                 DsState::Connecting {
                     mode: ConnectionMode::Faulted,
-                    state: NegotiationState::Start { auto_promote: true }
+                    state: NegotiationState::Start
                 }
             );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -2871,7 +2871,7 @@ async fn test_no_send_offline() {
         ds[ClientId::new(0)],
         DsState::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start { auto_promote: true }
+            state: NegotiationState::Start
         }
     );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);

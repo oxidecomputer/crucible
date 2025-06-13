@@ -221,9 +221,7 @@ impl DownstairsClient {
             repair_addr: None,
             state: DsState::Connecting {
                 mode: ConnectionMode::New,
-                state: NegotiationState::Start {
-                    auto_promote: false,
-                },
+                state: NegotiationState::Start,
             },
             last_flush: None,
             stats: DownstairsStats::default(),
@@ -469,8 +467,7 @@ impl DownstairsClient {
         match &self.state {
             DsState::Connecting {
                 mode: ConnectionMode::New,
-                state:
-                    NegotiationState::Start { .. } | NegotiationState::WaitActive,
+                state: NegotiationState::Start | NegotiationState::WaitActive,
             } => {
                 info!(
                     self.log,
@@ -505,15 +502,12 @@ impl DownstairsClient {
         // cases.
         self.repair_addr = None;
 
-        // If the upstairs is already active (or trying to go active), then the
-        // downstairs should automatically send the PromoteToActive message when
-        // it reaches the relevant state.
-        let auto_promote = match up_state {
-            UpstairsState::Active | UpstairsState::GoActive(..) => !matches!(
-                self.state,
-                DsState::Stopping(ClientStopReason::Disabled)
-            ),
-            UpstairsState::Initializing
+        // If the upstairs is already active (or trying to go active), then we
+        // should automatically connect to the Downstairs.
+        let auto_connect = match up_state {
+            UpstairsState::Active | UpstairsState::GoActive(..) => true,
+            UpstairsState::Disabled(..)
+            | UpstairsState::Initializing
             | UpstairsState::Deactivating { .. } => false,
         };
 
@@ -554,6 +548,7 @@ impl DownstairsClient {
                     // start from New
                     UpstairsState::GoActive(..)
                     | UpstairsState::Initializing
+                    | UpstairsState::Disabled(..)
                     | UpstairsState::Deactivating { .. } => ConnectionMode::New,
 
                     // Otherwise, use live-repair
@@ -566,6 +561,7 @@ impl DownstairsClient {
                 // start from New
                 UpstairsState::GoActive(..)
                 | UpstairsState::Initializing
+                | UpstairsState::Disabled(..)
                 | UpstairsState::Deactivating { .. } => ConnectionMode::New,
 
                 // Otherwise, use live-repair; `ConnectionMode::Replaced`
@@ -575,7 +571,7 @@ impl DownstairsClient {
         };
         let new_state = DsState::Connecting {
             mode: new_mode,
-            state: NegotiationState::Start { auto_promote },
+            state: NegotiationState::Start,
         };
 
         // Note that jobs are skipped / replayed in `Downstairs::reinitialize`,
@@ -584,8 +580,8 @@ impl DownstairsClient {
         self.checked_state_transition(up_state, new_state);
         self.connection_id.update();
 
-        // Restart with a short delay, connecting if we're auto-promoting
-        self.start_task(true, auto_promote);
+        // Restart with a short delay, connecting if we're not disabled
+        self.start_task(true, auto_connect);
     }
 
     /// Returns the last flush ID handled by this client
@@ -751,13 +747,9 @@ impl DownstairsClient {
         // go active, then immediately go active!
         match &mut self.state {
             DsState::Connecting {
-                state: NegotiationState::Start { auto_promote },
+                state: NegotiationState::Start,
                 mode: ConnectionMode::New,
             } => {
-                if *auto_promote {
-                    panic!("called set_active_request while already waiting")
-                }
-                *auto_promote = true;
                 info!(
                     self.log,
                     "client set_active_request while in {:?}; waiting...",
@@ -773,15 +765,7 @@ impl DownstairsClient {
                     "client set_active_request while in {:?} -> WaitForPromote",
                     self.state,
                 );
-                self.send(Message::PromoteToActive {
-                    upstairs_id: self.cfg.upstairs_id,
-                    session_id: self.cfg.session_id,
-                    gen: self.cfg.generation(),
-                });
-                self.state = DsState::Connecting {
-                    state: NegotiationState::WaitForPromote,
-                    mode: ConnectionMode::New,
-                };
+                self.promote_to_active();
             }
             // This client is currently being stopped to be replaced. If an activation
             // request (from `UpstairsState::GoActive`) arrives now, we cannot
@@ -816,6 +800,20 @@ impl DownstairsClient {
             }
             s => panic!("invalid state for set_active_request: {s:?}"),
         }
+    }
+
+    pub(crate) fn promote_to_active(&mut self) {
+        let DsState::Connecting { state, .. } = &mut self.state else {
+            panic!("invalid state for promote_to_active: {:?}", self.state);
+        };
+        assert_eq!(*state, NegotiationState::WaitActive);
+        *state = NegotiationState::WaitForPromote;
+
+        self.send(Message::PromoteToActive {
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+            gen: self.cfg.generation(),
+        });
     }
 
     /// Accessor method for client connection state
@@ -961,7 +959,7 @@ impl DownstairsClient {
             (
                 DsState::Connecting { .. },
                 DsState::Connecting {
-                    state: NegotiationState::Start { .. },
+                    state: NegotiationState::Start,
                     ..
                 },
             ) => true,
@@ -1043,25 +1041,23 @@ impl DownstairsClient {
                     (
                         R::Fault(..),
                         ConnectionMode::Faulted,
-                        NegotiationState::Start { .. }
+                        NegotiationState::Start
                     ) | (
                         R::Deactivated | R::Disabled,
                         ConnectionMode::New,
-                        NegotiationState::Start {
-                            auto_promote: false
-                        }
+                        NegotiationState::Start
                     ) | (
                         R::Replacing,
                         ConnectionMode::Replaced,
-                        NegotiationState::Start { auto_promote: true }
+                        NegotiationState::Start
                     ) | (
                         R::Replacing,
                         ConnectionMode::New,
-                        NegotiationState::Start { .. }
+                        NegotiationState::Start
                     ) | (
                         R::NegotiationFailed(..),
                         ConnectionMode::New,
-                        NegotiationState::Start { .. }
+                        NegotiationState::Start
                     )
                 )
             }
@@ -1073,7 +1069,7 @@ impl DownstairsClient {
                 _,
                 DsState::Connecting {
                     mode: ConnectionMode::Offline | ConnectionMode::Faulted,
-                    state: NegotiationState::Start { auto_promote: true },
+                    state: NegotiationState::Start,
                 },
             ) => matches!(up_state, UpstairsState::Active),
 
@@ -1261,11 +1257,25 @@ impl DownstairsClient {
         );
     }
 
-    /// Mark this client as disabled and halt its IO task
+    /// Halts the client IO task, if not already disabled
     ///
-    /// The IO task will automatically restart in the main event handler
+    /// The IO task will automatically restart in the main event handler, coming
+    /// back in `ConnectionMode::New`
     pub(crate) fn disable(&mut self, up_state: &UpstairsState) {
-        self.halt_io_task(up_state, ClientStopReason::Disabled);
+        // If the `client_connect` oneshot is present and we're in
+        // `ConnectionMode::New`, then restarting the IO task just puts us back
+        // in an identical place, so it's not necessary.
+        if self.client_task.client_connect_tx.is_none()
+            || !matches!(
+                self.state,
+                DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    ..
+                }
+            )
+        {
+            self.halt_io_task(up_state, ClientStopReason::Disabled);
+        }
     }
 
     /// Skips from `LiveRepairReady` to `Active`; a no-op otherwise
@@ -1414,7 +1424,7 @@ impl DownstairsClient {
                 version,
                 repair_addr,
             } => {
-                let NegotiationState::Start { auto_promote } = *state else {
+                let NegotiationState::Start = *state else {
                     error!(self.log, "got version already");
                     return Err(NegotiationError::OutOfOrder);
                 };
@@ -1431,22 +1441,10 @@ impl DownstairsClient {
                     });
                 }
                 self.repair_addr = Some(repair_addr);
-                if auto_promote {
-                    *state = NegotiationState::WaitForPromote;
-                    self.send(Message::PromoteToActive {
-                        upstairs_id: self.cfg.upstairs_id,
-                        session_id: self.cfg.session_id,
-                        gen: self.cfg.generation(),
-                    });
-                    info!(
-                        self.log,
-                        "version negotiation from state {:?}", self.state
-                    );
-                } else {
-                    // Nothing to do here, wait for set_active_request
-                    *state = NegotiationState::WaitActive;
-                }
-                Ok(NegotiationResult::NotDone)
+                // Nothing to do here, return a marker that tells the Upstairs
+                // to promote if it's time.
+                *state = NegotiationState::WaitActive;
+                Ok(NegotiationResult::WaitActive)
             }
             Message::VersionMismatch { version } => {
                 error!(
@@ -1948,9 +1946,9 @@ impl DownstairsClient {
 pub enum NegotiationState {
     /// Initial state, waiting to hear `YesItsMe` from the client
     ///
-    /// Once this message is heard, transitions to either `WaitActive` (if
-    /// `auto_promote` is `false`) or `WaitQuorum` (if `auto_promote` is `true`)
-    Start { auto_promote: bool },
+    /// Once this message is heard, transitions to either `WaitActive` and wait
+    /// for the Upstairs to decide whether to promote.
+    Start,
 
     /// Waiting for activation by the guest
     WaitActive,
@@ -1986,49 +1984,46 @@ impl NegotiationState {
     ) -> bool {
         matches!(
             (prev_state, next_state, mode),
-            (
-                NegotiationState::Start { auto_promote: true },
-                NegotiationState::WaitForPromote,
-                _
-            ) | (
-                NegotiationState::Start {
-                    auto_promote: false,
-                },
-                NegotiationState::WaitActive,
-                _,
-            ) | (
-                NegotiationState::WaitActive,
-                NegotiationState::WaitForPromote,
-                _
-            ) | (
-                NegotiationState::WaitForPromote,
-                NegotiationState::WaitForRegionInfo,
-                _
-            ) | (
-                NegotiationState::WaitForRegionInfo,
-                NegotiationState::GetExtentVersions,
-                ConnectionMode::New
-                    | ConnectionMode::Faulted
-                    | ConnectionMode::Replaced,
-            ) | (
-                NegotiationState::GetExtentVersions,
-                NegotiationState::WaitQuorum,
-                ConnectionMode::New
-            ) | (
-                NegotiationState::WaitQuorum,
-                NegotiationState::Reconcile,
-                ConnectionMode::New
-            ) | (
-                NegotiationState::GetExtentVersions,
-                NegotiationState::LiveRepairReady,
-                ConnectionMode::Faulted | ConnectionMode::Replaced,
-            )
+            (NegotiationState::Start, NegotiationState::WaitActive, _,)
+                | (
+                    NegotiationState::WaitActive,
+                    NegotiationState::WaitForPromote,
+                    _
+                )
+                | (
+                    NegotiationState::WaitForPromote,
+                    NegotiationState::WaitForRegionInfo,
+                    _
+                )
+                | (
+                    NegotiationState::WaitForRegionInfo,
+                    NegotiationState::GetExtentVersions,
+                    ConnectionMode::New
+                        | ConnectionMode::Faulted
+                        | ConnectionMode::Replaced,
+                )
+                | (
+                    NegotiationState::GetExtentVersions,
+                    NegotiationState::WaitQuorum,
+                    ConnectionMode::New
+                )
+                | (
+                    NegotiationState::WaitQuorum,
+                    NegotiationState::Reconcile,
+                    ConnectionMode::New
+                )
+                | (
+                    NegotiationState::GetExtentVersions,
+                    NegotiationState::LiveRepairReady,
+                    ConnectionMode::Faulted | ConnectionMode::Replaced,
+                )
         )
     }
 }
 /// Result value returned when negotiation is complete
 pub(crate) enum NegotiationResult {
     NotDone,
+    WaitActive,
     WaitQuorum,
     Replay,
     LiveRepair,
