@@ -9,6 +9,7 @@ use super::*;
 
 /// Information collected from each Downstairs region in the same region set
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(Default))]
 pub struct RegionMetadata(Vec<ExtentMetadata>);
 
 impl RegionMetadata {

@@ -279,11 +279,10 @@
           "jobs"
         ]
       },
-      "DsState": {
-        "description": "High-level states for a Downstairs\n\nThe state machine for a Downstairs is relatively simple:\n\n```text ┌────────────┐ ┌────► LiveRepair ├─────┐ start ┌─────────┴┐   └─────┬──────┘   ┌─▼──────┐ ────►│Connecting│         │          │Stopping│ └─▲───────┬┘   ┌─────▼──────┐   └─▲────┬─┘ │       └────►   Active   ├─────┘    │ │            └─────┬──────┘          │ │                  │                 │ └─────────────────◄┴─────────────────┘ ```\n\nComplexity is hidden in the `Connecting` state, which wraps a [`NegotiationState`] implementing the negotiation state machine.",
+      "DsStateTag": {
+        "description": "[`DsState`] without data members",
         "oneOf": [
           {
-            "description": "New connection",
             "type": "object",
             "properties": {
               "type": {
@@ -299,7 +298,7 @@
                     "$ref": "#/components/schemas/ConnectionMode"
                   },
                   "state": {
-                    "$ref": "#/components/schemas/NegotiationState"
+                    "$ref": "#/components/schemas/NegotiationStateTag"
                   }
                 },
                 "required": [
@@ -314,7 +313,6 @@
             ]
           },
           {
-            "description": "Ready for and/or currently receiving IO",
             "type": "object",
             "properties": {
               "type": {
@@ -329,7 +327,6 @@
             ]
           },
           {
-            "description": "This downstairs is undergoing LiveRepair",
             "type": "object",
             "properties": {
               "type": {
@@ -344,7 +341,6 @@
             ]
           },
           {
-            "description": "The IO task for the client is being stopped",
             "type": "object",
             "properties": {
               "type": {
@@ -383,8 +379,8 @@
           "request_id"
         ]
       },
-      "NegotiationState": {
-        "description": "Tracks client negotiation progress\n\nThe exact path through negotiation depends on the [`ConnectionMode`].\n\nThere are three main paths, shown below:\n\n```text ┌───────┐ │ Start │ └───┬───┘ │ ┌───────▼────────┐ │ WaitForPromote │ └───────┬────────┘ │ ┌────────▼──────────┐ │ WaitForRegionInfo │ └──┬──────────────┬─┘ Offline │              │ New / Faulted / Replaced (replay) │         ┌────▼────────────┐ │         │GetExtentVersions│ │         └─┬─────────────┬─┘ │           │ New         │ Faulted / Replaced │    ┌──────▼───┐    ┌────▼──────────┐ │    │WaitQuorum│    │LiveRepairReady│ │    └────┬─────┘    └────┬──────────┘ │         │               │ │    ┌────▼────┐          │ │    │Reconcile│          │ │    └────┬────┘          │ │         │               │ │     ┌───▼──┐            │ └─────► Done ◄────────────┘ └──────┘ ```\n\n`Done` isn't actually present in the state machine; it's indicated by returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].",
+      "NegotiationStateTag": {
+        "description": "Auto-generated discriminant enum variants",
         "oneOf": [
           {
             "description": "After connecting, waiting to hear `YesItsMe` from the client\n\nOnce this message is heard, sends `PromoteToActive` and transitions to `WaitForPromote`",
@@ -513,7 +509,7 @@
           "ds_state": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/DsState"
+              "$ref": "#/components/schemas/DsStateTag"
             }
           },
           "extent_limit": {

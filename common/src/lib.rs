@@ -257,6 +257,18 @@ macro_rules! crucible_bail {
     };
 }
 
+#[macro_export]
+macro_rules! assert_matches {
+    ($left:expr, $pattern:pat_param $(,)?) => {
+        match $left {
+            $pattern => {}
+            ref left_value => {
+                panic!("mismatch: {:?} != {}", left_value, stringify!($pattern))
+            }
+        }
+    };
+}
+
 pub fn read_json_maybe<P, T>(file: P) -> Result<Option<T>>
 where
     P: AsRef<Path>,

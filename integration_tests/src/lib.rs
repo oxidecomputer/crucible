@@ -4002,10 +4002,10 @@ mod test {
             )
             .await;
         assert!(write_result.is_err());
-        assert!(matches!(
+        assert_matches!(
             write_result.err().unwrap(),
             CrucibleError::ModifyingReadOnlyRegion
-        ));
+        );
 
         Ok(())
     }
@@ -5767,14 +5767,14 @@ mod test {
         let status =
             client.volume_status(&volume_id.to_string()).await.unwrap();
 
-        assert!(matches!(
+        assert_matches!(
             status.into_inner(),
             crucible_pantry_client::types::VolumeStatus {
                 active: true,
                 seen_active: true,
                 num_job_handles: 0,
             }
-        ));
+        );
 
         // Take over the Volume activation here
 
@@ -5800,14 +5800,14 @@ mod test {
         let status =
             client.volume_status(&volume_id.to_string()).await.unwrap();
 
-        assert!(matches!(
+        assert_matches!(
             status.into_inner(),
             crucible_pantry_client::types::VolumeStatus {
                 active: false,
                 seen_active: true,
                 num_job_handles: 0,
             }
-        ));
+        );
     }
 
     #[tokio::test]

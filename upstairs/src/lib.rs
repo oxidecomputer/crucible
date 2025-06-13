@@ -67,7 +67,7 @@ mod stats;
 
 pub use client::{
     ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
-    NegotiationState,
+    NegotiationState, NegotiationStateTag,
 };
 pub use crucible_common::impacted_blocks::*;
 
@@ -755,10 +755,7 @@ pub(crate) struct RawReadResponse {
 ///
 /// Complexity is hidden in the `Connecting` state, which wraps a
 /// [`NegotiationState`] implementing the negotiation state machine.
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "type", content = "value")]
+#[derive(Debug)]
 pub enum DsState {
     /// New connection
     Connecting {
@@ -776,11 +773,39 @@ pub enum DsState {
     Stopping(ClientStopReason),
 }
 
+/// [`DsState`] without data members
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", content = "value")]
+pub enum DsStateTag {
+    Connecting {
+        state: NegotiationStateTag,
+        mode: ConnectionMode,
+    },
+    Active,
+    LiveRepair,
+    Stopping(ClientStopReason),
+}
+
+impl From<&DsState> for DsStateTag {
+    fn from(value: &DsState) -> Self {
+        match value {
+            DsState::Connecting { state, mode } => Self::Connecting {
+                state: state.into(),
+                mode: *mode,
+            },
+            DsState::Active => Self::Active,
+            DsState::LiveRepair => Self::LiveRepair,
+            DsState::Stopping(r) => Self::Stopping(*r),
+        }
+    }
+}
+
 impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DsState::Connecting {
-                state: NegotiationState::WaitQuorum,
+                state: NegotiationState::WaitQuorum(..),
                 ..
             } => {
                 write!(f, "WaitQuorum")
@@ -1510,7 +1535,7 @@ pub(crate) enum BlockOp {
 
     #[cfg(test)]
     GetDownstairsState {
-        done: BlockRes<ClientData<DsState>>,
+        done: BlockRes<ClientData<DsStateTag>>,
     },
 
     #[cfg(test)]
@@ -1540,7 +1565,7 @@ pub struct DtraceInfo {
     /// Number of write bytes in flight
     pub write_bytes_out: u64,
     /// State of a downstairs
-    pub ds_state: [DsState; 3],
+    pub ds_state: [DsStateTag; 3],
     /// Counters for each state of a downstairs job.
     pub ds_io_count: IOStateCount,
     /// Extents repaired during initial reconciliation.
