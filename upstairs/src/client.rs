@@ -467,7 +467,7 @@ impl DownstairsClient {
         match &self.state {
             DsState::Connecting {
                 mode: ConnectionMode::New,
-                state: NegotiationState::Start | NegotiationState::WaitActive,
+                state: NegotiationState::Start,
             } => {
                 info!(
                     self.log,
@@ -743,77 +743,6 @@ impl DownstairsClient {
                 );
             }
         }
-        // If we're already in the point of negotiation where we're waiting to
-        // go active, then immediately go active!
-        match &mut self.state {
-            DsState::Connecting {
-                state: NegotiationState::Start,
-                mode: ConnectionMode::New,
-            } => {
-                info!(
-                    self.log,
-                    "client set_active_request while in {:?}; waiting...",
-                    self.state,
-                );
-            }
-            DsState::Connecting {
-                state: NegotiationState::WaitActive,
-                mode: ConnectionMode::New,
-            } => {
-                info!(
-                    self.log,
-                    "client set_active_request while in {:?} -> WaitForPromote",
-                    self.state,
-                );
-                self.promote_to_active();
-            }
-            // This client is currently being stopped to be replaced. If an activation
-            // request (from `UpstairsState::GoActive`) arrives now, we cannot
-            // process it immediately and must avoid panicking.
-            //
-            // This is safe due to the following recovery path:
-            // 1. The client will complete its stopping sequence.
-            // 2. `DownstairsClient::reinitialize` will be called.
-            // 3. `reinitialize` inspects the current `UpstairsState`:
-            //    - If `UpstairsState` is `GoActive` or `Active` at the time of
-            //      `reinitialize`, then `auto_promote = true` is set for the
-            //      new connection. This ensures the client attempts to activate
-            //      upon reconnecting.
-            //    - If `UpstairsState` is not `GoActive` at that specific moment
-            //      (e.g., if this client is lagging or the `GoActive` call hasn't
-            //      been processed for it yet), `auto_promote` might be `false`.
-            //      However, the `set_active_request` method (this very method)
-            //      will be called again for this client once it's in a suitable
-            //      `Connecting` state (like `Start { auto_promote: false }` or
-            //      `WaitActive`). At that point, this method will correctly
-            //      set `auto_promote = true` or send `PromoteToActive` directly.
-            //
-            // In essence, the activation request isn't lost; its processing is deferred
-            // until the client is in a state capable of handling it, ensuring that
-            // region replacement before overall volume activation is supported.
-            DsState::Stopping(ClientStopReason::Replacing) => {
-                info!(
-                    self.log,
-                    "ignoring activation request while client is in Stopping(ClientStopReason::Replacing) state; \
-                     activation will be handled post-reinitialization"
-                );
-            }
-            s => panic!("invalid state for set_active_request: {s:?}"),
-        }
-    }
-
-    pub(crate) fn promote_to_active(&mut self) {
-        let DsState::Connecting { state, .. } = &mut self.state else {
-            panic!("invalid state for promote_to_active: {:?}", self.state);
-        };
-        assert_eq!(*state, NegotiationState::WaitActive);
-        *state = NegotiationState::WaitForPromote;
-
-        self.send(Message::PromoteToActive {
-            upstairs_id: self.cfg.upstairs_id,
-            session_id: self.cfg.session_id,
-            gen: self.cfg.generation(),
-        });
     }
 
     /// Accessor method for client connection state
@@ -1320,97 +1249,6 @@ impl DownstairsClient {
         up_state: &UpstairsState,
         ddef: &mut RegionDefinitionStatus,
     ) -> Result<NegotiationResult, NegotiationError> {
-        /*
-         * Either we get all the way through the negotiation, or we hit the
-         * timeout and exit to retry.
-         *
-         * The negotiation flow starts as follows, with the value of the
-         * negotiated variable on the left:
-         *
-         * NegotiationState::Start
-         * -----------------------
-         *          Upstairs             Downstairs
-         *           HereIAm(...)  --->
-         *                         <---  YesItsMe(...)
-         *
-         * At this point, a downstairs will wait for a PromoteToActive message
-         * to be sent to it.  If this is a new upstairs that has not yet
-         * connected to a downstairs, then we will wait for the guest to send
-         * us this message and pass it down to the downstairs.  If a downstairs
-         * is reconnecting after having already been active, then we look at our
-         * upstairs guest_io_ready() and, if the upstairs is ready, we send the
-         * downstairs the message ourselves that they should promote to active.
-         * For downstairs currently in Disconnected or New states, we move to
-         * WaitActive, for Faulted or Offline states, we stay in that state..
-         *
-         * NegotiationState::WaitForPromote
-         * --------------------------------
-         *    PromoteToActive(uuid)--->
-         *                         <---  YouAreNowActive(uuid)
-         *
-         * YouAreNowActive includes information about the upstairs and session
-         * ID and we do some sanity checking here to make sure it all still
-         * matches with what we expect.  We next request RegionInfo from the
-         * downstairs.
-         *
-         * NegotiationState::WaitForRegionInfo
-         * -----------------------------------
-         *       RegionInfoPlease  --->
-         *                         <---  RegionInfo(r)
-         *
-         * At this point the upstairs looks to see what state the downstairs is
-         * currently in.  It will be WaitActive, Faulted, or Offline.
-         *
-         * Depending on which state, we will either exit negotiation to replay
-         * or continue with NegotiationState::GetExtentVersions next.
-         *
-         * For the Offline state, the downstairs was connected and verified
-         * and some point after that, the connection was lost.  To handle this
-         * condition we want to know the last flush this downstairs had ACKd
-         * so we can give it whatever work it missed.
-         *
-         * For WaitActive, it means this downstairs never was "Active" and we
-         * have to go through the full compare of this downstairs with other
-         * downstairs and make sure they are consistent.  To do that, we will
-         * request extent versions, instead of setting the last flush.
-         *
-         * For Faulted, we don't know the condition of the data on the
-         * Downstairs, so we transition this downstairs to LiveRepairReady.  We
-         * also request extent versions and will have to repair this
-         * downstairs, skipping over LastFlush as well.
-         *
-         * Replay (offline only)
-         * ------------------------------
-         *          Upstairs             Downstairs
-         *          LastFlush(lf)) --->
-         *            [negotiation finishes]
-         *          Replayed jobs  --->
-         *
-         * After sending our last flush, we now replay all saved jobs for this
-         * Downstairs and skip ahead to NegotiationState::Done.  Note that the
-         * Downstairs does not reply to `LastFlush`; it simply sets the internal
-         * `last_flush` state in the Downstairs.  Not having the Downstairs
-         * reply means that there's no window in which we could become
-         * ineligible for replay.
-         *
-         * NegotiationState::GetExtentVersions
-         * (WaitActive and LiveRepairReady come here from WaitForRegionInfo)
-         * -----------------------------------
-         *          Upstairs             Downstairs
-         *    ExtentVersionsPlease --->
-         *                         <---  ExtentVersions(g, v, d)
-         *
-         * Now with the extent info, Upstairs calls process_downstairs() and
-         * if no problems, sends connected=true to the up_listen() task,
-         * we set the downstairs to DsState::WaitQuorum and we exit the
-         * while loop.
-         *
-         * NegotiationState::Done
-         * ----------------------
-         *    Now the downstairs is ready to receive replay IOs from the
-         *    upstairs. We set the downstairs to DsState::Active and the while
-         *    loop is exited.
-         */
         let DsState::Connecting { state, mode } = &mut self.state else {
             error!(
                 self.log,
@@ -1441,10 +1279,13 @@ impl DownstairsClient {
                     });
                 }
                 self.repair_addr = Some(repair_addr);
-                // Nothing to do here, return a marker that tells the Upstairs
-                // to promote if it's time.
-                *state = NegotiationState::WaitActive;
-                Ok(NegotiationResult::WaitActive)
+                *state = NegotiationState::WaitForPromote;
+                self.send(Message::PromoteToActive {
+                    upstairs_id: self.cfg.upstairs_id,
+                    session_id: self.cfg.session_id,
+                    gen: self.cfg.generation(),
+                });
+                Ok(NegotiationResult::NotDone)
             }
             Message::VersionMismatch { version } => {
                 error!(
@@ -1904,15 +1745,11 @@ impl DownstairsClient {
 ///
 /// ```text
 ///              ┌───────┐
-///              │ Start ├────────┐
-///              └───┬───┘        │
-///                  │            │
-///            ┌─────▼──────┐     │
-///            │ WaitActive │     │ auto-promote
-///            └─────┬──────┘     │
-///                  │            │
-///          ┌───────▼────────┐   │
-///          │ WaitForPromote ◄───┘
+///              │ Start │
+///              └───┬───┘
+///                  │
+///          ┌───────▼────────┐
+///          │ WaitForPromote │
 ///          └───────┬────────┘
 ///                  │
 ///         ┌────────▼──────────┐
@@ -1944,14 +1781,11 @@ impl DownstairsClient {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type", content = "value")]
 pub enum NegotiationState {
-    /// Initial state, waiting to hear `YesItsMe` from the client
+    /// After connecting, waiting to hear `YesItsMe` from the client
     ///
-    /// Once this message is heard, transitions to either `WaitActive` and wait
-    /// for the Upstairs to decide whether to promote.
+    /// Once this message is heard, sends `PromoteToActive` and transitions to
+    /// `WaitForPromote`
     Start,
-
-    /// Waiting for activation by the guest
-    WaitActive,
 
     /// Waiting to hear `YouAreNowActive` from the client
     WaitForPromote,
@@ -1984,12 +1818,7 @@ impl NegotiationState {
     ) -> bool {
         matches!(
             (prev_state, next_state, mode),
-            (NegotiationState::Start, NegotiationState::WaitActive, _,)
-                | (
-                    NegotiationState::WaitActive,
-                    NegotiationState::WaitForPromote,
-                    _
-                )
+            (NegotiationState::Start, NegotiationState::WaitForPromote, _)
                 | (
                     NegotiationState::WaitForPromote,
                     NegotiationState::WaitForRegionInfo,
@@ -2023,7 +1852,6 @@ impl NegotiationState {
 /// Result value returned when negotiation is complete
 pub(crate) enum NegotiationResult {
     NotDone,
-    WaitActive,
     WaitQuorum,
     Replay,
     LiveRepair,

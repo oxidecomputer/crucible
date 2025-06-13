@@ -90,11 +90,6 @@ enum Action {
 fn short_state(dss: DsState) -> String {
     match dss {
         DsState::Connecting {
-            state: NegotiationState::WaitActive,
-            ..
-        } => "WA".to_string(),
-
-        DsState::Connecting {
             state: NegotiationState::WaitQuorum,
             ..
         } => "WQ".to_string(),

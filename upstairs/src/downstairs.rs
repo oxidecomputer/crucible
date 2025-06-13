@@ -422,7 +422,6 @@ impl Downstairs {
         let up_state = UpstairsState::GoActive(BlockRes::dummy());
         for cid in ClientId::iter() {
             for state in [
-                NegotiationState::WaitActive,
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
@@ -4030,7 +4029,6 @@ pub(crate) mod test {
         let mode = ConnectionMode::Faulted;
         for state in [
             NegotiationState::Start,
-            NegotiationState::WaitActive,
             NegotiationState::WaitForPromote,
             NegotiationState::WaitForRegionInfo,
             NegotiationState::GetExtentVersions,
@@ -4060,7 +4058,6 @@ pub(crate) mod test {
         let up_state = UpstairsState::GoActive(BlockRes::dummy());
         for cid in ClientId::iter() {
             for state in [
-                NegotiationState::WaitActive,
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
