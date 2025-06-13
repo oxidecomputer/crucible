@@ -2315,6 +2315,7 @@ pub(crate) mod test {
         let mut up = Upstairs::test_default(None, false);
         for cid in [ClientId::new(0), ClientId::new(1)] {
             for state in [
+                NegotiationState::Start,
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
@@ -2344,6 +2345,7 @@ pub(crate) mod test {
         for cid in ClientId::iter() {
             let mut up = Upstairs::test_default(None, true);
             for state in [
+                NegotiationState::Start,
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
@@ -2372,6 +2374,7 @@ pub(crate) mod test {
         let mut up = Upstairs::test_default(None, true);
         for cid in [ClientId::new(0), ClientId::new(1)] {
             for state in [
+                NegotiationState::Start,
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
@@ -2468,7 +2471,7 @@ pub(crate) mod test {
             assert_matches!(
                 up.ds_state(client_id),
                 DsState::Connecting {
-                    state: NegotiationState::Start,
+                    state: NegotiationState::WaitConnect(..),
                     mode: ConnectionMode::New
                 }
             );
@@ -3840,7 +3843,7 @@ pub(crate) mod test {
                 c.state(),
                 DsState::Connecting {
                     mode: ConnectionMode::New,
-                    state: NegotiationState::Start
+                    state: NegotiationState::WaitConnect(..)
                 }
             );
         }

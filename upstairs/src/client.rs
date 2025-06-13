@@ -67,12 +67,6 @@ struct ClientTaskHandle {
     /// replies, but also things like "the I/O task has stopped"
     client_response_rx: mpsc::UnboundedReceiver<ClientResponse>,
 
-    /// One-shot sender to ask the client to open its connection
-    ///
-    /// This is used to hold the client (without connecting) in cases where we
-    /// have deliberately deactivated this client.
-    client_connect_tx: Option<oneshot::Sender<()>>,
-
     /// One-shot sender to stop the client
     ///
     /// This is a oneshot so that functions which stop the client don't
@@ -194,17 +188,18 @@ impl DownstairsClient {
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
         let client_delay_us = Arc::new(AtomicU64::new(0));
+        let (client_task, client_connect_tx) = Self::new_io_task(
+            target_addr,
+            false, // do not delay in starting the task
+            false, // do not start the task until GoActive
+            client_id,
+            tls_context.clone(),
+            client_delay_us.clone(),
+            &log,
+        );
         Self {
             cfg,
-            client_task: Self::new_io_task(
-                target_addr,
-                false, // do not delay in starting the task
-                false, // do not start the task until GoActive
-                client_id,
-                tls_context.clone(),
-                client_delay_us.clone(),
-                &log,
-            ),
+            client_task,
             client_id,
             io_limits,
             region_uuid: None,
@@ -214,7 +209,10 @@ impl DownstairsClient {
             repair_addr: None,
             state: DsState::Connecting {
                 mode: ConnectionMode::New,
-                state: NegotiationState::Start,
+                state: match client_connect_tx {
+                    Some(t) => NegotiationState::WaitConnect(t),
+                    None => NegotiationState::Start,
+                },
             },
             last_flush: None,
             stats: DownstairsStats::default(),
@@ -459,7 +457,7 @@ impl DownstairsClient {
         match &self.state {
             DsState::Connecting {
                 mode: ConnectionMode::New,
-                state: NegotiationState::Start,
+                state: NegotiationState::WaitConnect(..),
             } => {
                 info!(
                     self.log,
@@ -561,19 +559,23 @@ impl DownstairsClient {
                 UpstairsState::Active => ConnectionMode::Replaced,
             },
         };
-        let new_state = DsState::Connecting {
-            mode: new_mode,
-            state: NegotiationState::Start,
-        };
-
         // Note that jobs are skipped / replayed in `Downstairs::reinitialize`,
         // which is (probably) the caller of this function!
 
-        self.checked_state_transition(up_state, new_state);
         self.connection_id.update();
 
         // Restart with a short delay, connecting if we're not disabled
-        self.start_task(true, auto_connect);
+        let state = match self.start_task(true, auto_connect) {
+            Some(t) => NegotiationState::WaitConnect(t),
+            None => NegotiationState::Start,
+        };
+
+        let new_state = DsState::Connecting {
+            mode: new_mode,
+            state,
+        };
+
+        self.checked_state_transition(up_state, new_state);
     }
 
     /// Returns the last flush ID handled by this client
@@ -586,11 +588,19 @@ impl DownstairsClient {
     /// If we are running unit tests and `self.target_addr` is not populated, we
     /// start a dummy task instead.
     ///
+    /// Returns the connection oneshot, or `None` if we're connecting
+    /// automatically.
+    ///
     /// # Panics
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None` and
     /// this isn't running in test mode
-    fn start_task(&mut self, delay: bool, connect: bool) {
-        self.client_task = Self::new_io_task(
+    #[must_use]
+    fn start_task(
+        &mut self,
+        delay: bool,
+        connect: bool,
+    ) -> Option<oneshot::Sender<()>> {
+        let (client_task, client_connect_tx) = Self::new_io_task(
             self.target_addr,
             delay,
             connect,
@@ -599,6 +609,8 @@ impl DownstairsClient {
             self.client_delay_us.clone(),
             &self.log,
         );
+        self.client_task = client_task;
+        client_connect_tx
     }
 
     fn new_io_task(
@@ -609,7 +621,7 @@ impl DownstairsClient {
         tls_context: Option<Arc<TLSContext>>,
         client_delay_us: Arc<AtomicU64>,
         log: &Logger,
-    ) -> ClientTaskHandle {
+    ) -> (ClientTaskHandle, Option<oneshot::Sender<()>>) {
         #[cfg(test)]
         if let Some(target) = target {
             Self::new_network_task(
@@ -645,7 +657,7 @@ impl DownstairsClient {
         tls_context: Option<Arc<TLSContext>>,
         client_delay_us: Arc<AtomicU64>,
         log: &Logger,
-    ) -> ClientTaskHandle {
+    ) -> (ClientTaskHandle, Option<oneshot::Sender<()>>) {
         // Messages in flight are limited by backpressure, so we can use
         // unbounded channels here without fear of runaway.
         let (client_request_tx, client_request_rx) = mpsc::unbounded_channel();
@@ -681,17 +693,21 @@ impl DownstairsClient {
             };
             c.run().await
         });
-        ClientTaskHandle {
-            client_request_tx,
+        (
+            ClientTaskHandle {
+                client_request_tx,
+                client_stop_tx: Some(client_stop_tx),
+                client_response_rx,
+            },
             client_connect_tx,
-            client_stop_tx: Some(client_stop_tx),
-            client_response_rx,
-        }
+        )
     }
 
     /// Starts a dummy IO task, returning its IO handle
     #[cfg(test)]
-    fn new_dummy_task(connect: bool) -> ClientTaskHandle {
+    fn new_dummy_task(
+        connect: bool,
+    ) -> (ClientTaskHandle, Option<oneshot::Sender<()>>) {
         let (client_request_tx, client_request_rx) = mpsc::unbounded_channel();
         let (_client_response_tx, client_response_rx) =
             mpsc::unbounded_channel();
@@ -704,35 +720,37 @@ impl DownstairsClient {
         std::mem::forget(client_stop_rx);
         std::mem::forget(client_connect_rx);
 
-        ClientTaskHandle {
-            client_request_tx,
-            client_connect_tx: if connect {
+        (
+            ClientTaskHandle {
+                client_request_tx,
+                client_stop_tx: Some(client_stop_tx),
+                client_response_rx,
+            },
+            if connect {
                 None
             } else {
                 Some(client_connect_tx)
             },
-            client_stop_tx: Some(client_stop_tx),
-            client_response_rx,
-        }
+        )
     }
 
     /// Indicate that the upstairs has requested that we go active
-    ///
-    /// This either sent a `PromoteToActive` request directly, or schedules it
-    /// to be sent once the client state reaches `WaitActive`.
-    ///
-    /// # Panics
-    /// If we already called this function (without `reinitialize` in between),
-    /// or `self.state` is invalid for promotion.
     pub(crate) fn set_active_request(&mut self) {
-        if let Some(t) = self.client_task.client_connect_tx.take() {
-            info!(self.log, "sending connect oneshot to client");
-            if let Err(e) = t.send(()) {
-                error!(
-                    self.log,
-                    "failed to set client as active {e:?};
+        if let DsState::Connecting { state, .. } = &mut self.state {
+            if matches!(state, NegotiationState::WaitConnect(..)) {
+                info!(self.log, "sending connect oneshot to client");
+                let mut s = NegotiationState::Start;
+                std::mem::swap(state, &mut s);
+                let NegotiationState::WaitConnect(t) = s else {
+                    unreachable!();
+                };
+                if let Err(e) = t.send(()) {
+                    error!(
+                        self.log,
+                        "failed to set client as active {e:?};
                      are we shutting down?"
-                );
+                    );
+                }
             }
         }
     }
@@ -894,7 +912,8 @@ impl DownstairsClient {
             (
                 DsState::Connecting { .. },
                 DsState::Connecting {
-                    state: NegotiationState::Start,
+                    state:
+                        NegotiationState::Start | NegotiationState::WaitConnect(..),
                     ..
                 },
             ) => true,
@@ -974,13 +993,17 @@ impl DownstairsClient {
                 matches!(
                     (r, mode, state),
                     (
+                        R::Fault(ClientFaultReason::OfflineDeactivated),
+                        ConnectionMode::Faulted,
+                        NegotiationState::WaitConnect(..)
+                    ) | (
                         R::Fault(..),
                         ConnectionMode::Faulted,
                         NegotiationState::Start
                     ) | (
                         R::Deactivated | R::Disabled,
                         ConnectionMode::New,
-                        NegotiationState::Start
+                        NegotiationState::WaitConnect(..)
                     ) | (
                         R::Replacing,
                         ConnectionMode::Replaced,
@@ -992,7 +1015,7 @@ impl DownstairsClient {
                     ) | (
                         R::NegotiationFailed(..),
                         ConnectionMode::New,
-                        NegotiationState::Start
+                        NegotiationState::WaitConnect(..)
                     )
                 )
             }
@@ -1197,18 +1220,15 @@ impl DownstairsClient {
     /// The IO task will automatically restart in the main event handler, coming
     /// back in `ConnectionMode::New`
     pub(crate) fn disable(&mut self, up_state: &UpstairsState) {
-        // If the `client_connect` oneshot is present and we're in
-        // `ConnectionMode::New`, then restarting the IO task just puts us back
-        // in an identical place, so it's not necessary.
-        if self.client_task.client_connect_tx.is_none()
-            || !matches!(
-                self.state,
-                DsState::Connecting {
-                    mode: ConnectionMode::New,
-                    ..
-                }
-            )
-        {
+        // If the task is already disabled, then restarting the IO task just
+        // puts us back in an identical place, so it's not necessary.
+        if !matches!(
+            self.state,
+            DsState::Connecting {
+                mode: ConnectionMode::New,
+                state: NegotiationState::WaitConnect(..)
+            }
+        ) {
             self.halt_io_task(up_state, ClientStopReason::Disabled);
         }
     }
@@ -1782,6 +1802,12 @@ impl DownstairsClient {
 #[strum_discriminants(serde(rename_all = "snake_case"))]
 #[strum_discriminants(serde(tag = "type", content = "value"))]
 pub enum NegotiationState {
+    /// One-shot sender to ask the client to open its connection
+    ///
+    /// This is used to hold the client (without connecting) in cases where we
+    /// have deliberately deactivated this client.
+    WaitConnect(oneshot::Sender<()>),
+
     /// After connecting, waiting to hear `YesItsMe` from the client
     ///
     /// Once this message is heard, sends `PromoteToActive` and transitions to

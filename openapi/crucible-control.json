@@ -383,6 +383,21 @@
         "description": "Auto-generated discriminant enum variants",
         "oneOf": [
           {
+            "description": "One-shot sender to ask the client to open its connection\n\nThis is used to hold the client (without connecting) in cases where we have deliberately deactivated this client.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_connect"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
             "description": "After connecting, waiting to hear `YesItsMe` from the client\n\nOnce this message is heard, sends `PromoteToActive` and transitions to `WaitForPromote`",
             "type": "object",
             "properties": {
