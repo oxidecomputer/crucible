@@ -782,7 +782,7 @@ impl Upstairs {
                 next_job_id: self.downstairs.peek_next_id(),
                 write_bytes_out: self.downstairs.write_bytes_outstanding(),
                 ds_count: self.downstairs.active_count() as u32,
-                ds_state: self.downstairs.collect_stats(|c| c.state()),
+                ds_state: self.downstairs.collect_stats(|c| c.state().into()),
                 ds_io_count: self.downstairs.io_state_count(),
                 ds_reconciled: self.downstairs.reconcile_repaired(),
                 ds_reconcile_needed: self.downstairs.reconcile_repair_needed(),
@@ -827,7 +827,8 @@ impl Upstairs {
     fn on_control_req(&self, c: ControlRequest) {
         match c {
             ControlRequest::UpstairsStats(tx) => {
-                let ds_state = self.downstairs.collect_stats(|c| c.state());
+                let ds_state =
+                    self.downstairs.collect_stats(|c| c.state().into());
                 let up_jobs = self.downstairs.gw_active.len();
                 let ds_jobs = self.downstairs.active_count();
                 let reconcile_done = self.downstairs.reconcile_repaired();
@@ -1105,7 +1106,7 @@ impl Upstairs {
                     .downstairs
                     .clients
                     .iter()
-                    .filter(|c| c.state() == DsState::Active)
+                    .filter(|c| matches!(c.state(), DsState::Active))
                     .count();
                 done.send_ok(WQCounts {
                     up_count: self.downstairs.gw_active.len(),
@@ -1163,7 +1164,7 @@ impl Upstairs {
             #[cfg(test)]
             BlockOp::GetDownstairsState { done } => {
                 let out = crate::ClientData::from_fn(|i| {
-                    self.downstairs.clients[i].state()
+                    self.downstairs.clients[i].state().into()
                 });
                 done.send_ok(out);
             }
@@ -1211,7 +1212,7 @@ impl Upstairs {
             .downstairs
             .clients
             .iter()
-            .filter(|c| c.state() == DsState::Active)
+            .filter(|c| matches!(c.state(), DsState::Active))
             .count();
 
         print!("Upstairs last five completed:  ");
@@ -1847,7 +1848,7 @@ impl Upstairs {
             matches!(
                 c.state(),
                 DsState::Connecting {
-                    state: NegotiationState::WaitQuorum,
+                    state: NegotiationState::WaitQuorum(..),
                     ..
                 }
             )
@@ -1939,7 +1940,7 @@ impl Upstairs {
                 matches!(
                     c.state(),
                     DsState::Connecting {
-                        state: NegotiationState::WaitQuorum,
+                        state: NegotiationState::WaitQuorum(..),
                         ..
                     }
                 )
@@ -2221,7 +2222,7 @@ impl Upstairs {
 
     /// Helper function to get a downstairs client state
     #[cfg(test)]
-    pub(crate) fn ds_state(&self, client_id: ClientId) -> DsState {
+    pub(crate) fn ds_state(&self, client_id: ClientId) -> &DsState {
         self.downstairs.clients[client_id].state()
     }
 }
@@ -2230,6 +2231,7 @@ impl Upstairs {
 pub(crate) mod test {
     use super::*;
     use crate::{
+        assert_matches,
         client::{ClientFaultReason, ClientStopReason},
         test::{make_encrypted_upstairs, make_upstairs},
         Block, BlockOp, BlockOpWaiter, DsState, JobId,
@@ -2316,7 +2318,7 @@ pub(crate) mod test {
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
-                NegotiationState::WaitQuorum,
+                NegotiationState::WaitQuorum(Default::default()),
             ] {
                 up.ds_transition(
                     cid,
@@ -2345,7 +2347,7 @@ pub(crate) mod test {
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
-                NegotiationState::WaitQuorum,
+                NegotiationState::WaitQuorum(Default::default()),
             ] {
                 up.ds_transition(
                     cid,
@@ -2359,7 +2361,7 @@ pub(crate) mod test {
             up.state = UpstairsState::GoActive(done);
 
             up.connect_ro_region_set();
-            assert!(matches!(&up.state, &UpstairsState::Active));
+            assert_matches!(&up.state, &UpstairsState::Active);
         }
     }
 
@@ -2373,7 +2375,7 @@ pub(crate) mod test {
                 NegotiationState::WaitForPromote,
                 NegotiationState::WaitForRegionInfo,
                 NegotiationState::GetExtentVersions,
-                NegotiationState::WaitQuorum,
+                NegotiationState::WaitQuorum(Default::default()),
             ] {
                 up.ds_transition(
                     cid,
@@ -2388,7 +2390,7 @@ pub(crate) mod test {
         up.state = UpstairsState::GoActive(done);
 
         up.connect_ro_region_set();
-        assert!(matches!(&up.state, &UpstairsState::Active));
+        assert_matches!(&up.state, &UpstairsState::Active);
     }
 
     #[tokio::test]
@@ -2448,7 +2450,7 @@ pub(crate) mod test {
         // Make sure the correct DS have changed state.
         for client_id in ClientId::iter() {
             // The downstairs is already deactivated
-            assert_eq!(
+            assert_matches!(
                 up.ds_state(client_id),
                 DsState::Stopping(ClientStopReason::Deactivated)
             );
@@ -2463,7 +2465,7 @@ pub(crate) mod test {
             }));
 
             // This causes the downstairs state to be reinitialized
-            assert_eq!(
+            assert_matches!(
                 up.ds_state(client_id),
                 DsState::Connecting {
                     state: NegotiationState::Start,
@@ -2472,10 +2474,10 @@ pub(crate) mod test {
             );
 
             if client_id.get() < 2 {
-                assert!(matches!(up.state, UpstairsState::Deactivating { .. }));
+                assert_matches!(up.state, UpstairsState::Deactivating { .. });
             } else {
                 // Once the third task stops, we're back in initializing
-                assert!(matches!(up.state, UpstairsState::Initializing));
+                assert_matches!(up.state, UpstairsState::Initializing);
             }
         }
 
@@ -3620,7 +3622,7 @@ pub(crate) mod test {
 
         // No downstairs should change state.
         for c in up.downstairs.clients.iter() {
-            assert_eq!(c.state(), DsState::Active);
+            assert_matches!(c.state(), DsState::Active);
         }
         assert!(up.downstairs.repair().is_none());
     }
@@ -3640,7 +3642,7 @@ pub(crate) mod test {
         to_live_repair_ready(&mut up, ClientId::new(1));
         up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
-        assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
+        assert_matches!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some());
     }
 
@@ -3764,7 +3766,7 @@ pub(crate) mod test {
 
         // Make sure no DS have changed state.
         for c in up.downstairs.clients.iter() {
-            assert_eq!(c.state(), DsState::Active);
+            assert_matches!(c.state(), DsState::Active);
         }
 
         // Complete the flush on two downstairs, at which point the deactivate
@@ -3783,21 +3785,21 @@ pub(crate) mod test {
         }
 
         // These downstairs should now be deactivated now
-        assert_eq!(
+        assert_matches!(
             up.ds_state(ClientId::new(0)),
             DsState::Stopping(ClientStopReason::Deactivated)
         );
-        assert_eq!(
+        assert_matches!(
             up.ds_state(ClientId::new(2)),
             DsState::Stopping(ClientStopReason::Deactivated)
         );
 
         // Verify the remaining DS is still running
-        assert_eq!(up.ds_state(ClientId::new(1)), DsState::Active);
+        assert_matches!(up.ds_state(ClientId::new(1)), DsState::Active);
 
         // Verify the deactivate is not done yet.
         assert_eq!(deactivate_done_brw.try_wait(), None);
-        assert!(matches!(up.state, UpstairsState::Deactivating { .. }));
+        assert_matches!(up.state, UpstairsState::Deactivating { .. });
 
         // Complete the flush on the remaining downstairs
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
@@ -3810,7 +3812,7 @@ pub(crate) mod test {
             }),
         }));
 
-        assert_eq!(
+        assert_matches!(
             up.ds_state(ClientId::new(1)),
             DsState::Stopping(ClientStopReason::Deactivated)
         );
@@ -3830,11 +3832,11 @@ pub(crate) mod test {
         assert!(reply.is_ok());
 
         // Verify we have disconnected and can go back to init.
-        assert!(matches!(up.state, UpstairsState::Initializing));
+        assert_matches!(up.state, UpstairsState::Initializing);
 
         // Verify after the ds_missing, all downstairs are New
         for c in up.downstairs.clients.iter() {
-            assert_eq!(
+            assert_matches!(
                 c.state(),
                 DsState::Connecting {
                     mode: ConnectionMode::New,

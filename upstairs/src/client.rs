@@ -1,10 +1,11 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt, integrity_hash, io_limits::ClientIOLimits, live_repair::ExtentInfo,
-    upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
-    ClientId, ConnectionMode, CrucibleDecoder, CrucibleError, DownstairsIO,
-    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
-    ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
+    assert_matches, cdt, integrity_hash, io_limits::ClientIOLimits,
+    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
+    ClientIOStateCount, ClientId, ConnectionMode, CrucibleDecoder,
+    CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
+    JobId, Message, RawReadResponse, ReconcileIO, ReconcileIOState,
+    RegionDefinitionStatus, RegionMetadata,
 };
 use crucible_common::{x509::TLSContext, NegotiationError, VerboseTimeout};
 use crucible_protocol::{
@@ -165,14 +166,6 @@ pub(crate) struct DownstairsClient {
     /// Jobs that have been skipped
     pub(crate) skipped_jobs: BTreeSet<JobId>,
 
-    /// Region metadata for this particular Downstairs
-    ///
-    /// On Startup, we collect info from each downstairs region. We use that
-    /// info to make sure that all three regions in a region set are the
-    /// same, and if not the same, to decide which data we will consider
-    /// valid and make the other downstairs contain that same data.
-    pub(crate) region_metadata: Option<RegionMetadata>,
-
     /**
      * Live Repair info
      * This will contain the extent info for each downstairs as reported
@@ -226,7 +219,6 @@ impl DownstairsClient {
             last_flush: None,
             stats: DownstairsStats::default(),
             skipped_jobs: BTreeSet::new(),
-            region_metadata: None,
             repair_info: None,
             io_state_job_count: ClientIOStateCount::default(),
             io_state_byte_count: ClientIOStateCount::default(),
@@ -441,7 +433,7 @@ impl DownstairsClient {
     /// If the job's state is not [`IOState::InProgress`]
     pub(crate) fn skip_job(&mut self, ds_id: JobId, job: &mut DownstairsIO) {
         let prev_state = self.set_job_state(job, IOState::Skipped);
-        assert!(matches!(prev_state, IOState::InProgress));
+        assert_matches!(prev_state, IOState::InProgress);
         self.skipped_jobs.insert(ds_id);
     }
 
@@ -457,8 +449,8 @@ impl DownstairsClient {
                 self.state, self.client_id
             );
         };
-        assert_eq!(*state, NegotiationState::WaitQuorum);
-        assert!(matches!(mode, ConnectionMode::New));
+        assert_matches!(state, NegotiationState::WaitQuorum(..));
+        assert_matches!(mode, ConnectionMode::New);
         *state = NegotiationState::Reconcile;
     }
 
@@ -746,8 +738,8 @@ impl DownstairsClient {
     }
 
     /// Accessor method for client connection state
-    pub(crate) fn state(&self) -> DsState {
-        self.state
+    pub(crate) fn state(&self) -> &DsState {
+        &self.state
     }
 
     pub(crate) fn abort_negotiation(
@@ -858,10 +850,7 @@ impl DownstairsClient {
         new: SocketAddr,
     ) {
         self.target_addr = Some(new);
-
-        self.region_metadata = None;
         self.stats.replaced += 1;
-
         self.halt_io_task(up_state, ClientStopReason::Replacing);
     }
 
@@ -884,7 +873,7 @@ impl DownstairsClient {
         up_state: &UpstairsState,
         new_state: DsState,
     ) {
-        if !Self::is_state_transition_valid(up_state, self.state, new_state) {
+        if !Self::is_state_transition_valid(up_state, &self.state, &new_state) {
             panic!(
                 "invalid state transition for client {} from {:?} -> {:?} \
                  (with up_state: {:?})",
@@ -897,8 +886,8 @@ impl DownstairsClient {
     /// Check if a state transition is valid, returning `true` or `false`
     fn is_state_transition_valid(
         up_state: &UpstairsState,
-        prev_state: DsState,
-        next_state: DsState,
+        prev_state: &DsState,
+        next_state: &DsState,
     ) -> bool {
         match (prev_state, next_state) {
             // Restarting negotiation is always allowed
@@ -921,14 +910,14 @@ impl DownstairsClient {
                     mode: next_mode,
                 },
             ) => {
-                if next_mode == ConnectionMode::New
+                if *next_mode == ConnectionMode::New
                     && matches!(up_state, UpstairsState::Active)
                 {
                     return false;
                 }
                 next_mode == prev_mode
                     && NegotiationState::is_transition_valid(
-                        prev_mode, prev_state, next_state,
+                        *prev_mode, prev_state, next_state,
                     )
             }
 
@@ -1044,7 +1033,7 @@ impl DownstairsClient {
     /// # Panics
     /// If this client is not in `DsState::LiveRepair`
     pub(crate) fn finish_repair(&mut self, up_state: &UpstairsState) {
-        assert_eq!(self.state, DsState::LiveRepair);
+        assert_matches!(self.state, DsState::LiveRepair);
         self.checked_state_transition(up_state, DsState::Active);
         self.repair_info = None;
         self.stats.live_repair_completed += 1;
@@ -1229,10 +1218,10 @@ impl DownstairsClient {
     /// # Panics
     /// If this downstairs is not read-only
     pub(crate) fn skip_live_repair(&mut self, up_state: &UpstairsState) {
-        let DsState::Connecting { state, .. } = self.state else {
+        let DsState::Connecting { state, .. } = &self.state else {
             return;
         };
-        if state == NegotiationState::LiveRepairReady {
+        if matches!(state, NegotiationState::LiveRepairReady) {
             assert!(self.cfg.read_only);
 
             // TODO: could we do this transition early, by automatically
@@ -1247,10 +1236,10 @@ impl DownstairsClient {
     /// # Panics
     /// If the state is not `Connecting { state: LiveRepairReady }`
     pub(crate) fn start_live_repair(&mut self, up_state: &UpstairsState) {
-        let DsState::Connecting { state, .. } = self.state else {
+        let DsState::Connecting { state, .. } = &self.state else {
             panic!("invalid state");
         };
-        assert_eq!(state, NegotiationState::LiveRepairReady);
+        assert_matches!(state, NegotiationState::LiveRepairReady);
         self.checked_state_transition(up_state, DsState::LiveRepair);
     }
 
@@ -1342,7 +1331,7 @@ impl DownstairsClient {
                 session_id,
                 gen,
             } => {
-                if *state != NegotiationState::WaitForPromote {
+                if !matches!(state, NegotiationState::WaitForPromote) {
                     error!(
                         self.log,
                         "Received YouAreNowActive out of order! {state:?}",
@@ -1397,7 +1386,7 @@ impl DownstairsClient {
                 }
             }
             Message::RegionInfo { region_def } => {
-                if *state != NegotiationState::WaitForRegionInfo {
+                if !matches!(state, NegotiationState::WaitForRegionInfo) {
                     error!(self.log, "Received RegionInfo out of order!");
                     return Err(NegotiationError::OutOfOrder);
                 }
@@ -1559,13 +1548,23 @@ impl DownstairsClient {
                 flush_numbers,
                 dirty_bits,
             } => {
-                if *state != NegotiationState::GetExtentVersions {
+                if !matches!(state, NegotiationState::GetExtentVersions) {
                     error!(self.log, "Received ExtentVersions out of order!");
                     return Err(NegotiationError::OutOfOrder);
                 }
+                /*
+                 * Record this downstairs region info for later
+                 * comparison with the other downstairs in this
+                 * region set.
+                 */
+                let dsr = RegionMetadata::new(
+                    &gen_numbers,
+                    &flush_numbers,
+                    &dirty_bits,
+                );
                 let out = match mode {
                     ConnectionMode::New => {
-                        *state = NegotiationState::WaitQuorum;
+                        *state = NegotiationState::WaitQuorum(dsr);
                         NegotiationResult::WaitQuorum
                     }
                     // Special case: if a downstairs is replaced while we're
@@ -1578,7 +1577,7 @@ impl DownstairsClient {
                                 | UpstairsState::GoActive(..)
                         ) =>
                     {
-                        *state = NegotiationState::WaitQuorum;
+                        *state = NegotiationState::WaitQuorum(dsr);
                         NegotiationResult::WaitQuorum
                     }
 
@@ -1593,21 +1592,6 @@ impl DownstairsClient {
                         );
                     }
                 };
-
-                /*
-                 * Record this downstairs region info for later
-                 * comparison with the other downstairs in this
-                 * region set.
-                 */
-                let dsr = RegionMetadata::new(
-                    &gen_numbers,
-                    &flush_numbers,
-                    &dirty_bits,
-                );
-
-                if let Some(old_rm) = self.region_metadata.replace(dsr) {
-                    warn!(self.log, "new RM replaced this: {:?}", old_rm);
-                }
                 Ok(out)
             }
             m => panic!("invalid message in continue_negotiation: {m:?}"),
@@ -1792,11 +1776,11 @@ impl DownstairsClient {
 ///
 /// `Done` isn't actually present in the state machine; it's indicated by
 /// returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].
-#[derive(
-    Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "type", content = "value")]
+#[derive(Debug, strum::EnumDiscriminants)]
+#[strum_discriminants(name(NegotiationStateTag))]
+#[strum_discriminants(derive(Serialize, Deserialize, JsonSchema))]
+#[strum_discriminants(serde(rename_all = "snake_case"))]
+#[strum_discriminants(serde(tag = "type", content = "value"))]
 pub enum NegotiationState {
     /// After connecting, waiting to hear `YesItsMe` from the client
     ///
@@ -1814,7 +1798,7 @@ pub enum NegotiationState {
     GetExtentVersions,
 
     /// Waiting for the minimum number of downstairs to be present.
-    WaitQuorum,
+    WaitQuorum(RegionMetadata),
 
     /// Initial startup, downstairs are repairing from each other.
     Reconcile,
@@ -1830,8 +1814,8 @@ impl NegotiationState {
     /// state transition diagram
     fn is_transition_valid(
         mode: ConnectionMode,
-        prev_state: Self,
-        next_state: Self,
+        prev_state: &Self,
+        next_state: &Self,
     ) -> bool {
         matches!(
             (prev_state, next_state, mode),
@@ -1850,11 +1834,11 @@ impl NegotiationState {
                 )
                 | (
                     NegotiationState::GetExtentVersions,
-                    NegotiationState::WaitQuorum,
+                    NegotiationState::WaitQuorum(..),
                     ConnectionMode::New
                 )
                 | (
-                    NegotiationState::WaitQuorum,
+                    NegotiationState::WaitQuorum(..),
                     NegotiationState::Reconcile,
                     ConnectionMode::New
                 )

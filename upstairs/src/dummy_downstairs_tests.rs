@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::assert_matches;
 use crate::client::{CLIENT_RECONNECT_DELAY, CLIENT_TIMEOUT};
 use crate::guest::Guest;
 use crate::up_main;
@@ -16,8 +17,8 @@ use crate::ClientFaultReason;
 use crate::ClientStopReason;
 use crate::ConnectionMode;
 use crate::CrucibleError;
-use crate::DsState;
-use crate::NegotiationState;
+use crate::DsStateTag;
+use crate::NegotiationStateTag;
 use crate::{
     IO_CACHED_MAX_BYTES, IO_CACHED_MAX_JOBS, IO_OUTSTANDING_MAX_BYTES,
     IO_OUTSTANDING_MAX_JOBS,
@@ -739,17 +740,17 @@ async fn test_replay_occurs() {
     // Confirm all downstairs receive said read
     let ds1_message = harness.ds1().recv().await.unwrap();
 
-    assert!(matches!(ds1_message, Message::ReadRequest { .. }));
+    assert_matches!(ds1_message, Message::ReadRequest { .. });
 
-    assert!(matches!(
+    assert_matches!(
         harness.ds2.recv().await.unwrap(),
         Message::ReadRequest { .. },
-    ));
+    );
 
-    assert!(matches!(
+    assert_matches!(
         harness.ds3.recv().await.unwrap(),
         Message::ReadRequest { .. },
-    ));
+    );
 
     // If downstairs 1 disconnects and reconnects, it should get the exact
     // same message replayed to it.
@@ -795,10 +796,10 @@ async fn test_successful_live_repair() {
         });
 
         // Assert we're seeing the read requests (without replying on DS1)
-        assert!(matches!(
+        assert_matches!(
             harness.ds1().recv().await.unwrap(),
             Message::ReadRequest { .. },
-        ));
+        );
 
         harness.ds2.ack_read().await;
         harness.ds3.ack_read().await;
@@ -831,8 +832,8 @@ async fn run_live_repair(mut harness: TestHarness) {
 
     // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
     // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
-    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
+    assert_matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty));
+    assert_matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty));
 
     // Flush to clean out skipped jobs
     {
@@ -1574,9 +1575,9 @@ async fn test_byte_fault_condition() {
         h.await.unwrap();
 
         let ds = harness.guest.downstairs_state().await.unwrap();
-        assert_eq!(ds[ClientId::new(0)], DsState::Active);
-        assert_eq!(ds[ClientId::new(1)], DsState::Active);
-        assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        assert_eq!(ds[ClientId::new(0)], DsStateTag::Active);
+        assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+        assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
         // Once one of the Downstairs has cached more that a certain amount of
         // bytes, it will automatically send a Barrier operation.
@@ -1613,13 +1614,13 @@ async fn test_byte_fault_condition() {
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_eq!(
         ds[ClientId::new(0)],
-        DsState::Connecting {
+        DsStateTag::Connecting {
             mode: ConnectionMode::Faulted,
-            state: NegotiationState::Start
+            state: NegotiationStateTag::Start
         }
     );
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // Confirm that the system comes up after live-repair
     run_live_repair(harness).await;
@@ -1665,10 +1666,10 @@ async fn test_byte_fault_condition_offline() {
         });
 
         // Before we're kicked out, assert we're seeing the read requests
-        assert!(matches!(
+        assert_matches!(
             harness.ds1().recv().await.unwrap(),
             Message::Write { .. },
-        ));
+        );
         harness.ds2.ack_write().await;
         harness.ds3.ack_write().await;
 
@@ -1677,9 +1678,9 @@ async fn test_byte_fault_condition_offline() {
         h.await.unwrap();
 
         let ds = harness.guest.downstairs_state().await.unwrap();
-        assert_eq!(ds[ClientId::new(0)], DsState::Active);
-        assert_eq!(ds[ClientId::new(1)], DsState::Active);
-        assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        assert_eq!(ds[ClientId::new(0)], DsStateTag::Active);
+        assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+        assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
     }
 
     // Sleep until we're confident that the Downstairs is kicked out
@@ -1690,13 +1691,13 @@ async fn test_byte_fault_condition_offline() {
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_eq!(
         ds[ClientId::new(0)],
-        DsState::Connecting {
+        DsStateTag::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start
+            state: NegotiationStateTag::Start
         }
     );
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // At this point, DS1 has `num_jobs` pending and is offline.  We can
     // transition it to `Faulted` by sending it enough to hit
@@ -1725,23 +1726,23 @@ async fn test_byte_fault_condition_offline() {
         if (i + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
             assert_eq!(
                 ds[ClientId::new(0)],
-                DsState::Connecting {
+                DsStateTag::Connecting {
                     mode: ConnectionMode::Offline,
-                    state: NegotiationState::Start
+                    state: NegotiationStateTag::Start
                 }
             );
-            assert_eq!(ds[ClientId::new(1)], DsState::Active);
-            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+            assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+            assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
         } else {
             assert_eq!(
                 ds[ClientId::new(0)],
-                DsState::Connecting {
+                DsStateTag::Connecting {
                     mode: ConnectionMode::Faulted,
-                    state: NegotiationState::Start
+                    state: NegotiationStateTag::Start
                 }
             );
-            assert_eq!(ds[ClientId::new(1)], DsState::Active);
-            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+            assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+            assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
         }
 
         // If we've sent IO_CACHED_MAX_BYTES, then we expect the Upstairs to
@@ -1786,13 +1787,13 @@ async fn test_offline_can_deactivate() {
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_eq!(
         ds[ClientId::new(0)],
-        DsState::Connecting {
+        DsStateTag::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start
+            state: NegotiationStateTag::Start
         }
     );
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // Send a deactivate request.  Since we have no IO, this should happen
     // right away.
@@ -1829,13 +1830,13 @@ async fn test_offline_with_io_can_deactivate() {
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_eq!(
         ds[ClientId::new(0)],
-        DsState::Connecting {
+        DsStateTag::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start
+            state: NegotiationStateTag::Start
         }
     );
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // We must `spawn` here because `read` will wait for the response to
     // come back before returning
@@ -1887,9 +1888,9 @@ async fn test_all_offline_with_io_can_deactivate() {
     for cid in ClientId::iter() {
         assert_eq!(
             ds[cid],
-            DsState::Connecting {
+            DsStateTag::Connecting {
                 mode: ConnectionMode::Offline,
-                state: NegotiationState::Start
+                state: NegotiationStateTag::Start
             }
         );
     }
@@ -1946,9 +1947,9 @@ async fn test_job_fault_condition() {
         h.await.unwrap();
 
         let ds = harness.guest.downstairs_state().await.unwrap();
-        assert_eq!(ds[ClientId::new(0)], DsState::Active);
-        assert_eq!(ds[ClientId::new(1)], DsState::Active);
-        assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        assert_eq!(ds[ClientId::new(0)], DsStateTag::Active);
+        assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+        assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
         // When we hit IO_CACHED_MAX_JOBS, the Upstairs will attempt to send a
         // barrier to retire jobs.  The barrier won't succeed, because we're not
@@ -1991,13 +1992,13 @@ async fn test_job_fault_condition() {
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_eq!(
         ds[ClientId::new(0)],
-        DsState::Connecting {
+        DsStateTag::Connecting {
             mode: ConnectionMode::Faulted,
-            state: NegotiationState::Start
+            state: NegotiationStateTag::Start
         }
     );
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // Confirm that the system comes up after live-repair
     run_live_repair(harness).await;
@@ -2036,10 +2037,10 @@ async fn test_job_fault_condition_offline() {
         });
 
         // DS1 should be receiving messages
-        assert!(matches!(
+        assert_matches!(
             harness.ds1().recv().await.unwrap(),
             Message::ReadRequest { .. },
-        ));
+        );
 
         // Respond with read responses for downstairs 2 and 3
         harness.ds2.ack_read().await;
@@ -2050,9 +2051,9 @@ async fn test_job_fault_condition_offline() {
         h.await.unwrap();
 
         let ds = harness.guest.downstairs_state().await.unwrap();
-        assert_eq!(ds[ClientId::new(0)], DsState::Active);
-        assert_eq!(ds[ClientId::new(1)], DsState::Active);
-        assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        assert_eq!(ds[ClientId::new(0)], DsStateTag::Active);
+        assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+        assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
     }
 
     // Sleep until we're confident that the Downstairs is kicked out
@@ -2063,13 +2064,13 @@ async fn test_job_fault_condition_offline() {
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_eq!(
         ds[ClientId::new(0)],
-        DsState::Connecting {
+        DsStateTag::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start
+            state: NegotiationStateTag::Start
         }
     );
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // At this point, DS1 has `num_jobs` pending and is offline.  We can
     // transition it to `Faulted` by sending it enough to hit
@@ -2112,24 +2113,24 @@ async fn test_job_fault_condition_offline() {
             // At this point, we should still be offline
             assert_eq!(
                 ds[ClientId::new(0)],
-                DsState::Connecting {
+                DsStateTag::Connecting {
                     mode: ConnectionMode::Offline,
-                    state: NegotiationState::Start
+                    state: NegotiationStateTag::Start
                 }
             );
-            assert_eq!(ds[ClientId::new(1)], DsState::Active);
-            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+            assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+            assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
         } else {
             // After ds1 is kicked out, we shouldn't see any more messages
             assert_eq!(
                 ds[ClientId::new(0)],
-                DsState::Connecting {
+                DsStateTag::Connecting {
                     mode: ConnectionMode::Faulted,
-                    state: NegotiationState::Start
+                    state: NegotiationStateTag::Start
                 }
             );
-            assert_eq!(ds[ClientId::new(1)], DsState::Active);
-            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+            assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+            assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
         }
     }
 
@@ -2155,10 +2156,10 @@ async fn test_error_during_live_repair_no_halt() {
         });
 
         // Assert we're seeing the read requests (without replying on DS1)
-        assert!(matches!(
+        assert_matches!(
             harness.ds1().recv().await.unwrap(),
             Message::ReadRequest { .. },
-        ));
+        );
 
         let job_id = harness.ds2.ack_read().await;
         job_ids.push(job_id);
@@ -2176,8 +2177,8 @@ async fn test_error_during_live_repair_no_halt() {
 
     // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
     // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
-    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
+    assert_matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty));
+    assert_matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty));
 
     // Flush to clean out skipped jobs
     {
@@ -2609,10 +2610,10 @@ async fn test_no_read_only_live_repair() {
         });
 
         // Assert we're seeing the read requests (without replying on DS1)
-        assert!(matches!(
+        assert_matches!(
             harness.ds1().recv().await.unwrap(),
             Message::ReadRequest { .. },
-        ));
+        );
 
         let job_id = harness.ds2.ack_read().await;
         job_ids.push(job_id);
@@ -2630,8 +2631,8 @@ async fn test_no_read_only_live_repair() {
 
     // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
     // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
-    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
+    assert_matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty));
+    assert_matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty));
 
     // Flush to clean out skipped jobs
     {
@@ -2869,13 +2870,13 @@ async fn test_no_send_offline() {
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_eq!(
         ds[ClientId::new(0)],
-        DsState::Connecting {
+        DsStateTag::Connecting {
             mode: ConnectionMode::Offline,
-            state: NegotiationState::Start
+            state: NegotiationStateTag::Start
         }
     );
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
     info!(harness.log, "DS1 is offline");
 
     // Reconnect ds1
@@ -2995,13 +2996,13 @@ async fn test_ro_activate_from_list(activate: [bool; 3]) {
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let ds = harness.guest.downstairs_state().await.unwrap();
-        if activate[0] && ds[ClientId::new(0)] != DsState::Active {
+        if activate[0] && ds[ClientId::new(0)] != DsStateTag::Active {
             continue;
         }
-        if activate[1] && ds[ClientId::new(1)] != DsState::Active {
+        if activate[1] && ds[ClientId::new(1)] != DsStateTag::Active {
             continue;
         }
-        if activate[2] && ds[ClientId::new(2)] != DsState::Active {
+        if activate[2] && ds[ClientId::new(2)] != DsStateTag::Active {
             continue;
         }
         break;
@@ -3125,12 +3126,12 @@ async fn test_bytes_based_barrier() {
     harness.ds3.ack_flush().await;
 }
 
-fn assert_faulted(s: &DsState) {
+fn assert_faulted(s: &DsStateTag) {
     match s {
-        DsState::Stopping(ClientStopReason::Fault(
+        DsStateTag::Stopping(ClientStopReason::Fault(
             ClientFaultReason::RequestedFault,
         ))
-        | DsState::Connecting {
+        | DsStateTag::Connecting {
             mode: ConnectionMode::Faulted,
             ..
         } => (),
@@ -3156,8 +3157,8 @@ async fn fast_write_rejection() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_faulted(&ds[ClientId::new(0)]);
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // Send a second write, which should still work (because we have 2/3 ds)
     harness
@@ -3171,7 +3172,7 @@ async fn fast_write_rejection() {
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_faulted(&ds[ClientId::new(0)]);
     assert_faulted(&ds[ClientId::new(1)]);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // Subsequent writes should be rejected immediately
     let r = harness.guest.write(BlockIndex(0), write_buf.clone()).await;
@@ -3199,8 +3200,8 @@ async fn read_with_one_fault() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_faulted(&ds[ClientId::new(0)]);
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // Check that reads still work
     let h = harness.spawn(|guest| async move {
@@ -3223,7 +3224,7 @@ async fn read_with_one_fault() {
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_faulted(&ds[ClientId::new(0)]);
     assert_faulted(&ds[ClientId::new(1)]);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // Reads still work with 1x Downstairs
     let h = harness.spawn(|guest| async move {
@@ -3280,8 +3281,8 @@ async fn fast_flush_rejection() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_faulted(&ds[ClientId::new(0)]);
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
-    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
+    assert_eq!(ds[ClientId::new(2)], DsStateTag::Active);
 
     // A flush with snapshot should fail immediately
     match harness
@@ -3314,7 +3315,7 @@ async fn fast_flush_rejection() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let ds = harness.guest.downstairs_state().await.unwrap();
     assert_faulted(&ds[ClientId::new(0)]);
-    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_eq!(ds[ClientId::new(1)], DsStateTag::Active);
     assert_faulted(&ds[ClientId::new(2)]);
 
     // Subsequent flushes should fail immediately
