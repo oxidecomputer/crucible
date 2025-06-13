@@ -1959,15 +1959,14 @@ impl Downstairs {
     /// # Panics
     /// If any downstairs client does not have region metadata populated
     fn mismatch_list(&self) -> Option<DownstairsMend> {
-        let c = |i| {
-            self.clients[ClientId::new(i)]
-                .region_metadata
-                .as_ref()
-                .unwrap()
-        };
-
         let log = self.log.new(o!("" => "mend".to_string()));
-        DownstairsMend::new(c(0), c(1), c(2), log)
+        let mut meta = ClientMap::new();
+        for i in ClientId::iter() {
+            // XXX once we start doing reconciliation with only 2 downstairs,
+            // this may only insert region_metadata that is present.
+            meta.insert(i, self.clients[i].region_metadata.as_ref().unwrap());
+        }
+        DownstairsMend::new(&meta, log)
     }
 
     pub(crate) fn submit_flush(
