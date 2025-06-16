@@ -92,9 +92,7 @@ impl DownstairsMend {
             mend: HashMap::new(),
         };
 
-        let Some((cid, _)) = meta.iter().next() else {
-            return None;
-        };
+        let (cid, _) = meta.iter().next()?;
 
         /*
          * Sanity check that all fields of the RegionMetadata struct have the
@@ -111,7 +109,7 @@ impl DownstairsMend {
             });
             if any_diff {
                 info!(log, "extent {i} needs reconciliation: {meta:?}",);
-                let ef = make_repair_list(i, &meta, &log);
+                let ef = make_repair_list(i, meta, &log);
                 dsm.mend.insert(ExtentId(i as u32), ef);
             }
         }
@@ -177,8 +175,10 @@ fn find_dest(
     let c = meta.map(|m| m.get(i).unwrap());
     let s = c[source];
 
-    let out = ClientId::iter()
-        .filter(|&i| i != source && (s.dirty || c[i] != s))
+    let out = c
+        .iter()
+        .filter(|(i, c)| *i != source && (s.dirty || **c != s))
+        .map(|(i, _c)| i)
         .collect::<Vec<_>>();
 
     info!(
@@ -1406,5 +1406,64 @@ mod test {
 
         // Extent 8  No mismatch
         assert!(fix.mend.is_empty());
+    }
+
+    #[test]
+    fn reconcile_only_one() {
+        // If there's only a single region present, then there should be no
+        // reconciliation
+        let dsr =
+            RegionMetadata::new(&[1, 1, 1], &[3, 3, 3], &[false, false, false]);
+        for i in ClientId::iter() {
+            let mut meta = ClientMap::new();
+            meta.insert(i, &dsr);
+            let to_fix = DownstairsMend::new(&meta, csl());
+            assert!(to_fix.is_none());
+        }
+    }
+
+    #[test]
+    fn reconcile_two() {
+        // If there's only a single region present, then there should be no
+        // reconciliation
+        let c0 = RegionMetadata::new(
+            &[1, 1, 1, 5],
+            &[3, 4, 3, 9],
+            &[false, false, false, true],
+        );
+        let c1 = RegionMetadata::new(
+            &[2, 1, 1, 5],
+            &[3, 3, 3, 9],
+            &[false, false, true, true],
+        );
+
+        for (lo, hi) in [(0, 1), (0, 2), (1, 2)] {
+            let lo = ClientId::new(lo);
+            let hi = ClientId::new(hi);
+            let mut meta = ClientMap::new();
+            meta.insert(lo, &c0);
+            meta.insert(hi, &c1);
+            let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
+
+            // c1 has a newer generation number
+            let ef = fix.mend.remove(&ExtentId(0)).unwrap();
+            assert_eq!(ef.source, hi);
+            assert_eq!(ef.dest, vec![lo]);
+
+            // c0 has a newer flush number
+            let ef = fix.mend.remove(&ExtentId(1)).unwrap();
+            assert_eq!(ef.source, lo);
+            assert_eq!(ef.dest, vec![hi]);
+
+            // c1 is dirty, pick it as source
+            let ef = fix.mend.remove(&ExtentId(2)).unwrap();
+            assert_eq!(ef.source, hi);
+            assert_eq!(ef.dest, vec![lo]);
+
+            // Both are dirty, pick the lowest ClientId as source
+            let ef = fix.mend.remove(&ExtentId(3)).unwrap();
+            assert_eq!(ef.source, lo);
+            assert_eq!(ef.dest, vec![hi]);
+        }
     }
 }

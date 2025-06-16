@@ -433,7 +433,7 @@ impl<T> ClientData<T> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn iter(&self) -> impl Iterator<Item = &T> + DoubleEndedIterator {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
         self.0.iter()
     }
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
@@ -477,9 +477,7 @@ impl<T> ClientMap<T> {
     pub fn insert(&mut self, c: ClientId, v: T) -> Option<T> {
         self.0.insert(c, Some(v))
     }
-    pub fn iter(
-        &self,
-    ) -> impl Iterator<Item = (ClientId, &T)> + DoubleEndedIterator {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (ClientId, &T)> {
         self.0
              .0
             .iter()
@@ -497,10 +495,7 @@ impl<T> ClientMap<T> {
     }
     /// Builds a new `ClientMap` by applying a function to each item
     pub fn map<U, F: FnMut(T) -> U>(self, mut f: F) -> ClientMap<U> {
-        ClientMap(self.0.map(move |v| match v {
-            Some(v) => Some(f(v)),
-            None => None,
-        }))
+        ClientMap(self.0.map(move |v| v.map(&mut f)))
     }
 }
 
