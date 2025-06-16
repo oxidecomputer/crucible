@@ -1366,8 +1366,8 @@ impl Downstairs {
     ///
     /// # Panics
     /// If the upstairs is not in `UpstairsState::Active`, or either (1) the
-    /// source downstairs is not `DsStateData::Active`, or (2) the repair downstairs
-    /// are not all `DsStateData::LiveRepair`.
+    /// source downstairs is not `DsState::Active`, or (2) the repair downstairs
+    /// are not all `DsState::LiveRepair`.
     fn start_live_repair(
         &mut self,
         repair_downstairs: &[ClientId],
@@ -1412,8 +1412,8 @@ impl Downstairs {
     /// - If `self.repair` is `None`
     /// - If the upstairs is not in `UpstairsState::Active`, or we _are not_
     ///   aborting the repair but either (1) the source downstairs is not
-    ///   `DsStateData::Active`, or (2) the repair downstairs are not all
-    ///   `DsStateData::LiveRepair`.
+    ///   `DsState::Active`, or (2) the repair downstairs are not all
+    ///   `DsState::LiveRepair`.
     fn send_live_repair_jobs(&mut self, up_state: &UpstairsState) {
         // Keep going!
         let repair = self.repair.as_mut().unwrap();
@@ -4068,11 +4068,7 @@ pub(crate) mod test {
                 NegotiationStateData::WaitForPromote,
                 NegotiationStateData::WaitForRegionInfo,
                 NegotiationStateData::GetExtentVersions,
-                NegotiationStateData::WaitQuorum(RegionMetadata::new(
-                    &[],
-                    &[],
-                    &[],
-                )),
+                NegotiationStateData::WaitQuorum(RegionMetadata::default()),
                 NegotiationStateData::Reconcile,
             ] {
                 ds.clients[cid].checked_state_transition(
@@ -5757,7 +5753,7 @@ pub(crate) mod test {
         );
         assert!(!nw);
 
-        // The two troublesome tasks will end up in DsStateData::New.
+        // The two troublesome tasks will end up in DsState::New.
         assert_eq!(ds.clients[ClientId::new(0)].state(), STOP_FAILED_RECONCILE,);
         assert_eq!(ds.clients[ClientId::new(1)].state(), STOP_FAULT_REQUESTED);
         assert_eq!(ds.clients[ClientId::new(2)].state(), STOP_FAILED_RECONCILE);

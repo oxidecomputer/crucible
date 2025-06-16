@@ -750,7 +750,7 @@ impl DownstairsClient {
                     error!(
                         self.log,
                         "failed to set client as active {e:?};
-                     are we shutting down?"
+                         are we shutting down?"
                     );
                 }
             }
@@ -1032,7 +1032,7 @@ impl DownstairsClient {
                     ) | (
                         R::Replacing,
                         ConnectionMode::New,
-                        NegotiationStateData::Start
+                        NegotiationStateData::WaitConnect(..)
                     ) | (
                         R::NegotiationFailed(..),
                         ConnectionMode::New,
