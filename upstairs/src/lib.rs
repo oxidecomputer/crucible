@@ -755,11 +755,17 @@ pub(crate) struct RawReadResponse {
 ///
 /// Complexity is hidden in the `Connecting` state, which wraps a
 /// [`NegotiationStateData`] implementing the negotiation state machine.
+///
+/// This is a *generic* downstairs state; it's specialized to either
+/// [`DsStateData`] (which is data-bearing) or [`DsState`] (which is
+/// serializable).  The `#[derive(..)]` annotations for serialization only apply
+/// if the generic parameter `N` is serializable, so it only applies to
+/// `DsState`.
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type", content = "value")]
 #[serde(rename = "DsState")]
-pub enum DsStateData<N = NegotiationStateData> {
+pub enum GenericDsState<N> {
     /// New connection
     Connecting { state: N, mode: ConnectionMode },
 
@@ -773,78 +779,81 @@ pub enum DsStateData<N = NegotiationStateData> {
     Stopping(ClientStopReason),
 }
 
-/// Downstairs state which can be serialized and sent over the network
-pub type DsState = DsStateData<NegotiationState>;
+/// Downstairs state with data-bearing variants
+pub type DsStateData = GenericDsState<NegotiationStateData>;
 
-impl<N1, N2> From<&DsStateData<N1>> for DsStateData<N2>
+/// Downstairs state which can be serialized and sent over the network
+pub type DsState = GenericDsState<NegotiationState>;
+
+impl<N1, N2> From<&GenericDsState<N1>> for GenericDsState<N2>
 where
     for<'a> N2: From<&'a N1>,
 {
-    fn from(value: &DsStateData<N1>) -> Self {
+    fn from(value: &GenericDsState<N1>) -> Self {
         match value {
-            DsStateData::Connecting { state, mode } => Self::Connecting {
+            GenericDsState::Connecting { state, mode } => Self::Connecting {
                 state: state.into(),
                 mode: *mode,
             },
-            DsStateData::Active => Self::Active,
-            DsStateData::LiveRepair => Self::LiveRepair,
-            DsStateData::Stopping(r) => Self::Stopping(*r),
+            GenericDsState::Active => Self::Active,
+            GenericDsState::LiveRepair => Self::LiveRepair,
+            GenericDsState::Stopping(r) => Self::Stopping(*r),
         }
     }
 }
 
-impl std::fmt::Display for DsStateData {
+impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DsStateData::Connecting {
-                state: NegotiationStateData::WaitQuorum(..),
+            DsState::Connecting {
+                state: NegotiationState::WaitQuorum,
                 ..
             } => {
                 write!(f, "WaitQuorum")
             }
-            DsStateData::Connecting {
-                state: NegotiationStateData::Reconcile,
+            DsState::Connecting {
+                state: NegotiationState::Reconcile,
                 ..
             } => {
                 write!(f, "Reconcile")
             }
-            DsStateData::Connecting {
-                state: NegotiationStateData::LiveRepairReady,
+            DsState::Connecting {
+                state: NegotiationState::LiveRepairReady,
                 ..
             } => {
                 write!(f, "LiveRepairReady")
             }
-            DsStateData::Active => {
+            DsState::Active => {
                 write!(f, "Active")
             }
-            DsStateData::Connecting {
+            DsState::Connecting {
                 mode: ConnectionMode::New,
                 ..
             } => {
                 write!(f, "New")
             }
-            DsStateData::Connecting {
+            DsState::Connecting {
                 mode: ConnectionMode::Faulted,
                 ..
             } => {
                 write!(f, "Faulted")
             }
-            DsStateData::Connecting {
+            DsState::Connecting {
                 mode: ConnectionMode::Offline,
                 ..
             } => {
                 write!(f, "Offline")
             }
-            DsStateData::Connecting {
+            DsState::Connecting {
                 mode: ConnectionMode::Replaced,
                 ..
             } => {
                 write!(f, "Replaced")
             }
-            DsStateData::LiveRepair => {
+            DsState::LiveRepair => {
                 write!(f, "LiveRepair")
             }
-            DsStateData::Stopping(..) => {
+            DsState::Stopping(..) => {
                 write!(f, "Stopping")
             }
         }

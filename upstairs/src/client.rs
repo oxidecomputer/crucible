@@ -1,11 +1,11 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    assert_matches, cdt, integrity_hash, io_limits::ClientIOLimits,
-    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
-    ClientIOStateCount, ClientId, ConnectionMode, CrucibleDecoder,
-    CrucibleError, DownstairsIO, DsState, DsStateData, EncryptionContext,
-    IOState, IOop, JobId, Message, RawReadResponse, ReconcileIO,
-    ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
+    cdt, integrity_hash, io_limits::ClientIOLimits, live_repair::ExtentInfo,
+    upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
+    ClientId, ConnectionMode, CrucibleDecoder, CrucibleError, DownstairsIO,
+    DsState, DsStateData, EncryptionContext, IOState, IOop, JobId, Message,
+    RawReadResponse, ReconcileIO, ReconcileIOState, RegionDefinitionStatus,
+    RegionMetadata,
 };
 use crucible_common::{x509::TLSContext, NegotiationError, VerboseTimeout};
 use crucible_protocol::{
@@ -431,7 +431,7 @@ impl DownstairsClient {
     /// If the job's state is not [`IOState::InProgress`]
     pub(crate) fn skip_job(&mut self, ds_id: JobId, job: &mut DownstairsIO) {
         let prev_state = self.set_job_state(job, IOState::Skipped);
-        assert_matches!(prev_state, IOState::InProgress);
+        assert!(matches!(prev_state, IOState::InProgress));
         self.skipped_jobs.insert(ds_id);
     }
 
@@ -447,8 +447,8 @@ impl DownstairsClient {
                 self.state, self.client_id
             );
         };
-        assert_matches!(state, NegotiationStateData::WaitQuorum(..));
-        assert_matches!(mode, ConnectionMode::New);
+        assert!(matches!(state, NegotiationStateData::WaitQuorum(..)));
+        assert!(matches!(mode, ConnectionMode::New));
         *state = NegotiationStateData::Reconcile;
     }
 
@@ -758,7 +758,12 @@ impl DownstairsClient {
     }
 
     /// Accessor method for client connection state
-    pub(crate) fn state(&self) -> &DsStateData {
+    pub(crate) fn state(&self) -> DsState {
+        (&self.state).into()
+    }
+
+    /// Accessor method for data-bearing client connection state
+    pub(crate) fn state_data(&self) -> &DsStateData {
         &self.state
     }
 
@@ -772,7 +777,11 @@ impl DownstairsClient {
 
     /// Sets the current state to `DsStateData::Active`
     pub(crate) fn set_active(&mut self) {
-        info!(self.log, "Transition from {} to Active", self.state);
+        info!(
+            self.log,
+            "Transition from {} to Active",
+            DsState::from(&self.state)
+        );
         self.state = DsStateData::Active;
     }
 
@@ -1068,7 +1077,7 @@ impl DownstairsClient {
     /// # Panics
     /// If this client is not in `DsStateData::LiveRepair`
     pub(crate) fn finish_repair(&mut self, up_state: &UpstairsState) {
-        assert_matches!(self.state, DsStateData::LiveRepair);
+        assert!(matches!(self.state, DsStateData::LiveRepair));
         self.checked_state_transition(up_state, DsStateData::Active);
         self.repair_info = None;
         self.stats.live_repair_completed += 1;
@@ -1271,7 +1280,7 @@ impl DownstairsClient {
         let DsStateData::Connecting { state, .. } = &self.state else {
             panic!("invalid state");
         };
-        assert_matches!(state, NegotiationStateData::LiveRepairReady);
+        assert!(matches!(state, NegotiationStateData::LiveRepairReady));
         self.checked_state_transition(up_state, DsStateData::LiveRepair);
     }
 
