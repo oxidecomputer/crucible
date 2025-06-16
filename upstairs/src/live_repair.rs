@@ -94,23 +94,11 @@ pub mod repair_test {
         },
     };
 
-    // Helper functions to make messy assertions
-    fn assert_stop_io_error(s: &DsStateData) {
-        assert_matches!(
-            s,
-            DsStateData::Stopping(ClientStopReason::Fault(
-                ClientFaultReason::IOError
-            ))
-        )
-    }
-    fn assert_stop_failed_lr(s: &DsStateData) {
-        assert_matches!(
-            s,
-            DsStateData::Stopping(ClientStopReason::Fault(
-                ClientFaultReason::FailedLiveRepair
-            ))
-        )
-    }
+    const STOP_IO_ERROR: DsState =
+        DsState::Stopping(ClientStopReason::Fault(ClientFaultReason::IOError));
+    const STOP_FAILED_LR: DsState = DsState::Stopping(ClientStopReason::Fault(
+        ClientFaultReason::FailedLiveRepair,
+    ));
 
     /// Test function to send fake replies for the given job, completing it
     ///
@@ -434,10 +422,7 @@ pub mod repair_test {
             }
         }
         assert_eq!(job.state_count().done, 3);
-        assert_matches!(
-            up.downstairs.clients[or_ds].state(),
-            DsStateData::LiveRepair
-        );
+        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::LiveRepair);
 
         // Check that the subsequent job has started
         let job = up.downstairs.get_job(&ds_next_close_id).unwrap();
@@ -507,7 +492,7 @@ pub mod repair_test {
         }
 
         // process_ds_completion should force the downstairs to fail
-        assert_stop_io_error(up.downstairs.clients[err_ds].state());
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
 
         info!(up.log, "repair job should have got here, move it forward");
         // The repair (NoOp) job should have shown up.  Move it forward.
@@ -602,9 +587,9 @@ pub mod repair_test {
 
         // Because the repair has failed, the extent that was under
         // repair should also now be faulted.
-        assert_stop_io_error(up.downstairs.clients[err_ds].state());
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
         if err_ds != or_ds {
-            assert_stop_failed_lr(up.downstairs.clients[or_ds].state());
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
         }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();
@@ -681,9 +666,9 @@ pub mod repair_test {
         // process_ds_completion should force both the downstairs that
         // reported the error, and the downstairs that is under repair to
         // fail.
-        assert_stop_io_error(up.downstairs.clients[err_ds].state());
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
         if err_ds != or_ds {
-            assert_stop_failed_lr(up.downstairs.clients[or_ds].state());
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
         }
 
         // When we completed the repair jobs, the repair_extent should
@@ -752,9 +737,9 @@ pub mod repair_test {
             assert_eq!(job.state_count().skipped, 1);
         }
 
-        assert_stop_io_error(up.downstairs.clients[err_ds].state());
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
         if err_ds != or_ds {
-            assert_stop_failed_lr(up.downstairs.clients[or_ds].state());
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
         }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();
@@ -867,9 +852,9 @@ pub mod repair_test {
             assert_eq!(job.state_count().skipped, 1);
         }
 
-        assert_stop_io_error(up.downstairs.clients[err_ds].state());
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
         if err_ds != or_ds {
-            assert_stop_failed_lr(up.downstairs.clients[or_ds].state());
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
         }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();
@@ -989,9 +974,9 @@ pub mod repair_test {
         assert_eq!(job.state_count().done, 2);
         assert_eq!(job.state_count().skipped, 1);
 
-        assert_stop_io_error(up.downstairs.clients[err_ds].state());
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
         if err_ds != or_ds {
-            assert_stop_failed_lr(up.downstairs.clients[or_ds].state());
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
         }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();
@@ -1091,9 +1076,9 @@ pub mod repair_test {
         assert_eq!(job.state_count().done, 2);
         assert_eq!(job.state_count().error, 1);
 
-        assert_stop_io_error(up.downstairs.clients[err_ds].state());
+        assert_eq!(up.downstairs.clients[err_ds].state(), STOP_IO_ERROR);
         if err_ds != or_ds {
-            assert_stop_failed_lr(up.downstairs.clients[or_ds].state());
+            assert_eq!(up.downstairs.clients[or_ds].state(), STOP_FAILED_LR);
         }
 
         let job = up.downstairs.get_job(&ds_flush_id).unwrap();

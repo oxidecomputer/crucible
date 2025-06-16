@@ -7,7 +7,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::assert_matches;
 use crate::client::{CLIENT_RECONNECT_DELAY, CLIENT_TIMEOUT};
 use crate::guest::Guest;
 use crate::up_main;
@@ -740,17 +739,17 @@ async fn test_replay_occurs() {
     // Confirm all downstairs receive said read
     let ds1_message = harness.ds1().recv().await.unwrap();
 
-    assert_matches!(ds1_message, Message::ReadRequest { .. });
+    assert!(matches!(ds1_message, Message::ReadRequest { .. }));
 
-    assert_matches!(
+    assert!(matches!(
         harness.ds2.recv().await.unwrap(),
         Message::ReadRequest { .. },
-    );
+    ));
 
-    assert_matches!(
+    assert!(matches!(
         harness.ds3.recv().await.unwrap(),
         Message::ReadRequest { .. },
-    );
+    ));
 
     // If downstairs 1 disconnects and reconnects, it should get the exact
     // same message replayed to it.
@@ -796,10 +795,10 @@ async fn test_successful_live_repair() {
         });
 
         // Assert we're seeing the read requests (without replying on DS1)
-        assert_matches!(
+        assert!(matches!(
             harness.ds1().recv().await.unwrap(),
             Message::ReadRequest { .. },
-        );
+        ));
 
         harness.ds2.ack_read().await;
         harness.ds3.ack_read().await;
@@ -832,8 +831,8 @@ async fn run_live_repair(mut harness: TestHarness) {
 
     // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
     // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert_matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty));
-    assert_matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty));
+    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
+    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
 
     // Flush to clean out skipped jobs
     {
@@ -1666,10 +1665,10 @@ async fn test_byte_fault_condition_offline() {
         });
 
         // Before we're kicked out, assert we're seeing the read requests
-        assert_matches!(
+        assert!(matches!(
             harness.ds1().recv().await.unwrap(),
             Message::Write { .. },
-        );
+        ));
         harness.ds2.ack_write().await;
         harness.ds3.ack_write().await;
 
@@ -2037,10 +2036,10 @@ async fn test_job_fault_condition_offline() {
         });
 
         // DS1 should be receiving messages
-        assert_matches!(
+        assert!(matches!(
             harness.ds1().recv().await.unwrap(),
             Message::ReadRequest { .. },
-        );
+        ));
 
         // Respond with read responses for downstairs 2 and 3
         harness.ds2.ack_read().await;
@@ -2156,10 +2155,10 @@ async fn test_error_during_live_repair_no_halt() {
         });
 
         // Assert we're seeing the read requests (without replying on DS1)
-        assert_matches!(
+        assert!(matches!(
             harness.ds1().recv().await.unwrap(),
             Message::ReadRequest { .. },
-        );
+        ));
 
         let job_id = harness.ds2.ack_read().await;
         job_ids.push(job_id);
@@ -2177,8 +2176,8 @@ async fn test_error_during_live_repair_no_halt() {
 
     // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
     // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert_matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty));
-    assert_matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty));
+    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
+    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
 
     // Flush to clean out skipped jobs
     {
@@ -2610,10 +2609,10 @@ async fn test_no_read_only_live_repair() {
         });
 
         // Assert we're seeing the read requests (without replying on DS1)
-        assert_matches!(
+        assert!(matches!(
             harness.ds1().recv().await.unwrap(),
             Message::ReadRequest { .. },
-        );
+        ));
 
         let job_id = harness.ds2.ack_read().await;
         job_ids.push(job_id);
@@ -2631,8 +2630,8 @@ async fn test_no_read_only_live_repair() {
 
     // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
     // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert_matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty));
-    assert_matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty));
+    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
+    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
 
     // Flush to clean out skipped jobs
     {
