@@ -1119,7 +1119,6 @@ pub mod repair_test {
         let mode = ConnectionMode::Faulted;
         for state in [
             NegotiationState::Start,
-            NegotiationState::WaitActive,
             NegotiationState::WaitForPromote,
             NegotiationState::WaitForRegionInfo,
             NegotiationState::GetExtentVersions,

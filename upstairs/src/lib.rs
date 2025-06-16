@@ -758,12 +758,6 @@ impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DsState::Connecting {
-                state: NegotiationState::WaitActive,
-                ..
-            } => {
-                write!(f, "WaitActive")
-            }
-            DsState::Connecting {
                 state: NegotiationState::WaitQuorum,
                 ..
             } => {
