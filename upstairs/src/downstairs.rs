@@ -11,7 +11,7 @@ use crate::{
     client::{
         ClientAction, ClientFaultReason, ClientNegotiationFailed,
         ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
-        NegotiationState, ShouldSendError,
+        NegotiationStateData, ShouldSendError,
     },
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
@@ -21,10 +21,10 @@ use crate::{
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, BlockRes, Buffer, ClientData,
     ClientIOStateCount, ClientId, ClientMap, ConnectionMode, CrucibleError,
-    DownstairsIO, DownstairsMend, DsState, ExtentFix, ExtentRepairIDs, IOState,
-    IOStateCount, IOop, ImpactedBlocks, JobId, Message, RawReadResponse,
-    RawWrite, ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
-    SnapshotDetails, WorkSummary,
+    DownstairsIO, DownstairsMend, DsStateData, ExtentFix, ExtentRepairIDs,
+    IOState, IOStateCount, IOop, ImpactedBlocks, JobId, Message,
+    RawReadResponse, RawWrite, ReconcileIO, ReconciliationId, RegionDefinition,
+    ReplaceResult, SnapshotDetails, WorkSummary,
 };
 use crucible_common::{BlockIndex, ExtentId, NegotiationError};
 use crucible_protocol::WriteHeader;
@@ -422,23 +422,23 @@ impl Downstairs {
         let up_state = UpstairsState::GoActive(BlockRes::dummy());
         for cid in ClientId::iter() {
             for state in [
-                NegotiationState::Start,
-                NegotiationState::WaitForPromote,
-                NegotiationState::WaitForRegionInfo,
-                NegotiationState::GetExtentVersions,
-                NegotiationState::WaitQuorum(Default::default()),
-                NegotiationState::Reconcile,
+                NegotiationStateData::Start,
+                NegotiationStateData::WaitForPromote,
+                NegotiationStateData::WaitForRegionInfo,
+                NegotiationStateData::GetExtentVersions,
+                NegotiationStateData::WaitQuorum(Default::default()),
+                NegotiationStateData::Reconcile,
             ] {
                 self.clients[cid].checked_state_transition(
                     &up_state,
-                    DsState::Connecting {
+                    DsStateData::Connecting {
                         state,
                         mode: ConnectionMode::New,
                     },
                 );
             }
             self.clients[cid]
-                .checked_state_transition(&up_state, DsState::Active);
+                .checked_state_transition(&up_state, DsStateData::Active);
         }
     }
 
@@ -665,7 +665,7 @@ impl Downstairs {
         // Check whether we asked the IO task to stop ourselves
         let stopped_due_to_fault = matches!(
             self.clients[client_id].state(),
-            DsState::Stopping(ClientStopReason::Fault(..))
+            DsStateData::Stopping(ClientStopReason::Fault(..))
         );
 
         // Restart the IO task for that specific client, transitioning to a new
@@ -682,7 +682,7 @@ impl Downstairs {
         // through replay, then the jobs must remain live.
         let now_faulted = matches!(
             self.clients[client_id].state(),
-            DsState::Connecting {
+            DsStateData::Connecting {
                 mode: ConnectionMode::Faulted,
                 ..
             }
@@ -701,8 +701,8 @@ impl Downstairs {
         if self.clients.iter().any(|c| {
             matches!(
                 c.state(),
-                DsState::Connecting {
-                    state: NegotiationState::Reconcile,
+                DsStateData::Connecting {
+                    state: NegotiationStateData::Reconcile,
                     ..
                 }
             )
@@ -752,7 +752,7 @@ impl Downstairs {
         // requested deactivation to finish.
         if matches!(
             self.clients[client_id].state(),
-            DsState::Connecting {
+            DsStateData::Connecting {
                 mode: ConnectionMode::Offline,
                 ..
             }
@@ -871,8 +871,8 @@ impl Downstairs {
             for c in self.clients.iter() {
                 assert_matches!(
                     c.state(),
-                    DsState::Connecting {
-                        state: NegotiationState::WaitQuorum(..),
+                    DsStateData::Connecting {
+                        state: NegotiationStateData::WaitQuorum(..),
                         mode: ConnectionMode::New
                     }
                 );
@@ -894,8 +894,8 @@ impl Downstairs {
         let mut max_flush = 0;
         let mut max_gen = 0;
         for (cid, rec) in ClientId::iter().filter_map(|i| {
-            if let DsState::Connecting {
-                state: NegotiationState::WaitQuorum(r),
+            if let DsStateData::Connecting {
+                state: NegotiationStateData::WaitQuorum(r),
                 ..
             } = self.clients[i].state()
             {
@@ -1010,7 +1010,7 @@ impl Downstairs {
         // existing live-repair before retrying.
         self.clients
             .iter()
-            .any(|c| matches!(c.state(), DsState::LiveRepair))
+            .any(|c| matches!(c.state(), DsStateData::LiveRepair))
             || self.repair.is_some()
     }
 
@@ -1029,13 +1029,13 @@ impl Downstairs {
         let mut source_downstairs = None;
         for cid in ClientId::iter() {
             match self.clients[cid].state() {
-                DsState::Connecting {
-                    state: NegotiationState::LiveRepairReady,
+                DsStateData::Connecting {
+                    state: NegotiationStateData::LiveRepairReady,
                     ..
                 } => {
                     repair_downstairs.push(cid);
                 }
-                DsState::Active => {
+                DsStateData::Active => {
                     source_downstairs = Some(cid);
                 }
                 _state => {
@@ -1134,10 +1134,10 @@ impl Downstairs {
         let repair = self.repair.as_ref().unwrap(); // reborrow
         if !repair.aborting_repair
             && (repair.repair_downstairs.iter().any(|&cid| {
-                !matches!(self.clients[cid].state(), DsState::LiveRepair)
+                !matches!(self.clients[cid].state(), DsStateData::LiveRepair)
             }) || !matches!(
                 self.clients[repair.source_downstairs].state(),
-                DsState::Active
+                DsStateData::Active
             ))
         {
             warn!(self.log, "aborting live-repair due to invalid state");
@@ -1365,8 +1365,8 @@ impl Downstairs {
     ///
     /// # Panics
     /// If the upstairs is not in `UpstairsState::Active`, or either (1) the
-    /// source downstairs is not `DsState::Active`, or (2) the repair downstairs
-    /// are not all `DsState::LiveRepair`.
+    /// source downstairs is not `DsStateData::Active`, or (2) the repair downstairs
+    /// are not all `DsStateData::LiveRepair`.
     fn start_live_repair(
         &mut self,
         repair_downstairs: &[ClientId],
@@ -1411,8 +1411,8 @@ impl Downstairs {
     /// - If `self.repair` is `None`
     /// - If the upstairs is not in `UpstairsState::Active`, or we _are not_
     ///   aborting the repair but either (1) the source downstairs is not
-    ///   `DsState::Active`, or (2) the repair downstairs are not all
-    ///   `DsState::LiveRepair`.
+    ///   `DsStateData::Active`, or (2) the repair downstairs are not all
+    ///   `DsStateData::LiveRepair`.
     fn send_live_repair_jobs(&mut self, up_state: &UpstairsState) {
         // Keep going!
         let repair = self.repair.as_mut().unwrap();
@@ -1433,10 +1433,13 @@ impl Downstairs {
         if !aborting {
             assert_matches!(
                 self.clients[source_downstairs].state(),
-                DsState::Active
+                DsStateData::Active
             );
             for &c in &repair_downstairs {
-                assert_matches!(self.clients[c].state(), DsState::LiveRepair);
+                assert_matches!(
+                    self.clients[c].state(),
+                    DsStateData::LiveRepair
+                );
             }
         }
 
@@ -1829,8 +1832,8 @@ impl Downstairs {
         if self.clients.iter().any(|c| {
             !matches!(
                 c.state(),
-                DsState::Connecting {
-                    state: NegotiationState::Reconcile,
+                DsStateData::Connecting {
+                    state: NegotiationStateData::Reconcile,
                     ..
                 }
             )
@@ -1884,8 +1887,8 @@ impl Downstairs {
         for (i, c) in self.clients.iter_mut().enumerate() {
             if matches!(
                 c.state(),
-                DsState::Connecting {
-                    state: NegotiationState::Reconcile,
+                DsStateData::Connecting {
+                    state: NegotiationStateData::Reconcile,
                     ..
                 }
             ) {
@@ -1921,8 +1924,8 @@ impl Downstairs {
         for (i, c) in self.clients.iter_mut().enumerate() {
             if matches!(
                 c.state(),
-                DsState::Connecting {
-                    state: NegotiationState::WaitQuorum(..),
+                DsStateData::Connecting {
+                    state: NegotiationStateData::WaitQuorum(..),
                     ..
                 }
             ) {
@@ -1965,8 +1968,8 @@ impl Downstairs {
         let log = self.log.new(o!("" => "mend".to_string()));
         let mut meta = ClientMap::new();
         for i in ClientId::iter() {
-            let DsState::Connecting {
-                state: NegotiationState::WaitQuorum(r),
+            let DsStateData::Connecting {
+                state: NegotiationStateData::WaitQuorum(r),
                 ..
             } = self.clients[i].state()
             else {
@@ -2533,12 +2536,12 @@ impl Downstairs {
             // We don't really know if the "old" matches what was old,
             // as that info is gone to us now, so assume it was true.
             match self.clients[new_client_id].state() {
-                DsState::Stopping(ClientStopReason::Replacing)
-                | DsState::Connecting {
+                DsStateData::Stopping(ClientStopReason::Replacing)
+                | DsStateData::Connecting {
                     mode: ConnectionMode::Replaced,
                     ..
                 }
-                | DsState::LiveRepair => {
+                | DsStateData::LiveRepair => {
                     // These states indicate a replacement is in progress.
                     return Ok(ReplaceResult::StartedAlready);
                 }
@@ -2565,9 +2568,9 @@ impl Downstairs {
                 continue;
             }
             match self.clients[client_id].state() {
-                DsState::Stopping(..)
-                | DsState::LiveRepair
-                | DsState::Connecting {
+                DsStateData::Stopping(..)
+                | DsStateData::LiveRepair
+                | DsStateData::Connecting {
                     mode:
                         ConnectionMode::Replaced
                         | ConnectionMode::Offline
@@ -2579,8 +2582,8 @@ impl Downstairs {
                         self.clients[client_id].state(),
                     )));
                 }
-                DsState::Active
-                | DsState::Connecting {
+                DsStateData::Active
+                | DsStateData::Connecting {
                     mode: ConnectionMode::New,
                     ..
                 } => {}
@@ -2608,7 +2611,7 @@ impl Downstairs {
     pub(crate) fn check_gone_too_long(&mut self, client_id: ClientId) {
         assert_matches!(
             self.clients[client_id].state(),
-            DsState::Connecting {
+            DsStateData::Connecting {
                 mode: ConnectionMode::Offline,
                 ..
             }
@@ -2700,7 +2703,7 @@ impl Downstairs {
         let mut found_valid_state = false;
         for i in ClientId::iter() {
             match self.clients[i].state() {
-                DsState::LiveRepair => {
+                DsStateData::LiveRepair => {
                     found_valid_state = true;
                     self.fault_client(
                         i,
@@ -2711,7 +2714,7 @@ impl Downstairs {
                 // If just a single IO reported failure, we will fault this
                 // downstairs and it won't yet have had a chance to move back
                 // around to Connecting yet.
-                DsState::Stopping(
+                DsStateData::Stopping(
                     ClientStopReason::Replacing
                     | ClientStopReason::Disabled
                     | ClientStopReason::Deactivated
@@ -2723,7 +2726,7 @@ impl Downstairs {
                 // If connection aborted, and restarted, then the re-negotiation
                 // could have won this race, and transitioned the reconnecting
                 // downstairs from LiveRepair to Stopping to Connecting.
-                DsState::Connecting {
+                DsStateData::Connecting {
                     mode: ConnectionMode::Faulted,
                     ..
                 } => found_valid_state = true,
@@ -3226,9 +3229,9 @@ impl Downstairs {
          */
         let ds_state = self.clients[client_id].state();
         match ds_state {
-            DsState::Active | DsState::LiveRepair => {}
-            DsState::Stopping(ClientStopReason::Fault(..))
-            | DsState::Connecting {
+            DsStateData::Active | DsStateData::LiveRepair => {}
+            DsStateData::Stopping(ClientStopReason::Fault(..))
+            | DsStateData::Connecting {
                 mode: ConnectionMode::Faulted,
                 ..
             } => {
@@ -3455,7 +3458,7 @@ impl Downstairs {
         // XXX this overlaps with io_state_byte_count
         self.clients
             .iter()
-            .filter(|c| matches!(c.state(), DsState::Active))
+            .filter(|c| matches!(c.state(), DsStateData::Active))
             .map(|c| c.io_state_byte_count().in_progress)
             .max()
             .unwrap_or(0)
@@ -3646,7 +3649,7 @@ impl Downstairs {
         let mut jobs = vec![];
         let mut bytes = vec![];
         for c in self.clients.iter() {
-            if matches!(c.state(), DsState::Active) {
+            if matches!(c.state(), DsStateData::Active) {
                 jobs.push(c.total_live_work());
                 bytes.push(c.total_bytes_outstanding());
             }
@@ -3669,7 +3672,7 @@ impl Downstairs {
         let mut delays = ClientData::new(None);
         for i in ClientId::iter() {
             let c = &self.clients[i];
-            if matches!(c.state(), DsState::Active) {
+            if matches!(c.state(), DsStateData::Active) {
                 // These values represent how much **faster** we are than the
                 // slowest downstairs, and hence cause us to exert backpressure
                 // on this client (to slow it down).
@@ -3962,17 +3965,17 @@ struct DownstairsBackpressureConfig {
 pub(crate) mod test {
     use super::{
         assert_matches, ClientFaultReason, ClientNegotiationFailed,
-        ClientStopReason, ConnectionMode, Downstairs, NegotiationState,
+        ClientStopReason, ConnectionMode, Downstairs, NegotiationStateData,
         PendingJob,
     };
     use crate::{
         downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
-        BlockOpWaiter, BlockRes, ClientId, CrucibleError, DsState, ExtentFix,
-        ExtentRepairIDs, IOState, IOop, ImpactedBlocks, JobId, RawReadResponse,
-        ReconcileIO, ReconcileIOState, ReconciliationId, RegionMetadata,
-        SnapshotDetails,
+        BlockOpWaiter, BlockRes, ClientId, CrucibleError, DsStateData,
+        ExtentFix, ExtentRepairIDs, IOState, IOop, ImpactedBlocks, JobId,
+        RawReadResponse, ReconcileIO, ReconcileIOState, ReconciliationId,
+        RegionMetadata, SnapshotDetails,
     };
 
     use bytes::BytesMut;
@@ -3988,26 +3991,26 @@ pub(crate) mod test {
     use uuid::Uuid;
 
     // Helper functions to make messy assertions
-    fn assert_stop_fault_requested(s: &DsState) {
+    fn assert_stop_fault_requested(s: &DsStateData) {
         assert_matches!(
             s,
-            DsState::Stopping(ClientStopReason::Fault(
+            DsStateData::Stopping(ClientStopReason::Fault(
                 ClientFaultReason::RequestedFault
             ))
         )
     }
-    fn assert_stop_io_error(s: &DsState) {
+    fn assert_stop_io_error(s: &DsStateData) {
         assert_matches!(
             s,
-            DsState::Stopping(ClientStopReason::Fault(
+            DsStateData::Stopping(ClientStopReason::Fault(
                 ClientFaultReason::IOError
             ))
         )
     }
-    fn assert_stop_failed_reconcile(s: &DsState) {
+    fn assert_stop_failed_reconcile(s: &DsStateData) {
         assert_matches!(
             s,
-            DsState::Stopping(ClientStopReason::NegotiationFailed(
+            DsStateData::Stopping(ClientStopReason::NegotiationFailed(
                 ClientNegotiationFailed::FailedReconcile,
             ))
         );
@@ -4049,15 +4052,15 @@ pub(crate) mod test {
         );
         let mode = ConnectionMode::Faulted;
         for state in [
-            NegotiationState::Start,
-            NegotiationState::WaitForPromote,
-            NegotiationState::WaitForRegionInfo,
-            NegotiationState::GetExtentVersions,
-            NegotiationState::LiveRepairReady,
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+            NegotiationStateData::LiveRepairReady,
         ] {
             ds.clients[to_repair].checked_state_transition(
                 &UpstairsState::Active,
-                DsState::Connecting { state, mode },
+                DsStateData::Connecting { state, mode },
             );
         }
     }
@@ -4070,7 +4073,7 @@ pub(crate) mod test {
         to_live_repair_ready(ds, to_repair);
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,
-            DsState::LiveRepair,
+            DsStateData::LiveRepair,
         );
     }
 
@@ -4079,20 +4082,20 @@ pub(crate) mod test {
         let up_state = UpstairsState::GoActive(BlockRes::dummy());
         for cid in ClientId::iter() {
             for state in [
-                NegotiationState::Start,
-                NegotiationState::WaitForPromote,
-                NegotiationState::WaitForRegionInfo,
-                NegotiationState::GetExtentVersions,
-                NegotiationState::WaitQuorum(RegionMetadata::new(
+                NegotiationStateData::Start,
+                NegotiationStateData::WaitForPromote,
+                NegotiationStateData::WaitForRegionInfo,
+                NegotiationStateData::GetExtentVersions,
+                NegotiationStateData::WaitQuorum(RegionMetadata::new(
                     &[],
                     &[],
                     &[],
                 )),
-                NegotiationState::Reconcile,
+                NegotiationStateData::Reconcile,
             ] {
                 ds.clients[cid].checked_state_transition(
                     &up_state,
-                    DsState::Connecting { state, mode },
+                    DsStateData::Connecting { state, mode },
                 );
             }
         }
@@ -5772,7 +5775,7 @@ pub(crate) mod test {
         );
         assert!(!nw);
 
-        // The two troublesome tasks will end up in DsState::New.
+        // The two troublesome tasks will end up in DsStateData::New.
         assert_stop_failed_reconcile(ds.clients[ClientId::new(0)].state());
         assert_stop_fault_requested(ds.clients[ClientId::new(1)].state());
         assert_stop_failed_reconcile(ds.clients[ClientId::new(2)].state());
@@ -6293,8 +6296,14 @@ pub(crate) mod test {
         ));
         // client 0 is failed, the others should be okay still
         assert_stop_io_error(ds.clients[ClientId::new(0)].state());
-        assert_matches!(ds.clients[ClientId::new(1)].state(), DsState::Active);
-        assert_matches!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(1)].state(),
+            DsStateData::Active
+        );
+        assert_matches!(
+            ds.clients[ClientId::new(2)].state(),
+            DsStateData::Active
+        );
 
         // Process the operation for client 1
         assert!(!ds.process_ds_completion(
@@ -6306,7 +6315,10 @@ pub(crate) mod test {
         ));
         assert_stop_io_error(ds.clients[ClientId::new(0)].state());
         assert_stop_io_error(ds.clients[ClientId::new(1)].state());
-        assert_matches!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(2)].state(),
+            DsStateData::Active
+        );
 
         // Three failures, But since this is a write we already have marked
         // the ACK as ready.
@@ -6372,8 +6384,14 @@ pub(crate) mod test {
             None
         ));
         assert_stop_io_error(ds.clients[ClientId::new(0)].state());
-        assert_matches!(ds.clients[ClientId::new(1)].state(), DsState::Active);
-        assert_matches!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(1)].state(),
+            DsStateData::Active
+        );
+        assert_matches!(
+            ds.clients[ClientId::new(2)].state(),
+            DsStateData::Active
+        );
 
         // Verify we should have fast-ack this work
         let write_job = ds.ds_active.get(&next_id).unwrap();
@@ -6481,8 +6499,14 @@ pub(crate) mod test {
         ));
         // client 0 is failed, the others should be okay still
         assert_stop_io_error(ds.clients[ClientId::new(0)].state());
-        assert_matches!(ds.clients[ClientId::new(1)].state(), DsState::Active);
-        assert_matches!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(1)].state(),
+            DsStateData::Active
+        );
+        assert_matches!(
+            ds.clients[ClientId::new(2)].state(),
+            DsStateData::Active
+        );
 
         // Process the operation for client 1
         assert!(!ds.process_ds_completion(
@@ -6494,7 +6518,10 @@ pub(crate) mod test {
         ));
         assert_stop_io_error(ds.clients[ClientId::new(0)].state());
         assert_stop_io_error(ds.clients[ClientId::new(1)].state());
-        assert_matches!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(2)].state(),
+            DsStateData::Active
+        );
 
         let ok_response = Ok(Default::default());
         // Because we fast-ACK writes, this op will always return false
@@ -6507,7 +6534,10 @@ pub(crate) mod test {
         ));
         assert_stop_io_error(ds.clients[ClientId::new(0)].state());
         assert_stop_io_error(ds.clients[ClientId::new(1)].state());
-        assert_matches!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(2)].state(),
+            DsStateData::Active
+        );
 
         // Verify we should have fast-ackd this work
         let write_job = ds.ds_active.get(&next_id).unwrap();
@@ -6584,9 +6614,15 @@ pub(crate) mod test {
         ));
 
         // Verify client states
-        assert_matches!(ds.clients[ClientId::new(0)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(0)].state(),
+            DsStateData::Active
+        );
         assert_stop_io_error(ds.clients[ClientId::new(1)].state());
-        assert_matches!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(2)].state(),
+            DsStateData::Active
+        );
 
         // A faulted write won't change skipped job count.
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
@@ -6726,9 +6762,15 @@ pub(crate) mod test {
         ));
 
         // Verify client states
-        assert_matches!(ds.clients[ClientId::new(0)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(0)].state(),
+            DsStateData::Active
+        );
         assert_stop_io_error(ds.clients[ClientId::new(1)].state());
-        assert_matches!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(2)].state(),
+            DsStateData::Active
+        );
 
         // Verify the read switched from InProgress to Skipped
         let job = ds.ds_active.get(&read_id).unwrap();
@@ -6791,9 +6833,15 @@ pub(crate) mod test {
         ));
 
         // Verify client states
-        assert_matches!(ds.clients[ClientId::new(0)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(0)].state(),
+            DsStateData::Active
+        );
         assert_stop_io_error(ds.clients[ClientId::new(1)].state());
-        assert_matches!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(2)].state(),
+            DsStateData::Active
+        );
 
         // The write was fast-acked, and the read is still going
         assert!(ds.ds_active.get(&write_id).unwrap().acked);
@@ -6900,8 +6948,14 @@ pub(crate) mod test {
         ));
 
         // Verify client states
-        assert_matches!(ds.clients[ClientId::new(0)].state(), DsState::Active);
-        assert_matches!(ds.clients[ClientId::new(1)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(0)].state(),
+            DsStateData::Active
+        );
+        assert_matches!(
+            ds.clients[ClientId::new(1)].state(),
+            DsStateData::Active
+        );
         assert_stop_io_error(ds.clients[ClientId::new(2)].state());
 
         // Verify all IOs are done
@@ -7009,8 +7063,14 @@ pub(crate) mod test {
         ));
 
         // Verify client states
-        assert_matches!(ds.clients[ClientId::new(0)].state(), DsState::Active);
-        assert_matches!(ds.clients[ClientId::new(1)].state(), DsState::Active);
+        assert_matches!(
+            ds.clients[ClientId::new(0)].state(),
+            DsStateData::Active
+        );
+        assert_matches!(
+            ds.clients[ClientId::new(1)].state(),
+            DsStateData::Active
+        );
         assert_stop_io_error(ds.clients[ClientId::new(2)].state());
 
         // Verify all IOs are done
