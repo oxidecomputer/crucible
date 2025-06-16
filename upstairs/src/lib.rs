@@ -67,7 +67,7 @@ mod stats;
 
 pub use client::{
     ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
-    NegotiationState, NegotiationStateTag,
+    NegotiationState, NegotiationStateData,
 };
 pub use crucible_common::impacted_blocks::*;
 
@@ -754,14 +754,14 @@ pub(crate) struct RawReadResponse {
 /// ```
 ///
 /// Complexity is hidden in the `Connecting` state, which wraps a
-/// [`NegotiationState`] implementing the negotiation state machine.
-#[derive(Debug)]
-pub enum DsState {
+/// [`NegotiationStateData`] implementing the negotiation state machine.
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", content = "value")]
+#[serde(rename = "DsState")]
+pub enum DsStateData<N = NegotiationStateData> {
     /// New connection
-    Connecting {
-        state: NegotiationState,
-        mode: ConnectionMode,
-    },
+    Connecting { state: N, mode: ConnectionMode },
 
     /// Ready for and/or currently receiving IO
     Active,
@@ -773,86 +773,78 @@ pub enum DsState {
     Stopping(ClientStopReason),
 }
 
-/// [`DsState`] without data members
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "type", content = "value")]
-pub enum DsStateTag {
-    Connecting {
-        state: NegotiationStateTag,
-        mode: ConnectionMode,
-    },
-    Active,
-    LiveRepair,
-    Stopping(ClientStopReason),
-}
+/// Downstairs state which can be serialized and sent over the network
+pub type DsState = DsStateData<NegotiationState>;
 
-impl From<&DsState> for DsStateTag {
-    fn from(value: &DsState) -> Self {
+impl<N1, N2> From<&DsStateData<N1>> for DsStateData<N2>
+where
+    for<'a> N2: From<&'a N1>,
+{
+    fn from(value: &DsStateData<N1>) -> Self {
         match value {
-            DsState::Connecting { state, mode } => Self::Connecting {
+            DsStateData::Connecting { state, mode } => Self::Connecting {
                 state: state.into(),
                 mode: *mode,
             },
-            DsState::Active => Self::Active,
-            DsState::LiveRepair => Self::LiveRepair,
-            DsState::Stopping(r) => Self::Stopping(*r),
+            DsStateData::Active => Self::Active,
+            DsStateData::LiveRepair => Self::LiveRepair,
+            DsStateData::Stopping(r) => Self::Stopping(*r),
         }
     }
 }
 
-impl std::fmt::Display for DsState {
+impl std::fmt::Display for DsStateData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DsState::Connecting {
-                state: NegotiationState::WaitQuorum(..),
+            DsStateData::Connecting {
+                state: NegotiationStateData::WaitQuorum(..),
                 ..
             } => {
                 write!(f, "WaitQuorum")
             }
-            DsState::Connecting {
-                state: NegotiationState::Reconcile,
+            DsStateData::Connecting {
+                state: NegotiationStateData::Reconcile,
                 ..
             } => {
                 write!(f, "Reconcile")
             }
-            DsState::Connecting {
-                state: NegotiationState::LiveRepairReady,
+            DsStateData::Connecting {
+                state: NegotiationStateData::LiveRepairReady,
                 ..
             } => {
                 write!(f, "LiveRepairReady")
             }
-            DsState::Active => {
+            DsStateData::Active => {
                 write!(f, "Active")
             }
-            DsState::Connecting {
+            DsStateData::Connecting {
                 mode: ConnectionMode::New,
                 ..
             } => {
                 write!(f, "New")
             }
-            DsState::Connecting {
+            DsStateData::Connecting {
                 mode: ConnectionMode::Faulted,
                 ..
             } => {
                 write!(f, "Faulted")
             }
-            DsState::Connecting {
+            DsStateData::Connecting {
                 mode: ConnectionMode::Offline,
                 ..
             } => {
                 write!(f, "Offline")
             }
-            DsState::Connecting {
+            DsStateData::Connecting {
                 mode: ConnectionMode::Replaced,
                 ..
             } => {
                 write!(f, "Replaced")
             }
-            DsState::LiveRepair => {
+            DsStateData::LiveRepair => {
                 write!(f, "LiveRepair")
             }
-            DsState::Stopping(..) => {
+            DsStateData::Stopping(..) => {
                 write!(f, "Stopping")
             }
         }
@@ -1535,7 +1527,7 @@ pub(crate) enum BlockOp {
 
     #[cfg(test)]
     GetDownstairsState {
-        done: BlockRes<ClientData<DsStateTag>>,
+        done: BlockRes<ClientData<DsState>>,
     },
 
     #[cfg(test)]
@@ -1565,7 +1557,7 @@ pub struct DtraceInfo {
     /// Number of write bytes in flight
     pub write_bytes_out: u64,
     /// State of a downstairs
-    pub ds_state: [DsStateTag; 3],
+    pub ds_state: [DsState; 3],
     /// Counters for each state of a downstairs job.
     pub ds_io_count: IOStateCount,
     /// Extents repaired during initial reconciliation.

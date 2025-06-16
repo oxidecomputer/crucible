@@ -94,18 +94,19 @@ pub mod repair_test {
         },
     };
 
-    fn assert_stop_io_error(s: &DsState) {
+    // Helper functions to make messy assertions
+    fn assert_stop_io_error(s: &DsStateData) {
         assert_matches!(
             s,
-            DsState::Stopping(ClientStopReason::Fault(
+            DsStateData::Stopping(ClientStopReason::Fault(
                 ClientFaultReason::IOError
             ))
         )
     }
-    fn assert_stop_failed_lr(s: &DsState) {
+    fn assert_stop_failed_lr(s: &DsStateData) {
         assert_matches!(
             s,
-            DsState::Stopping(ClientStopReason::Fault(
+            DsStateData::Stopping(ClientStopReason::Fault(
                 ClientFaultReason::FailedLiveRepair
             ))
         )
@@ -435,7 +436,7 @@ pub mod repair_test {
         assert_eq!(job.state_count().done, 3);
         assert_matches!(
             up.downstairs.clients[or_ds].state(),
-            DsState::LiveRepair
+            DsStateData::LiveRepair
         );
 
         // Check that the subsequent job has started
@@ -1131,15 +1132,15 @@ pub mod repair_test {
         );
         let mode = ConnectionMode::Faulted;
         for state in [
-            NegotiationState::Start,
-            NegotiationState::WaitForPromote,
-            NegotiationState::WaitForRegionInfo,
-            NegotiationState::GetExtentVersions,
-            NegotiationState::LiveRepairReady,
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+            NegotiationStateData::LiveRepairReady,
         ] {
             up.downstairs.clients[client].checked_state_transition(
                 &up.state,
-                DsState::Connecting { state, mode },
+                DsStateData::Connecting { state, mode },
             );
         }
         up.check_live_repair_start();

@@ -113,7 +113,7 @@ impl UpstairsInfo {
 #[derive(Deserialize, Serialize, JsonSchema)]
 pub(crate) struct UpstairsStats {
     pub state: UpState,
-    pub ds_state: Vec<DsStateTag>,
+    pub ds_state: Vec<DsState>,
     pub up_jobs: usize,
     pub ds_jobs: usize,
     pub reconcile_done: usize,

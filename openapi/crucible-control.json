@@ -279,10 +279,11 @@
           "jobs"
         ]
       },
-      "DsStateTag": {
-        "description": "[`DsState`] without data members",
+      "DsState": {
+        "description": "High-level states for a Downstairs\n\nThe state machine for a Downstairs is relatively simple:\n\n```text ┌────────────┐ ┌────► LiveRepair ├─────┐ start ┌─────────┴┐   └─────┬──────┘   ┌─▼──────┐ ────►│Connecting│         │          │Stopping│ └─▲───────┬┘   ┌─────▼──────┐   └─▲────┬─┘ │       └────►   Active   ├─────┘    │ │            └─────┬──────┘          │ │                  │                 │ └─────────────────◄┴─────────────────┘ ```\n\nComplexity is hidden in the `Connecting` state, which wraps a [`NegotiationStateData`] implementing the negotiation state machine.",
         "oneOf": [
           {
+            "description": "New connection",
             "type": "object",
             "properties": {
               "type": {
@@ -298,7 +299,7 @@
                     "$ref": "#/components/schemas/ConnectionMode"
                   },
                   "state": {
-                    "$ref": "#/components/schemas/NegotiationStateTag"
+                    "$ref": "#/components/schemas/NegotiationState"
                   }
                 },
                 "required": [
@@ -313,6 +314,7 @@
             ]
           },
           {
+            "description": "Ready for and/or currently receiving IO",
             "type": "object",
             "properties": {
               "type": {
@@ -327,6 +329,7 @@
             ]
           },
           {
+            "description": "This downstairs is undergoing LiveRepair",
             "type": "object",
             "properties": {
               "type": {
@@ -341,6 +344,7 @@
             ]
           },
           {
+            "description": "The IO task for the client is being stopped",
             "type": "object",
             "properties": {
               "type": {
@@ -379,7 +383,7 @@
           "request_id"
         ]
       },
-      "NegotiationStateTag": {
+      "NegotiationState": {
         "description": "Auto-generated discriminant enum variants",
         "oneOf": [
           {
@@ -524,7 +528,7 @@
           "ds_state": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/DsStateTag"
+              "$ref": "#/components/schemas/DsState"
             }
           },
           "extent_limit": {
