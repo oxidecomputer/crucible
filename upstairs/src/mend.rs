@@ -92,7 +92,11 @@ impl DownstairsMend {
             mend: HashMap::new(),
         };
 
-        let (cid, _) = meta.iter().next()?;
+        // If we have 0 or 1 regions, then reconciliation is meaningless
+        if meta.len() <= 1 {
+            return None;
+        }
+        let (cid, _) = meta.iter().next().unwrap();
 
         /*
          * Sanity check that all fields of the RegionMetadata struct have the
@@ -1423,9 +1427,21 @@ mod test {
     }
 
     #[test]
-    fn reconcile_two() {
+    fn reconcile_one_dirty() {
         // If there's only a single region present, then there should be no
         // reconciliation
+        let dsr =
+            RegionMetadata::new(&[1, 1, 1], &[3, 3, 3], &[true, false, false]);
+        for i in ClientId::iter() {
+            let mut meta = ClientMap::new();
+            meta.insert(i, &dsr);
+            let to_fix = DownstairsMend::new(&meta, csl());
+            assert!(to_fix.is_none());
+        }
+    }
+
+    #[test]
+    fn reconcile_two() {
         let c0 = RegionMetadata::new(
             &[1, 1, 1, 5],
             &[3, 4, 3, 9],

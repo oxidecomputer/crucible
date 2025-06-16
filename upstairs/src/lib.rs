@@ -497,6 +497,12 @@ impl<T> ClientMap<T> {
     pub fn map<U, F: FnMut(T) -> U>(self, mut f: F) -> ClientMap<U> {
         ClientMap(self.0.map(move |v| v.map(&mut f)))
     }
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|i| i.is_none())
+    }
+    pub fn len(&self) -> usize {
+        self.0.iter().filter(|i| i.is_some()).count()
+    }
 }
 
 impl<T> std::ops::Index<ClientId> for ClientMap<T> {
