@@ -432,22 +432,29 @@ impl DownstairsClient {
         self.skipped_jobs.insert(ds_id);
     }
 
-    /// Sets our state to `DsStateData::Reconcile`
-    ///
-    /// # Panics
-    /// If the current state is invalid
-    pub(crate) fn begin_reconcile(&mut self) {
-        info!(self.log, "Transition from {:?} to Reconcile", self.state());
-        let DsStateData::Connecting { state, mode } = &mut self.state else {
-            panic!(
-                "invalid state {:?} for client {}",
-                self.state(),
-                self.client_id
-            );
-        };
-        assert_eq!(state.discriminant(), NegotiationState::WaitQuorum);
-        assert_eq!(mode, &ConnectionMode::New);
-        *state = NegotiationStateData::Reconcile;
+    /// Sets our state to `DsStateData::Reconcile` if we are in `WaitQuorum`
+    pub(crate) fn begin_reconcile(&mut self) -> bool {
+        info!(
+            self.log,
+            "setting state to reconcile from {:?}",
+            self.state()
+        );
+        let mut changed = false;
+        if let DsStateData::Connecting {
+            state,
+            mode: ConnectionMode::New,
+            ..
+        } = &mut self.state
+        {
+            if matches!(state, NegotiationStateData::WaitQuorum(..)) {
+                *state = NegotiationStateData::Reconcile;
+                changed = true;
+            }
+        }
+        if !changed {
+            warn!(self.log, "invalid state for reconciliation, skipping");
+        }
+        changed
     }
 
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
@@ -498,7 +505,7 @@ impl DownstairsClient {
         // If the upstairs is already active (or trying to go active), then we
         // should automatically connect to the Downstairs.
         let auto_connect = match up_state {
-            UpstairsState::Active | UpstairsState::GoActive(..) => true,
+            UpstairsState::Active | UpstairsState::GoActive { .. } => true,
             UpstairsState::Disabled(..)
             | UpstairsState::Initializing
             | UpstairsState::Deactivating { .. } => false,
@@ -539,7 +546,7 @@ impl DownstairsClient {
                 match up_state {
                     // If we haven't activated yet (or we're deactivating) then
                     // start from New
-                    UpstairsState::GoActive(..)
+                    UpstairsState::GoActive { .. }
                     | UpstairsState::Initializing
                     | UpstairsState::Disabled(..)
                     | UpstairsState::Deactivating { .. } => ConnectionMode::New,
@@ -553,7 +560,7 @@ impl DownstairsClient {
                 match up_state {
                     // If we haven't activated yet (or we're deactivating), then
                     // start from New
-                    UpstairsState::GoActive(..)
+                    UpstairsState::GoActive { .. }
                     | UpstairsState::Initializing
                     | UpstairsState::Disabled(..)
                     | UpstairsState::Deactivating { .. } => ConnectionMode::New,
@@ -749,17 +756,18 @@ impl DownstairsClient {
     ///
     /// This changes the subsequent path through negotiation, without restarting
     /// the client IO task.  Doing so is safe because the faulted path is
-    /// a superset of the offline path.
+    /// a superset of all other paths.
     ///
     /// # Panics
-    /// If we are not in `DsStateData::Connecting { mode: ConnectionMode::Offline,
-    /// .. }`
+    /// If we are not in `DsStateData::Connecting { .. }`
     pub(crate) fn set_connection_mode_faulted(&mut self) {
-        let DsStateData::Connecting { mode, .. } = &mut self.state else {
+        let DsStateData::Connecting { mode, state } = &mut self.state else {
             panic!("not connecting");
         };
-        assert_eq!(*mode, ConnectionMode::Offline);
-        *mode = ConnectionMode::Faulted
+        *mode = ConnectionMode::Faulted;
+        if matches!(*state, NegotiationStateData::WaitQuorum(..)) {
+            *state = NegotiationStateData::LiveRepairReady;
+        }
     }
 
     /// Applies an [`EnqueueResult`] for the given job
@@ -1445,7 +1453,7 @@ impl DownstairsClient {
                             // downstairs here.
                             match up_state {
                                 UpstairsState::Initializing
-                                | UpstairsState::GoActive(_) => {
+                                | UpstairsState::GoActive { .. } => {
                                     warn!(
                                         self.log,
                                         "Replace {} with {} before active",
@@ -1578,7 +1586,7 @@ impl DownstairsClient {
                         if matches!(
                             up_state,
                             UpstairsState::Initializing
-                                | UpstairsState::GoActive(..)
+                                | UpstairsState::GoActive { .. }
                         ) =>
                     {
                         *state = NegotiationStateData::WaitQuorum(dsr);
