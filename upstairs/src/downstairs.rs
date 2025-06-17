@@ -273,6 +273,12 @@ impl LiveRepairData {
 }
 
 #[derive(Debug)]
+pub(crate) struct CollateData {
+    max_flush: u64,
+    max_gen: u64,
+}
+
+#[derive(Debug)]
 pub(crate) struct ReconcileData {
     /// An ID uniquely identifying this reconciliation
     id: Uuid,
@@ -862,27 +868,15 @@ impl Downstairs {
     ///
     /// Returns `true` if repair is needed, `false` otherwise
     pub(crate) fn collate(&mut self) -> Result<bool, NegotiationError> {
-        let r = self.collate_inner();
-        if r.is_err() {
-            // If we failed to begin the repair, then assert that nothing has
-            // changed and everything is empty.
-            assert!(self.ds_active.is_empty());
-            assert!(self.reconcile.is_none());
-
-            for c in self.clients.iter() {
-                assert_eq!(
-                    c.state(),
-                    DsState::Connecting {
-                        state: NegotiationState::WaitQuorum,
-                        mode: ConnectionMode::New
-                    }
-                );
-            }
-        }
-        r
+        let r = self.check_region_metadata()?;
+        Ok(self.start_reconciliation(r))
     }
 
-    fn collate_inner(&mut self) -> Result<bool, NegotiationError> {
+    /// Checks that region metadata is valid
+    ///
+    /// # Panics
+    /// If no regions are in `NegotiationState::WaitQuorum`
+    fn check_region_metadata(&self) -> Result<CollateData, NegotiationError> {
         /*
          * Show some (or all if small) of the info from each region.
          *
@@ -961,6 +955,14 @@ impl Downstairs {
             );
         }
 
+        Ok(CollateData { max_flush, max_gen })
+    }
+
+    /// Begins reconciliation, using the given collation data
+    #[must_use]
+    fn start_reconciliation(&mut self, data: CollateData) -> bool {
+        let CollateData { max_flush, max_gen } = data;
+
         /*
          * Set the next flush ID so we have if we need to repair.
          */
@@ -995,10 +997,10 @@ impl Downstairs {
             self.reconcile = Some(reconcile);
             self.reconcile_repaired = 0;
 
-            Ok(true)
+            true
         } else {
             info!(self.log, "All extents match");
-            Ok(false)
+            false
         }
     }
 
