@@ -123,7 +123,24 @@ mod test {
             Ok(())
         }
 
+        /// Stops the downstairs task, return a `(port, rport)` tuple
+        pub async fn stop(&mut self) -> Result<(u16, u16)> {
+            let ds = self.downstairs.take().unwrap();
+            let port = ds.address().port();
+            let rport = ds.repair_address().port();
+            ds.stop().await?;
+            Ok((port, rport))
+        }
+
         pub async fn reboot_read_write(&mut self) -> Result<()> {
+            self.reboot_read_write_with_ports(0, 0).await
+        }
+
+        pub async fn reboot_read_write_with_ports(
+            &mut self,
+            port: u16,
+            rport: u16,
+        ) -> Result<()> {
             let downstairs =
                 Downstairs::new_builder(self.tempdir.path(), false)
                     .set_logger(csl())
@@ -134,6 +151,8 @@ mod test {
                     downstairs,
                     DownstairsClientSettings {
                         address: self.address,
+                        port,
+                        rport,
                         ..DownstairsClientSettings::default()
                     },
                 )
@@ -5838,5 +5857,157 @@ mod test {
 
         // Make sure everything worked
         volume.activate().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_two_ds_then_deactivate() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let mut tds = TestDownstairsSet::small(false).await.unwrap();
+        let opts = tds.opts();
+        tds.downstairs1.stop().await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let (guest, io) = Guest::new(None);
+        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        guest.activate().await.unwrap();
+
+        let res = guest
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
+            )
+            .await;
+        assert!(res.is_ok());
+
+        guest.deactivate().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_two_ds_then_another() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let mut tds = TestDownstairsSet::small(false).await.unwrap();
+        let opts = tds.opts();
+        let (ds1_port, ds1_rport) = tds.downstairs1.stop().await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let (guest, io) = Guest::new(None);
+        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        guest.activate().await.unwrap();
+
+        let res = guest
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
+            )
+            .await;
+        assert!(res.is_ok());
+
+        // Restart downstairs1, which should use live-repair to join the quorum
+        //
+        // We have to wait a while here, because there's a 10-second reconnect
+        // delay.
+        tds.downstairs1
+            .reboot_read_write_with_ports(ds1_port, ds1_rport)
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+        guest.deactivate().await.unwrap();
+
+        // Reconnect with only ds1 running, then confirm that it received the
+        // writes.  We'll come up in read-only mode so that we can connect with
+        // just a single Downstairs, to make sure the reads go to DS1.
+        tds.downstairs1.reboot_read_only().await.unwrap();
+        tds.downstairs2.stop().await.unwrap();
+        tds.downstairs3.stop().await.unwrap();
+        tds.crucible_opts.read_only = true;
+        tds.crucible_opts.target[0] = tds.downstairs1.address();
+        let opts = tds.opts();
+        let (guest, io) = Guest::new(None);
+        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        guest.activate().await.unwrap();
+        let mut buf = Buffer::new(2, BLOCK_SIZE);
+        guest.read(BlockIndex(0), &mut buf).await.unwrap();
+
+        assert_eq!(buf.to_vec(), vec![0x55; BLOCK_SIZE * 2]);
+    }
+
+    #[tokio::test]
+    async fn min_quorum_live_repair() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let mut tds = TestDownstairsSet::small(false).await.unwrap();
+
+        // Stop downstairs 1 before constructing the guest, so it won't be
+        // included and we'll do min-quorum reconciliation.
+        let (port, rport) = tds.downstairs1.stop().await.unwrap();
+
+        // Start the guest and do a write to ds 2 and 3.
+        let (guest, io) = Guest::new(None);
+        let opts = tds.opts();
+        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        guest.activate().await.unwrap();
+        let res = guest
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
+            )
+            .await;
+        assert!(res.is_ok());
+
+        // Deactivate the guest, all without downstairs 1 participating
+        guest.deactivate().await.unwrap();
+
+        // At this point, the data has been written to DS 2 and 3.  We'll start
+        // up again with DS 1 and 2, so min-quorum should do reconciliation.
+
+        tds.downstairs1
+            .reboot_read_write_with_ports(port, rport)
+            .await
+            .unwrap();
+        tds.downstairs2.stop().await.unwrap();
+        guest.activate_with_gen(2).await.unwrap();
+
+        let mut buf = Buffer::new(2, BLOCK_SIZE);
+        guest.read(BlockIndex(0), &mut buf).await.unwrap();
+
+        assert_eq!(buf.to_vec(), vec![0x55; BLOCK_SIZE * 2]);
+    }
+
+    #[tokio::test]
+    async fn min_quorum_cancel() {
+        // Spin off three downstairs, build our Crucible struct.
+        let mut tds = TestDownstairsSet::small(false).await.unwrap();
+
+        // Stop downstairs 1 before constructing the guest, so it won't be
+        // included and we'll do min-quorum reconciliation.
+        let (port, rport) = tds.downstairs1.stop().await.unwrap();
+
+        // Start the guest and do a write to ds 2 and 3.
+        let (guest, io) = Guest::new(None);
+        let opts = tds.opts();
+        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        let s = tokio::spawn(async move { guest.activate().await });
+
+        // Get into our min-quorum wait, which is 500 ms
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Stop DS2
+        tds.downstairs2.stop().await.unwrap();
+
+        // Wait for the min-quorum timer to go off; it shouldn't panic!
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        // Restart DS1, we're now eligible for min-quorum negotiation again
+        tds.downstairs1
+            .reboot_read_write_with_ports(port, rport)
+            .await
+            .unwrap();
+
+        s.await.unwrap().unwrap()
     }
 }

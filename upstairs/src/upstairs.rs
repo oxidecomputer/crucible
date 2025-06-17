@@ -42,6 +42,9 @@ use uuid::Uuid;
 /// How often to log stats for DTrace
 const STAT_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long to delay before negotiating with 2/3 Downstairs
+const NEGOTIATION_DELAY: Duration = Duration::from_millis(500);
+
 /// Minimum IO size (in bytes) before encryption / decryption is done off-thread
 const MIN_DEFER_SIZE_BYTES: u64 = 8192;
 
@@ -66,7 +69,12 @@ pub(crate) enum UpstairsState {
     /// The guest has requested that the upstairs go active
     ///
     /// We should reply on the provided channel
-    GoActive(BlockRes),
+    GoActive {
+        res: BlockRes,
+
+        /// Time at which to perform min-quorum negotiation
+        min_quorum_deadline: Option<Instant>,
+    },
 
     /// The upstairs is fully online and accepting guest IO
     Active,
@@ -270,6 +278,9 @@ pub(crate) enum UpstairsAction {
     FlushCheck,
     StatUpdate,
     Control(ControlRequest),
+
+    /// The timer has fired for reconciliation, with 2/3 downstairs
+    MinQuorumReconciliation,
 
     /// The guest connection has been dropped
     GuestDropped,
@@ -513,6 +524,16 @@ impl Upstairs {
                     }
                 }
             }
+            _ = if let UpstairsState::GoActive {
+                min_quorum_deadline: Some(time), ..
+            } = &self.state {
+                futures::future::Either::Left(sleep_until(*time))
+            } else {
+                futures::future::Either::Right(std::future::pending())
+            }
+            => {
+                UpstairsAction::MinQuorumReconciliation
+            }
             m = self.deferred_msgs.next(), if !self.deferred_msgs.is_empty()
             => {
                 // The outer Option is None if the queue is empty.  If this is
@@ -558,6 +579,9 @@ impl Upstairs {
             }
             UpstairsAction::GuestDropped => {
                 self.guest_dropped = true;
+            }
+            UpstairsAction::MinQuorumReconciliation => {
+                self.on_min_quorum();
             }
             UpstairsAction::DeferredBlockOp(req) => {
                 self.counters.action_deferred_block += 1;
@@ -862,7 +886,7 @@ impl Upstairs {
                 let state = match &self.state {
                     UpstairsState::Initializing
                     | UpstairsState::Disabled(..)
-                    | UpstairsState::GoActive(..) => {
+                    | UpstairsState::GoActive { .. } => {
                         crate::UpState::Initializing
                     }
                     UpstairsState::Active => crate::UpState::Active,
@@ -1003,7 +1027,7 @@ impl Upstairs {
                 // We allow this if we are not active yet, or we are active
                 // with the requested generation number.
                 match &self.state {
-                    UpstairsState::Active | UpstairsState::GoActive(..) => {
+                    UpstairsState::Active | UpstairsState::GoActive { .. } => {
                         if self.cfg.generation() == gen {
                             // Okay, we want to activate with what we already
                             // have, that's valid; let the set_active_request
@@ -1229,7 +1253,10 @@ impl Upstairs {
     fn set_active_request(&mut self, res: BlockRes) {
         match &self.state {
             UpstairsState::Initializing | UpstairsState::Disabled(..) => {
-                self.state = UpstairsState::GoActive(res);
+                self.state = UpstairsState::GoActive {
+                    res,
+                    min_quorum_deadline: None,
+                };
                 info!(self.log, "{} active request set", self.cfg.upstairs_id);
 
                 // Notify all clients that they should go active when they hit
@@ -1238,7 +1265,7 @@ impl Upstairs {
                     c.set_active_request();
                 }
             }
-            UpstairsState::GoActive(..) => {
+            UpstairsState::GoActive { .. } => {
                 // We have already been sent a request to go active, but we
                 // are not active yet and will respond (on the original
                 // BlockRes) when we do become active.
@@ -1280,7 +1307,7 @@ impl Upstairs {
         match &self.state {
             UpstairsState::Initializing
             | UpstairsState::Disabled(..)
-            | UpstairsState::GoActive(..) => {
+            | UpstairsState::GoActive { .. } => {
                 res.send_err(CrucibleError::UpstairsInactive);
                 return;
             }
@@ -1755,7 +1782,7 @@ impl Upstairs {
                             self.connect_ro_region_set();
                         } else {
                             // See if we have a quorum
-                            self.connect_region_set();
+                            self.on_wait_quorum();
                         }
                     }
                     Ok(NegotiationResult::Replay) => {
@@ -1858,7 +1885,7 @@ impl Upstairs {
         self.on_reconciliation_skipped()
     }
 
-    /// Checks whether we can connect all three regions
+    /// Response to a client entering `NegotiationState::WaitQuorum`
     ///
     /// Returns `false` if we aren't ready, or if things failed.  If there's a
     /// failure, then we also update the client state.
@@ -1868,100 +1895,117 @@ impl Upstairs {
     /// **can't** activate, then we should notify the requestor of failure.
     ///
     /// If we have a problem here, we can't activate the upstairs.
-    fn connect_region_set(&mut self) -> bool {
-        /*
-         * If reconciliation is required, it happens in three phases.
-         * Typically an interruption of reconciliation will result in things
-         * starting over, but if actual repair work to an extent is
-         * completed, that extent won't need to be repaired again.
-         *
-         * The three phases are:
-         *
-         * Collect:
-         * When a Downstairs connects, the Upstairs collects the gen/flush/dirty
-         * (GFD) info from all extents.  This GFD information is stored and the
-         * Upstairs waits for all three Downstairs to attach.
-         *
-         * Compare:
-         * In the compare phase, the upstairs will walk the list of all extents
-         * and compare the G/F/D from each of the downstairs.  When there is a
-         * mismatch between downstairs (The dirty bit counts as a mismatch and
-         * will force a repair even if generation and flush numbers agree). For
-         * each mismatch, the upstairs determines which downstairs has the
-         * extent that should be the source, and which of the other downstairs
-         * extents needs repair. This list of mismatches (source,
-         * destination(s)) is collected. Once an upstairs has compiled its
-         * repair list, it will then generates a sequence of Upstairs ->
-         * Downstairs repair commands to repair each extent that needs to be
-         * fixed.  For a given piece of repair work, the commands are:
-         * - Send a flush to source extent.
-         * - Close extent on all downstairs.
-         * - Send repair command to destination extents (with source extent
-         *   IP/Port).
-         * (See DS-DS Repair)
-         * - Reopen all extents.
-         *
-         * Repair:
-         * During repair Each command issued from the upstairs must be completed
-         * before the next will be sent. The Upstairs is responsible for walking
-         * the repair commands and sending them to the required downstairs, and
-         * waiting for them to finish.  The actual repair work for an extent
-         * takes place on the downstairs being repaired.
-         *
-         * Repair (ds to ds)
-         * Each downstairs runs a repair server (Dropshot) that listens for
-         * repair requests from other downstairs.  A downstairs with an extent
-         * that needs repair will contact the source downstairs and request the
-         * list of files for an extent, then request each file.  Once all files
-         * are local to the downstairs needing repair, it will replace the
-         * existing extent files with the new ones.
-         */
-        let collate_status = {
-            /*
-             * Reconciliation only happens during initialization.
-             * Look at all three downstairs region information collected.
-             * Determine the highest flush number and make sure our generation
-             * is high enough.
-             */
-            if !matches!(&self.state, UpstairsState::GoActive(..)) {
-                info!(
-                    self.log,
-                    "could not connect region set due to bad state: {:?}",
-                    self.state
-                );
-                return false;
-            }
-            /*
-             * Make sure all downstairs are in the correct state before we
-             * proceed.
-             */
-            let ready = self.downstairs.clients.iter().all(|c| {
-                matches!(
-                    c.state(),
-                    DsState::Connecting {
-                        state: NegotiationState::WaitQuorum,
-                        ..
-                    }
-                )
-            });
-            if !ready {
-                info!(self.log, "Waiting for more clients to be ready");
-                return false;
-            }
-
-            /*
-             * We figure out if there is any reconciliation to do, and if so, we
-             * build the list of operations that will repair the extents that
-             * are not in sync.
-             *
-             * If we fail to collate, then we need to kick out all the
-             * downstairs out, forget any activation requests, and the
-             * upstairs goes back to waiting for another activation request.
-             */
-            self.downstairs.collate()
+    ///
+    /// # Notes on reconciliation
+    /// If reconciliation is required, it happens in three phases.  Failure
+    /// during reconciliation will result in the upstairs being disabled (and
+    /// replying to the activation request with an error); if actual repair work
+    /// to an extent has been completed before the failure, that extent won't
+    /// need to be repaired again.
+    ///
+    /// The three phases are as follows:
+    ///
+    /// ## Region metadata collection:
+    /// When a Downstairs connects, the Upstairs collects the gen/flush/dirty
+    /// (GFD) info from all extents.  This GFD information is stored in
+    /// `NegotiationState::WaitQuorum`, and the Upstairs waits for more
+    /// Downstairs to attach.
+    ///
+    /// ## Comparing metadata
+    /// In the compare phase, the upstairs will walk the list of all extents and
+    /// compare the G/F/D from each of the downstairs.  Mismatches are detected
+    /// if the gen or flush values differ, or if the dirty bit is set (which
+    /// forces a repair even if generation and flush numbers agree).
+    ///
+    /// For each mismatch, the upstairs determines which downstairs has the
+    /// extent that should be the source, and which of the other downstairs
+    /// extents needs repair. This list of mismatches (source, destination(s))
+    /// is collected.
+    ///
+    /// Once an upstairs has compiled its repair list, it will then generates a
+    /// sequence of Upstairs -> Downstairs repair commands to repair each extent
+    /// that needs to be fixed.  For a given piece of repair work, the commands
+    /// are:
+    ///
+    /// - Send a flush to source extent.
+    /// - Close extent on all downstairs.
+    /// - Send repair command to destination extents (with source extent
+    ///   IP / port).
+    /// - Reopen all extents.
+    ///
+    /// ## Repair (upstairs)
+    /// During repair, each command issued from the upstairs must be completed
+    /// before the next will be sent. The Upstairs is responsible for walking
+    /// the repair commands and sending them to the required downstairs, and
+    /// waiting for them to finish.  The actual repair work for an extent takes
+    /// place on the downstairs being repaired.
+    ///
+    /// ## Repair (downstairs-to-downstairs)
+    /// Each downstairs runs a repair server (Dropshot) that listens for
+    /// repair requests from other downstairs.  A downstairs with an extent
+    /// that needs repair will contact the source downstairs and request the
+    /// list of files for an extent, then request each file.  Once all files
+    /// are local to the downstairs needing repair, it will replace the
+    /// existing extent files with the new ones.
+    fn on_wait_quorum(&mut self) -> bool {
+        // Reconciliation only happens during initialization.
+        let UpstairsState::GoActive {
+            min_quorum_deadline,
+            ..
+        } = &mut self.state
+        else {
+            // XXX should this panic instead?
+            info!(
+                self.log,
+                "could not connect region set due to bad state: {:?}",
+                self.state
+            );
+            return false;
         };
 
-        match collate_status {
+        let is_ready = self.downstairs.clients.map_ref(|c| {
+            matches!(
+                c.state(),
+                DsState::Connecting {
+                    state: NegotiationState::WaitQuorum,
+                    ..
+                }
+            )
+        });
+        let ready_count = is_ready.iter().filter(|c| **c).count();
+
+        match ready_count {
+            0 => panic!("called on_wait_quorum with no WaitQuorum downstairs"),
+            1 => return false,
+            2 => {
+                // Print a warning if `min_quorum` is already present.  This
+                // would be a little weird, because we're just now entering the
+                // min-quorum state, but could be possible if a Downstairs has
+                // disconnected (i.e. we've gone from 2 -> 1 -> 2 downstairs in
+                // WaitQuorum).
+                if min_quorum_deadline.is_some() {
+                    warn!(
+                        self.log,
+                        "entered min-quorum state with \
+                         `min_quorum` already present"
+                    )
+                }
+                *min_quorum_deadline = Some(Instant::now() + NEGOTIATION_DELAY);
+                return false;
+            }
+            3 => {
+                if min_quorum_deadline.is_some() {
+                    info!(self.log, "cancelling min-quorum reconciliation");
+                    *min_quorum_deadline = None;
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        // At this point, we know that all 3x Downstairs are ready:
+        assert_eq!(ready_count, 3);
+
+        match self.downstairs.collate() {
             Err(e) => {
                 error!(self.log, "Failed downstairs collate with: {}", e);
                 // We failed to collate the three downstairs, so we need
@@ -1988,6 +2032,76 @@ impl Upstairs {
         }
     }
 
+    /// Start min-quorum reconciliation
+    fn on_min_quorum(&mut self) {
+        // Reconciliation only happens during initialization.
+        let UpstairsState::GoActive {
+            min_quorum_deadline,
+            ..
+        } = &mut self.state
+        else {
+            warn!(
+                self.log,
+                "min-quorum negotiation found upstairs state {:?}; cancelling",
+                self.state
+            );
+            return;
+        };
+        assert!(min_quorum_deadline.is_some());
+        *min_quorum_deadline = None;
+
+        let is_ready = self.downstairs.clients.map_ref(|c| {
+            matches!(
+                c.state(),
+                DsState::Connecting {
+                    state: NegotiationState::WaitQuorum,
+                    ..
+                }
+            )
+        });
+        let ready_count = is_ready.iter().filter(|c| **c).count();
+        if ready_count != 2 {
+            warn!(self.log, "min-quorum negotiation found {ready_count} ready downstairs; cancelling");
+            return;
+        }
+        info!(self.log, "Starting min-quorum negotiation");
+
+        match self.downstairs.collate() {
+            Err(e) => {
+                error!(self.log, "Failed downstairs collate with: {e}");
+                // We failed to collate the three downstairs, so we need
+                // to reset that activation request.  Call
+                // `abort_reconciliation` to abort reconciliation for all
+                // clients.
+                self.set_disabled(e.into());
+                self.downstairs.abort_reconciliation(&self.state);
+            }
+            Ok(true) => {
+                // We have populated all of the reconciliation requests in
+                // `Downstairs::reconcile_task_list`.  Start reconciliation by
+                // sending the first request.
+                self.downstairs.send_next_reconciliation_req();
+
+                // Move the unready Downstairs into the "connect through
+                // live-repair path" for negotiation.
+                let unready_ds =
+                    ClientId::iter().find(|i| !is_ready[*i]).unwrap();
+
+                info!(
+                    self.log,
+                    "Requiring {unready_ds} to connect through live-repair"
+                );
+                self.downstairs.clients[unready_ds]
+                    .set_connection_mode_faulted();
+            }
+            Ok(false) => {
+                info!(self.log, "No downstairs reconciliation required");
+                self.on_reconciliation_done(false);
+                info!(self.log, "Set Active after no reconciliation");
+            }
+        }
+    }
+
     /// Called when reconciliation is skipped for a read only upstairs.
     ///
     /// Read only upstairs don't have any reconciliation to do. If we are the
@@ -2001,14 +2115,14 @@ impl Upstairs {
 
         info!(self.log, "Reconciliation skipped");
         match &self.state {
-            UpstairsState::GoActive(..) => {
+            UpstairsState::GoActive { .. } => {
                 // If we are not active yet (this is the first downstairs) then
                 // go ahead and set ourselves active.
                 info!(self.log, "Set Downstairs and Upstairs active");
                 self.downstairs.on_reconciliation_skipped(true);
 
                 // Swap out the state for UpstairsState::Active
-                let UpstairsState::GoActive(res) =
+                let UpstairsState::GoActive { res, .. } =
                     std::mem::replace(&mut self.state, UpstairsState::Active)
                 else {
                     unreachable!(); // We just matched!
@@ -2051,7 +2165,7 @@ impl Upstairs {
             "Set Downstairs and Upstairs active after reconciliation"
         );
 
-        if !matches!(self.state, UpstairsState::GoActive(..)) {
+        if !matches!(self.state, UpstairsState::GoActive { .. }) {
             error!(
                 self.log,
                 "reconciliation done, but upstairs is no longer GoActive: {:?}",
@@ -2061,7 +2175,7 @@ impl Upstairs {
         }
 
         // Swap out the state for UpstairsState::Active
-        let UpstairsState::GoActive(res) =
+        let UpstairsState::GoActive { res, .. } =
             std::mem::replace(&mut self.state, UpstairsState::Active)
         else {
             unreachable!(); // checked above
@@ -2155,7 +2269,7 @@ impl Upstairs {
                 Ok(())
             }
             UpstairsState::Active => Ok(()),
-            UpstairsState::GoActive(..) => {
+            UpstairsState::GoActive { .. } => {
                 Err(CrucibleError::UpstairsActivateInProgress)
             }
             UpstairsState::Deactivating(..) => {
@@ -2175,7 +2289,7 @@ impl Upstairs {
             &mut self.state,
             UpstairsState::Disabled(err.clone()),
         );
-        if let UpstairsState::GoActive(res) = prev {
+        if let UpstairsState::GoActive { res, .. } = prev {
             res.send_err(err);
         }
         for c in ClientId::iter() {
@@ -2330,9 +2444,12 @@ pub(crate) mod test {
             }
         }
         let (_rx, done) = BlockOpWaiter::pair();
-        up.state = UpstairsState::GoActive(done);
+        up.state = UpstairsState::GoActive {
+            res: done,
+            min_quorum_deadline: None,
+        };
 
-        let res = up.connect_region_set();
+        let res = up.on_wait_quorum();
         assert!(!res);
         assert!(!matches!(&up.state, &UpstairsState::Active))
     }
@@ -2359,7 +2476,10 @@ pub(crate) mod test {
                 );
             }
             let (_rx, done) = BlockOpWaiter::pair();
-            up.state = UpstairsState::GoActive(done);
+            up.state = UpstairsState::GoActive {
+                res: done,
+                min_quorum_deadline: None,
+            };
 
             up.connect_ro_region_set();
             assert!(matches!(&up.state, &UpstairsState::Active));
@@ -2389,7 +2509,10 @@ pub(crate) mod test {
             }
         }
         let (_rx, done) = BlockOpWaiter::pair();
-        up.state = UpstairsState::GoActive(done);
+        up.state = UpstairsState::GoActive {
+            res: done,
+            min_quorum_deadline: None,
+        };
 
         up.connect_ro_region_set();
         assert!(matches!(&up.state, &UpstairsState::Active));
