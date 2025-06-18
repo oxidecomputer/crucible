@@ -432,7 +432,7 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            downstairs.join_handle.await?
+            downstairs.wait().await.map_err(anyhow::Error::from)
         }
         Args::RepairAPI => repair::write_openapi(&mut std::io::stdout()),
         Args::Serve {

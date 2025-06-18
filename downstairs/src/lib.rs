@@ -2648,17 +2648,33 @@ impl Downstairs {
         Ok(())
     }
 
-    fn spawn_runner(ds: Downstairs) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(ds.run())
+    fn spawn_runner(
+        ds: Downstairs,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(ds.run(cancel))
     }
 
     /// The main Downstairs function!
     ///
     /// This function receives and handles requests from various other tasks,
     /// most notable per-connection IO worker tasks.
-    async fn run(mut self) {
+    async fn run(mut self, cancel: tokio_util::sync::CancellationToken) {
         let log = self.log.new(o!("task" => "runner".to_string()));
-        while let Some(v) = self.request_rx.recv().await {
+        loop {
+            let v = tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!(log, "stop requested, exiting");
+                    break;
+                },
+                v = self.request_rx.recv() => {
+                    let Some(v) = v else {
+                        info!(log, "request channel closed, exiting");
+                        break;
+                    };
+                    v
+                },
+            };
             match v {
                 DownstairsRequest::ShowWork => {
                     show_work(&mut self);
@@ -3468,9 +3484,36 @@ pub fn create_region_with_backend(
 /// Return `struct` for `start_downstairs`
 #[derive(Debug)]
 pub struct RunningDownstairs {
-    pub join_handle: tokio::task::JoinHandle<Result<()>>,
     pub address: SocketAddr,
     pub repair_address: SocketAddr,
+
+    /// Handle to the main Downstairs task
+    join_handle: tokio::task::JoinHandle<Result<()>>,
+
+    /// Token to stop the downstairs
+    stop: tokio_util::sync::CancellationToken,
+}
+
+impl RunningDownstairs {
+    /// Waits for the downstairs to stop on its own
+    ///
+    /// It's not clear whether this will ever actually happen; see
+    /// [`Self::stop`] for a way to make it stop.
+    pub async fn wait(self) -> Result<(), CrucibleError> {
+        match self.join_handle.await {
+            Err(r) => {
+                Err(CrucibleError::GenericError(format!("join failed: {r:?}")))
+            }
+            Ok(Err(r)) => Err(r.into()),
+            Ok(Ok(())) => Ok(()),
+        }
+    }
+
+    /// Stops the running downstairs
+    pub async fn stop(self) -> Result<(), CrucibleError> {
+        self.stop.cancel();
+        self.wait().await
+    }
 }
 
 /// Returns Ok if everything spawned ok, Err otherwise
@@ -3571,7 +3614,8 @@ pub async fn start_downstairs(
     let handle = ds.handle(); // handle for passing messages
 
     // This is where the actual work takes place; owning the Downstairs
-    let mut ds_runner = Downstairs::spawn_runner(ds);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut ds_runner = Downstairs::spawn_runner(ds, cancel.clone());
 
     let join_handle = tokio::spawn(async move {
         // We now loop listening for a connection from the Upstairs.
@@ -3636,6 +3680,7 @@ pub async fn start_downstairs(
         join_handle,
         address: local_addr,
         repair_address: repair_listener,
+        stop: cancel,
     })
 }
 
@@ -6088,5 +6133,53 @@ mod test {
         let data = Bytes::from(vec![1u8; 513]);
         let r = RegionWrite::new(BlockIndex(0), &contexts, data, &def);
         assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_running_downstairs() {
+        let bs = 512;
+        let es = 4;
+        let ec = 5;
+        let dir = tempdir().unwrap();
+
+        let ds = create_test_downstairs(bs, es, ec, &dir).unwrap();
+        let jh = start_downstairs(
+            ds,
+            "127.0.0.1".parse().unwrap(),
+            None,
+            5555,
+            5556,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let sock = TcpSocket::new_v4().unwrap();
+        let addr =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5555);
+        let tcp = sock.connect(addr).await.unwrap();
+
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = MessageWriter::new(write);
+
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
+        let m = Message::HereIAm {
+            version: CRUCIBLE_MESSAGE_VERSION,
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: Vec::new(),
+        };
+        fw.send(m).await.unwrap();
+
+        let f = fr.next().await.unwrap();
+        assert!(matches!(f, Ok(Message::YesItsMe { .. })));
+
+        assert!(jh.stop().await.is_ok());
     }
 }
