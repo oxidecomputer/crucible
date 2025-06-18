@@ -3490,8 +3490,8 @@ pub struct RunningDownstairs {
     /// Handle to the main Downstairs task
     join_handle: tokio::task::JoinHandle<Result<()>>,
 
-    /// Token to stop the downstairs
-    stop: tokio_util::sync::CancellationToken,
+    /// Handle to the repair task
+    repair_handle: tokio::task::JoinHandle<Result<(), String>>,
 }
 
 impl RunningDownstairs {
@@ -3501,18 +3501,54 @@ impl RunningDownstairs {
     /// [`Self::stop`] for a way to make it stop.
     pub async fn wait(self) -> Result<(), CrucibleError> {
         match self.join_handle.await {
-            Err(r) => {
-                Err(CrucibleError::GenericError(format!("join failed: {r:?}")))
+            Err(e) => {
+                Err(CrucibleError::GenericError(format!("join failed: {e:?}")))
             }
             Ok(Err(r)) => Err(r.into()),
             Ok(Ok(())) => Ok(()),
-        }
+        }?;
+        match self.repair_handle.await {
+            Err(e) => {
+                Err(CrucibleError::GenericError(format!("join failed: {e:?}")))
+            }
+            Ok(Err(r)) => Err(CrucibleError::GenericError(r)),
+            Ok(Ok(())) => Ok(()),
+        }?;
+        Ok(())
     }
 
     /// Stops the running downstairs
     pub async fn stop(self) -> Result<(), CrucibleError> {
-        self.stop.cancel();
-        self.wait().await
+        self.join_handle.abort();
+        self.repair_handle.abort();
+
+        match self.join_handle.await {
+            Err(e) => {
+                if e.is_cancelled() {
+                    Ok(())
+                } else {
+                    Err(CrucibleError::GenericError(format!(
+                        "join failed: {e:?}"
+                    )))
+                }
+            }
+            Ok(Err(r)) => Err(r.into()),
+            Ok(Ok(())) => Ok(()),
+        }?;
+        match self.repair_handle.await {
+            Err(e) => {
+                if e.is_cancelled() {
+                    Ok(())
+                } else {
+                    Err(CrucibleError::GenericError(format!(
+                        "join failed: {e:?}"
+                    )))
+                }
+            }
+            Ok(Err(r)) => Err(CrucibleError::GenericError(r)),
+            Ok(Ok(())) => Ok(()),
+        }?;
+        Ok(())
     }
 }
 
@@ -3574,7 +3610,7 @@ pub async fn start_downstairs(
     };
 
     let repair_log = root_log.new(o!("task" => "repair".to_string()));
-    let repair_listener =
+    let (repair_handle, repair_listener) =
         match repair::repair_main(&ds, repair_address, &repair_log) {
             Err(e) => {
                 // TODO tear down other things if repair server can't be
@@ -3622,6 +3658,12 @@ pub async fn start_downstairs(
         // When we get one, we call `proc()` to spawn worker tasks, then wait
         // for another connection.
         info!(log, "downstairs listening on {}", listen_on);
+
+        // We use a DropGuard to cancel the runner task when the outer future
+        // (here) is dropped by JoinHandle::abort()
+        #[expect(unused)]
+        let guard = cancel.drop_guard();
+
         let mut id = ConnectionId(0);
         loop {
             let v = tokio::select! {
@@ -3678,9 +3720,9 @@ pub async fn start_downstairs(
 
     Ok(RunningDownstairs {
         join_handle,
+        repair_handle,
         address: local_addr,
         repair_address: repair_listener,
-        stop: cancel,
     })
 }
 
