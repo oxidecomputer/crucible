@@ -884,9 +884,6 @@ enum NegotiationState {
 /// Immutable data shared by every `ConnectionState`
 #[derive(Debug)]
 struct ConnectionData {
-    /// Repair address, guaranteed to be valid by this point
-    repair_addr: SocketAddr,
-
     /// Token used to cancel the IO tasks
     #[expect(unused)]
     cancel: tokio_util::sync::DropGuard,
@@ -899,10 +896,6 @@ impl ConnectionData {
     /// Returns a dummy connection, for use with `std::mem::replace`
     fn dummy() -> Self {
         Self {
-            repair_addr: SocketAddr::new(
-                IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-                9001,
-            ),
             cancel: tokio_util::sync::CancellationToken::new().drop_guard(),
             reply_channel_tx: mpsc::unbounded_channel().0,
         }
@@ -2236,7 +2229,6 @@ impl DownstairsBuilder {
             active_upstairs: HashMap::new(),
             connection_state: HashMap::new(),
             dss,
-            repair_address: None,
             log,
             request_tx,
             request_rx,
@@ -2276,7 +2268,6 @@ pub struct Downstairs {
     active_upstairs: HashMap<Uuid, ConnectionId>,
 
     dss: DsStatOuter,
-    pub repair_address: Option<SocketAddr>,
     log: Logger,
 
     /// Per-connection state
@@ -2648,16 +2639,21 @@ impl Downstairs {
 
     fn spawn_runner(
         ds: Downstairs,
+        state: DownstairsClientState,
         cancel: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(ds.run(cancel))
+        tokio::spawn(ds.run(state, cancel))
     }
 
     /// The main Downstairs function!
     ///
     /// This function receives and handles requests from various other tasks,
     /// most notable per-connection IO worker tasks.
-    async fn run(mut self, cancel: tokio_util::sync::CancellationToken) {
+    async fn run(
+        mut self,
+        state: DownstairsClientState,
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
         let log = self.log.new(o!("task" => "runner".to_string()));
         loop {
             let v = tokio::select! {
@@ -2697,7 +2693,7 @@ impl Downstairs {
                     }
                 }
                 DownstairsRequest::Message { id, msg } => {
-                    self.on_message_for(id, msg).await;
+                    self.on_message_for(id, msg, &state).await;
                 }
                 DownstairsRequest::ConnectionClosed { id } => {
                     // Upstairs disconnected, so discard our local state
@@ -2719,6 +2715,7 @@ impl Downstairs {
         &mut self,
         m: Message,
         conn_id: ConnectionId,
+        client_state: &DownstairsClientState,
     ) -> Result<()> {
         let state = self.connection_state.get_mut(&conn_id).unwrap();
         match m {
@@ -2835,7 +2832,7 @@ impl Downstairs {
 
                 if let Err(e) = state.reply(Message::YesItsMe {
                     version: CRUCIBLE_MESSAGE_VERSION,
-                    repair_addr: state.data().repair_addr,
+                    repair_addr: client_state.repair_address,
                 }) {
                     bail!("Failed sending YesItsMe: {}", e);
                 }
@@ -3058,7 +3055,6 @@ impl Downstairs {
         let prev = self.connection_state.insert(
             id,
             ConnectionState::Open(ConnectionData {
-                repair_addr: self.repair_address.unwrap(),
                 cancel: cancel_guard,
                 reply_channel_tx,
             }),
@@ -3114,7 +3110,12 @@ impl Downstairs {
     }
 
     /// Handles a single message, either negotiation or doing IO
-    async fn on_message_for(&mut self, id: ConnectionId, m: Message) {
+    async fn on_message_for(
+        &mut self,
+        id: ConnectionId,
+        m: Message,
+        client_state: &DownstairsClientState,
+    ) {
         let Some(state) = self.connection_state.get_mut(&id) else {
             warn!(self.log, "got message for disconnected id {id:?}; ignoring");
             return;
@@ -3136,7 +3137,7 @@ impl Downstairs {
                 );
                 self.remove_connection(id);
             }
-        } else if let Err(e) = self.on_negotiation_step(m, id) {
+        } else if let Err(e) = self.on_negotiation_step(m, id, client_state) {
             warn!(
                 self.log,
                 "on_negotiation_step returns error {e:?}, disconnecting"
@@ -3479,44 +3480,54 @@ pub fn create_region_with_backend(
     Ok(region)
 }
 
-/// Return `struct` for `start_downstairs`
+/// Handle for a running Downstairs client
 #[derive(Debug)]
 pub struct DownstairsClient {
-    /// Socket address for IO to the downstairs
-    address: SocketAddr,
-
-    /// Socket address for repair IO
-    repair_address: SocketAddr,
+    state: DownstairsClientState,
 
     /// Handle to the main Downstairs task
     join_handle: tokio::task::JoinHandle<Result<()>>,
 
     /// Handle to the repair task
     repair_handle: tokio::task::JoinHandle<Result<()>>,
+
+    /// Handle to the oximeter task (optional)
+    oximeter_handle: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+/// State associated with a running Downstairs client
+#[derive(Copy, Clone, Debug)]
+pub struct DownstairsClientState {
+    /// Socket address for IO to the downstairs
+    address: SocketAddr,
+
+    /// Socket address for repair IO
+    repair_address: SocketAddr,
 }
 
 impl DownstairsClient {
     /// Spawns a downstairs client owning the given [`Downstairs`]
     pub async fn spawn(
-        mut ds: Downstairs,
+        ds: Downstairs,
         settings: DownstairsClientSettings,
     ) -> Result<Self> {
         let root_log = ds.log.clone();
-        if let Some(oximeter) = settings.oximeter {
+        let oximeter_handle = settings.oximeter.map(|oximeter| {
             let dss = ds.dss.clone();
             let log = root_log.new(o!("task" => "oximeter".to_string()));
 
             tokio::spawn(async move {
                 let producer_address = SocketAddr::new(settings.address, 0);
-                if let Err(e) =
-                    stats::ox_stats(dss, oximeter, producer_address, &log).await
-                {
+                let r = stats::ox_stats(dss, oximeter, producer_address, &log)
+                    .await;
+                if let Err(e) = &r {
                     error!(log, "ERROR: oximeter failed: {:?}", e);
                 } else {
                     warn!(log, "OK: oximeter all done");
                 }
-            });
-        }
+                r
+            })
+        });
 
         // Setup a log for this task
         let log = root_log.new(o!("task" => "main".to_string()));
@@ -3549,18 +3560,14 @@ impl DownstairsClient {
                 Ok(socket_addr) => socket_addr,
             };
 
-        ds.repair_address = Some(repair_listener);
         info!(log, "Using repair address: {:?}", repair_listener);
 
         // Optionally require SSL connections
-        let ssl_acceptor = if let Some(cert_pem_path) = settings.cert_pem {
-            let key_pem_path = settings.key_pem.unwrap();
-            let root_cert_pem_path = settings.root_cert_pem.unwrap();
-
+        let ssl_acceptor = if let Some(certs) = &settings.certs {
             let context = crucible_common::x509::TLSContext::from_paths(
-                &cert_pem_path,
-                &key_pem_path,
-                &root_cert_pem_path,
+                &certs.cert_pem,
+                &certs.key_pem,
+                &certs.root_cert_pem,
             )?;
 
             let config = context.get_server_config()?;
@@ -3576,10 +3583,14 @@ impl DownstairsClient {
 
         let mut dss = ds.dss.clone(); // shared handle for stats
         let handle = ds.handle(); // handle for passing messages
+        let state = DownstairsClientState {
+            address: local_addr,
+            repair_address: repair_listener,
+        };
 
         // This is where the actual work takes place; owning the Downstairs
         let cancel = tokio_util::sync::CancellationToken::new();
-        let mut ds_runner = Downstairs::spawn_runner(ds, cancel.clone());
+        let mut ds_runner = Downstairs::spawn_runner(ds, state, cancel.clone());
 
         let join_handle = tokio::spawn(async move {
             // We now loop listening for a connection from the Upstairs.
@@ -3653,17 +3664,17 @@ impl DownstairsClient {
         Ok(DownstairsClient {
             join_handle,
             repair_handle,
-            address: local_addr,
-            repair_address: repair_listener,
+            oximeter_handle,
+            state,
         })
     }
 
     pub fn address(&self) -> SocketAddr {
-        self.address
+        self.state.address
     }
 
     pub fn repair_address(&self) -> SocketAddr {
-        self.repair_address
+        self.state.repair_address
     }
 
     /// Waits for the downstairs to stop on its own
@@ -3673,6 +3684,9 @@ impl DownstairsClient {
     pub async fn wait(self) -> Result<(), CrucibleError> {
         Self::decode_err(self.join_handle.await, false)?;
         Self::decode_err(self.repair_handle.await, false)?;
+        if let Some(ox) = self.oximeter_handle {
+            Self::decode_err(ox.await, false)?;
+        }
         Ok(())
     }
 
@@ -3683,6 +3697,9 @@ impl DownstairsClient {
 
         Self::decode_err(self.join_handle.await, true)?;
         Self::decode_err(self.repair_handle.await, true)?;
+        if let Some(ox) = self.oximeter_handle {
+            Self::decode_err(ox.await, true)?;
+        }
         Ok(())
     }
 
@@ -3712,9 +3729,14 @@ pub struct DownstairsClientSettings {
     pub oximeter: Option<SocketAddr>,
     pub port: u16,
     pub rport: u16,
-    pub cert_pem: Option<String>,
-    pub key_pem: Option<String>,
-    pub root_cert_pem: Option<String>,
+    pub certs: Option<DownstairsClientCerts>,
+}
+
+/// Paths to certificates
+pub struct DownstairsClientCerts {
+    pub cert_pem: String,
+    pub key_pem: String,
+    pub root_cert_pem: String,
 }
 
 impl Default for DownstairsClientSettings {
@@ -3724,9 +3746,7 @@ impl Default for DownstairsClientSettings {
             oximeter: None,
             port: 0,
             rport: 0,
-            cert_pem: None,
-            key_pem: None,
-            root_cert_pem: None,
+            certs: None,
         }
     }
 }
@@ -3739,9 +3759,6 @@ mod test {
     use std::net::Ipv4Addr;
     use tempfile::{tempdir, TempDir};
     use tokio::net::TcpSocket;
-
-    const DUMMY_REPAIR_SOCKET: SocketAddr =
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
 
     // Create a simple logger
     fn csl() -> Logger {
@@ -3860,7 +3877,6 @@ mod test {
         let mut ds = Downstairs::new_builder(&path_dir, false)
             .set_logger(csl())
             .build()?;
-        ds.repair_address = Some(DUMMY_REPAIR_SOCKET);
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -3934,10 +3950,9 @@ mod test {
         region.extend(extent_count, Backend::default())?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let mut ds = Downstairs::new_builder(&path_dir, false)
+        let ds = Downstairs::new_builder(&path_dir, false)
             .set_logger(csl())
             .build()?;
-        ds.repair_address = Some(DUMMY_REPAIR_SOCKET);
 
         Ok(ds)
     }
@@ -4038,7 +4053,6 @@ mod test {
         let gen = 10;
 
         let mut ds = create_test_downstairs(block_size, extent_size, 5, &dir)?;
-        ds.repair_address = Some(DUMMY_REPAIR_SOCKET);
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -5531,10 +5545,9 @@ mod test {
 
         let path_dir = dir.as_ref().to_path_buf();
 
-        let mut ds = Downstairs::new_builder(&path_dir, read_only)
+        let ds = Downstairs::new_builder(&path_dir, read_only)
             .set_logger(csl())
             .build()?;
-        ds.repair_address = Some(DUMMY_REPAIR_SOCKET);
         Ok(ds)
     }
 
