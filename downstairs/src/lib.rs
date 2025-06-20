@@ -2236,7 +2236,6 @@ impl DownstairsBuilder {
             active_upstairs: HashMap::new(),
             connection_state: HashMap::new(),
             dss,
-            address: None,
             repair_address: None,
             log,
             request_tx,
@@ -2277,7 +2276,6 @@ pub struct Downstairs {
     active_upstairs: HashMap<Uuid, ConnectionId>,
 
     dss: DsStatOuter,
-    pub address: Option<SocketAddr>,
     pub repair_address: Option<SocketAddr>,
     log: Logger,
 
@@ -3528,7 +3526,6 @@ impl DownstairsClient {
         // Establish a listen server on the port.
         let listener = TcpListener::bind(&listen_on).await?;
         let local_addr = listener.local_addr()?;
-        ds.address = Some(local_addr);
 
         let info = crucible_common::BuildInfo::default();
         info!(log, "Crucible Version: {}", info);
