@@ -433,7 +433,7 @@ impl<T> ClientData<T> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
         self.0.iter()
     }
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
@@ -477,8 +477,9 @@ impl<T> ClientMap<T> {
     pub fn insert(&mut self, c: ClientId, v: T) -> Option<T> {
         self.0.insert(c, Some(v))
     }
-    pub fn iter(&self) -> impl Iterator<Item = (ClientId, &T)> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (ClientId, &T)> {
         self.0
+             .0
             .iter()
             .enumerate()
             .flat_map(|(i, v)| v.as_ref().map(|v| (ClientId::new(i as u8), v)))
@@ -491,6 +492,16 @@ impl<T> ClientMap<T> {
     }
     pub fn take(&mut self, c: &ClientId) -> Option<T> {
         self.0[*c].take()
+    }
+    /// Builds a new `ClientMap` by applying a function to each item
+    pub fn map<U, F: FnMut(T) -> U>(self, mut f: F) -> ClientMap<U> {
+        ClientMap(self.0.map(move |v| v.map(&mut f)))
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|i| i.is_none())
+    }
+    pub fn len(&self) -> usize {
+        self.0.iter().filter(|i| i.is_some()).count()
     }
 }
 

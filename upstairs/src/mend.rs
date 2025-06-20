@@ -85,32 +85,35 @@ impl DownstairsMend {
      * that need repair.
      */
     pub fn new(
-        c0: &RegionMetadata,
-        c1: &RegionMetadata,
-        c2: &RegionMetadata,
+        meta: &ClientMap<&RegionMetadata>,
         log: Logger,
     ) -> Option<DownstairsMend> {
         let mut dsm = DownstairsMend {
             mend: HashMap::new(),
         };
 
+        // If we have 0 or 1 regions, then reconciliation is meaningless
+        if meta.len() <= 1 {
+            return None;
+        }
+        let (cid, _) = meta.iter().next().unwrap();
+
         /*
          * Sanity check that all fields of the RegionMetadata struct have the
          * same length.  Pick one vec as the standard and compare.
          */
-        assert_eq!(c0.len(), c1.len());
-        assert_eq!(c1.len(), c2.len());
+        let base_len = meta[cid].len();
+        assert!(meta.iter().all(|(_cid, r)| r.len() == base_len));
 
-        for i in 0..c0.len() {
-            let m0 = c0.get(i).unwrap();
-            let m1 = c1.get(i).unwrap();
-            let m2 = c2.get(i).unwrap();
-            if m0.dirty || m1.dirty || m2.dirty || m0 != m1 || m1 != m2 {
-                info!(
-                    log,
-                    "extent {i} needs reconciliation: {m0:?} {m1:?} {m2:?}"
-                );
-                let ef = make_repair_list(i, c0, c1, c2, &log);
+        for i in 0..base_len {
+            let base_value = meta[cid].get(i).unwrap();
+            let any_diff = meta.iter().any(|(_cid, r)| {
+                let m = r.get(i).unwrap();
+                m.dirty || m != base_value
+            });
+            if any_diff {
+                info!(log, "extent {i} needs reconciliation: {meta:?}",);
+                let ef = make_repair_list(i, meta, &log);
                 dsm.mend.insert(ExtentId(i as u32), ef);
             }
         }
@@ -130,13 +133,11 @@ impl DownstairsMend {
  */
 fn make_repair_list(
     i: usize,
-    c0: &RegionMetadata,
-    c1: &RegionMetadata,
-    c2: &RegionMetadata,
+    meta: &ClientMap<&RegionMetadata>,
     log: &Logger,
 ) -> ExtentFix {
-    let source = find_source(i, c0, c1, c2, log);
-    let dest = find_dest(i, source, c0, c1, c2, log);
+    let source = find_source(i, meta, log);
+    let dest = find_dest(i, source, meta, log);
 
     ExtentFix { source, dest }
 }
@@ -153,20 +154,15 @@ fn make_repair_list(
 /// is chosen.
 fn find_source(
     i: usize,
-    c0: &RegionMetadata,
-    c1: &RegionMetadata,
-    c2: &RegionMetadata,
+    meta: &ClientMap<&RegionMetadata>,
     log: &Logger,
 ) -> ClientId {
-    let vs = [c0, c1, c2].map(|c| c.get(i).unwrap());
-
-    let (i, _v) = vs
+    let vs = meta.map(|m| m.get(i).unwrap());
+    let (out, _v) = vs
         .iter()
-        .enumerate()
         .rev() // pick the lowest ClientId
         .max_by_key(|(_i, v)| **v) // ExtentMetadata has priority-sorted fields
         .unwrap();
-    let out = ClientId::new(i as u8);
 
     info!(log, "extent:{i} {vs:?} => {out}",);
     out
@@ -177,18 +173,16 @@ fn find_source(
 fn find_dest(
     i: usize,
     source: ClientId,
-    c0: &RegionMetadata,
-    c1: &RegionMetadata,
-    c2: &RegionMetadata,
+    meta: &ClientMap<&RegionMetadata>,
     log: &Logger,
 ) -> Vec<ClientId> {
-    let c = ClientData::from_fn(|cid| {
-        [c0, c1, c2][cid.get() as usize].get(i).unwrap()
-    });
+    let c = meta.map(|m| m.get(i).unwrap());
     let s = c[source];
 
-    let out = ClientId::iter()
-        .filter(|&i| i != source && (s.dirty || c[i] != s))
+    let out = c
+        .iter()
+        .filter(|(i, c)| *i != source && (s.dirty || **c != s))
+        .map(|(i, _c)| i)
         .collect::<Vec<_>>();
 
     info!(
@@ -213,7 +207,11 @@ mod test {
 
         let dsr =
             RegionMetadata::new(&[1, 1, 1], &[3, 3, 3], &[false, false, false]);
-        let to_fix = DownstairsMend::new(&dsr, &dsr, &dsr, csl());
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &dsr);
+        meta.insert(ClientId::new(1), &dsr);
+        meta.insert(ClientId::new(2), &dsr);
+        let to_fix = DownstairsMend::new(&meta, csl());
         assert!(to_fix.is_none());
     }
 
@@ -232,7 +230,11 @@ mod test {
             &[3, 3, 3, 3],
             &[false, false, false, false],
         );
-        let _fix = DownstairsMend::new(&dsr, &dsr, &dsr_long, csl());
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &dsr);
+        meta.insert(ClientId::new(1), &dsr);
+        meta.insert(ClientId::new(2), &dsr_long);
+        let _fix = DownstairsMend::new(&meta, csl());
     }
 
     #[test]
@@ -251,7 +253,11 @@ mod test {
             &[0, 0, 0],
             &[false, false, false, false],
         );
-        let _fix = DownstairsMend::new(&d1, &d1, &d2, csl());
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d2);
+        let _fix = DownstairsMend::new(&meta, csl());
     }
 
     #[test]
@@ -270,7 +276,11 @@ mod test {
             &[0, 0, 0, 0],
             &[false, false, false, false],
         );
-        let _fix = DownstairsMend::new(&d1, &d2, &d1, csl());
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d1);
+        let _fix = DownstairsMend::new(&meta, csl());
     }
 
     #[test]
@@ -282,7 +292,11 @@ mod test {
             &[0, 0, 0],
             &[false, false, false],
         );
-        let _fix = DownstairsMend::new(&d1, &d1, &d1, csl());
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d1);
+        let _fix = DownstairsMend::new(&meta, csl());
     }
 
     #[test]
@@ -294,8 +308,12 @@ mod test {
             &[4, 5, 4, 0],
             &[false, false, false, false],
         );
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &dsr);
+        meta.insert(ClientId::new(1), &dsr);
+        meta.insert(ClientId::new(2), &dsr);
 
-        let fix = DownstairsMend::new(&dsr, &dsr, &dsr, csl());
+        let fix = DownstairsMend::new(&meta, csl());
         assert!(fix.is_none());
     }
 
@@ -326,7 +344,11 @@ mod test {
             &[2, 1, 3, 1],
             &[false, false, true, false],
         );
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d3);
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 2 has the mismatch
         let mut ef = fix.mend.remove(&ExtentId(2)).unwrap();
@@ -363,7 +385,11 @@ mod test {
             &flush_numbers,
             &[false, true, false, false],
         );
-        let mut fix = DownstairsMend::new(&d1, &d1, &d2, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d2);
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 1 has the mismatch, so we should find in the HM.
         let mut ef = fix.mend.remove(&ExtentId(1)).unwrap();
@@ -395,7 +421,12 @@ mod test {
             &flush_numbers,
             &[false, false, true, false],
         );
-        let mut fix = DownstairsMend::new(&d1, &d2, &d1, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d1);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 2 has the mismatch
         let mut ef = fix.mend.remove(&ExtentId(2)).unwrap();
@@ -423,7 +454,11 @@ mod test {
             &[2, 1, 2, 1],
             &[true, false, false, true],
         );
-        let mut fix = DownstairsMend::new(&d1, &d1, &d1, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d1);
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extents 0 and 3 have the mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -454,7 +489,12 @@ mod test {
         let d1 = RegionMetadata::new(&[9, 8, 7, 0], &flush_numbers, &dirty);
         let d2 = RegionMetadata::new(&[8, 8, 7, 0], &flush_numbers, &dirty);
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d2, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d2);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
 
         assert_eq!(ef.source, ClientId::new(0));
@@ -476,7 +516,12 @@ mod test {
         let d1 = RegionMetadata::new(&[9, 8, 7, 0], &flush_numbers, &dirty);
         let d2 = RegionMetadata::new(&[8, 8, 7, 0], &flush_numbers, &dirty);
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d1, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d1);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has the mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -506,7 +551,12 @@ mod test {
         let d2 = RegionMetadata::new(&[8, 9, 7, 4], &flush_numbers, &dirty);
         let d3 = RegionMetadata::new(&[8, 10, 7, 3], &flush_numbers, &dirty);
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d3);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has the first mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -546,7 +596,12 @@ mod test {
         let d1 = RegionMetadata::new(&generation, &[1, 1, 2, 1], &dirty);
         let d2 = RegionMetadata::new(&generation, &[2, 1, 2, 1], &dirty);
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d2, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d2);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has the first mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -574,7 +629,12 @@ mod test {
         let d2 = RegionMetadata::new(&generation, &[2, 1, 2, 2, 3, 3], &dirty);
         let d3 = RegionMetadata::new(&generation, &[3, 3, 3, 1, 3, 2], &dirty);
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d3);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has the first mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -644,7 +704,12 @@ mod test {
         let d1 = RegionMetadata::new(&generation, &[1, 1, 2, 1], &dirty);
         let d2 = RegionMetadata::new(&generation, &[2, 1, 2, 3], &dirty);
 
-        let mut fix = DownstairsMend::new(&d1, &d1, &d2, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d2);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
         // Extent 0 has the first mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
 
@@ -688,7 +753,12 @@ mod test {
             &[true, false, false, true],
         );
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d3);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
         // Extent 0 has a flush mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
 
@@ -753,7 +823,12 @@ mod test {
             &[false, false, false, false],
         );
 
-        let mut fix = DownstairsMend::new(&d1, &d2, &d3, csl()).unwrap();
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d1);
+        meta.insert(ClientId::new(1), &d2);
+        meta.insert(ClientId::new(2), &d3);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
         // Extent 0 has a flush mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
 
@@ -818,7 +893,13 @@ mod test {
         let d0 = RegionMetadata::new(&gen0, &flush, &dirty);
         let d1 = RegionMetadata::new(&gen1, &flush, &dirty);
         let d2 = RegionMetadata::new(&gen2, &flush, &dirty);
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
+
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d0);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d2);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has no mismatch
         // Extent 1 has a mismatch, so we should find it in the HM.
@@ -904,7 +985,13 @@ mod test {
         let d0 = RegionMetadata::new(&gen0, &flush, &dirty);
         let d1 = RegionMetadata::new(&gen1, &flush, &dirty);
         let d2 = RegionMetadata::new(&gen2, &flush, &dirty);
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
+
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d0);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d2);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -990,7 +1077,13 @@ mod test {
         let d0 = RegionMetadata::new(&gen0, &flush, &dirty);
         let d1 = RegionMetadata::new(&gen1, &flush, &dirty);
         let d2 = RegionMetadata::new(&gen2, &flush, &dirty);
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
+
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d0);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d2);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -1072,7 +1165,13 @@ mod test {
         let d0 = RegionMetadata::new(&gen, &flush0, &dirty);
         let d1 = RegionMetadata::new(&gen, &flush1, &dirty);
         let d2 = RegionMetadata::new(&gen, &flush2, &dirty);
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
+
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d0);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d2);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has no mismatch
         // Extent 1 has a mismatch, so we should find it in the HM.
@@ -1157,7 +1256,13 @@ mod test {
         let d0 = RegionMetadata::new(&gen, &flush0, &dirty);
         let d1 = RegionMetadata::new(&gen, &flush1, &dirty);
         let d2 = RegionMetadata::new(&gen, &flush2, &dirty);
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
+
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d0);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d2);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -1243,7 +1348,13 @@ mod test {
         let d0 = RegionMetadata::new(&gen, &flush0, &dirty);
         let d1 = RegionMetadata::new(&gen, &flush1, &dirty);
         let d2 = RegionMetadata::new(&gen, &flush2, &dirty);
-        let mut fix = DownstairsMend::new(&d0, &d1, &d2, csl()).unwrap();
+
+        let mut meta = ClientMap::new();
+        meta.insert(ClientId::new(0), &d0);
+        meta.insert(ClientId::new(1), &d1);
+        meta.insert(ClientId::new(2), &d2);
+
+        let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
 
         // Extent 0 has a mismatch
         let mut ef = fix.mend.remove(&ExtentId(0)).unwrap();
@@ -1299,5 +1410,76 @@ mod test {
 
         // Extent 8  No mismatch
         assert!(fix.mend.is_empty());
+    }
+
+    #[test]
+    fn reconcile_only_one() {
+        // If there's only a single region present, then there should be no
+        // reconciliation
+        let dsr =
+            RegionMetadata::new(&[1, 1, 1], &[3, 3, 3], &[false, false, false]);
+        for i in ClientId::iter() {
+            let mut meta = ClientMap::new();
+            meta.insert(i, &dsr);
+            let to_fix = DownstairsMend::new(&meta, csl());
+            assert!(to_fix.is_none());
+        }
+    }
+
+    #[test]
+    fn reconcile_one_dirty() {
+        // If there's only a single region present, then there should be no
+        // reconciliation
+        let dsr =
+            RegionMetadata::new(&[1, 1, 1], &[3, 3, 3], &[true, false, false]);
+        for i in ClientId::iter() {
+            let mut meta = ClientMap::new();
+            meta.insert(i, &dsr);
+            let to_fix = DownstairsMend::new(&meta, csl());
+            assert!(to_fix.is_none());
+        }
+    }
+
+    #[test]
+    fn reconcile_two() {
+        let c0 = RegionMetadata::new(
+            &[1, 1, 1, 5],
+            &[3, 4, 3, 9],
+            &[false, false, false, true],
+        );
+        let c1 = RegionMetadata::new(
+            &[2, 1, 1, 5],
+            &[3, 3, 3, 9],
+            &[false, false, true, true],
+        );
+
+        for (lo, hi) in [(0, 1), (0, 2), (1, 2)] {
+            let lo = ClientId::new(lo);
+            let hi = ClientId::new(hi);
+            let mut meta = ClientMap::new();
+            meta.insert(lo, &c0);
+            meta.insert(hi, &c1);
+            let mut fix = DownstairsMend::new(&meta, csl()).unwrap();
+
+            // c1 has a newer generation number
+            let ef = fix.mend.remove(&ExtentId(0)).unwrap();
+            assert_eq!(ef.source, hi);
+            assert_eq!(ef.dest, vec![lo]);
+
+            // c0 has a newer flush number
+            let ef = fix.mend.remove(&ExtentId(1)).unwrap();
+            assert_eq!(ef.source, lo);
+            assert_eq!(ef.dest, vec![hi]);
+
+            // c1 is dirty, pick it as source
+            let ef = fix.mend.remove(&ExtentId(2)).unwrap();
+            assert_eq!(ef.source, hi);
+            assert_eq!(ef.dest, vec![lo]);
+
+            // Both are dirty, pick the lowest ClientId as source
+            let ef = fix.mend.remove(&ExtentId(3)).unwrap();
+            assert_eq!(ef.source, lo);
+            assert_eq!(ef.dest, vec![hi]);
+        }
     }
 }
