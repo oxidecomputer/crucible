@@ -11,7 +11,7 @@ use crate::{
     client::{
         ClientAction, ClientFaultReason, ClientNegotiationFailed,
         ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
-        NegotiationState, ShouldSendError,
+        NegotiationStateData, ShouldSendError,
     },
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
@@ -21,10 +21,11 @@ use crate::{
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, BlockRes, Buffer, ClientData,
     ClientIOStateCount, ClientId, ClientMap, ConnectionMode, CrucibleError,
-    DownstairsIO, DownstairsMend, DsState, ExtentFix, ExtentRepairIDs, IOState,
-    IOStateCount, IOop, ImpactedBlocks, JobId, Message, RawReadResponse,
-    RawWrite, ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
-    SnapshotDetails, WorkSummary,
+    DownstairsIO, DownstairsMend, DsState, DsStateData, ExtentFix,
+    ExtentRepairIDs, IOState, IOStateCount, IOop, ImpactedBlocks, JobId,
+    Message, NegotiationState, RawReadResponse, RawWrite, ReconcileIO,
+    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
+    WorkSummary,
 };
 use crucible_common::{BlockIndex, ExtentId, NegotiationError};
 use crucible_protocol::WriteHeader;
@@ -422,22 +423,23 @@ impl Downstairs {
         let up_state = UpstairsState::GoActive(BlockRes::dummy());
         for cid in ClientId::iter() {
             for state in [
-                NegotiationState::WaitForPromote,
-                NegotiationState::WaitForRegionInfo,
-                NegotiationState::GetExtentVersions,
-                NegotiationState::WaitQuorum,
-                NegotiationState::Reconcile,
+                NegotiationStateData::Start,
+                NegotiationStateData::WaitForPromote,
+                NegotiationStateData::WaitForRegionInfo,
+                NegotiationStateData::GetExtentVersions,
+                NegotiationStateData::WaitQuorum(Default::default()),
+                NegotiationStateData::Reconcile,
             ] {
                 self.clients[cid].checked_state_transition(
                     &up_state,
-                    DsState::Connecting {
+                    DsStateData::Connecting {
                         state,
                         mode: ConnectionMode::New,
                     },
                 );
             }
             self.clients[cid]
-                .checked_state_transition(&up_state, DsState::Active);
+                .checked_state_transition(&up_state, DsStateData::Active);
         }
     }
 
@@ -892,12 +894,17 @@ impl Downstairs {
          */
         let mut max_flush = 0;
         let mut max_gen = 0;
-        for (cid, rec) in self
-            .clients
-            .iter()
-            .map(|c| c.region_metadata.as_ref().unwrap())
-            .enumerate()
-        {
+        for (cid, rec) in ClientId::iter().filter_map(|i| {
+            if let DsStateData::Connecting {
+                state: NegotiationStateData::WaitQuorum(r),
+                ..
+            } = self.clients[i].state_data()
+            {
+                Some((i, r))
+            } else {
+                None
+            }
+        }) {
             // We log the first 12 pieces of extent metadata
             const MAX_LOG: usize = 12;
             let mut flush_log = Vec::with_capacity(MAX_LOG);
@@ -1955,16 +1962,18 @@ impl Downstairs {
     }
 
     /// Compares region metadata from all three clients and builds a mend list
-    ///
-    /// # Panics
-    /// If any downstairs client does not have region metadata populated
     fn mismatch_list(&self) -> Option<DownstairsMend> {
         let log = self.log.new(o!("" => "mend".to_string()));
         let mut meta = ClientMap::new();
         for i in ClientId::iter() {
-            // XXX once we start doing reconciliation with only 2 downstairs,
-            // this may only insert region_metadata that is present.
-            meta.insert(i, self.clients[i].region_metadata.as_ref().unwrap());
+            let DsStateData::Connecting {
+                state: NegotiationStateData::WaitQuorum(r),
+                ..
+            } = self.clients[i].state_data()
+            else {
+                panic!("client {i} is not in WaitQuorum");
+            };
+            meta.insert(i, r);
         }
         DownstairsMend::new(&meta, log)
     }
@@ -3954,15 +3963,16 @@ struct DownstairsBackpressureConfig {
 pub(crate) mod test {
     use super::{
         ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
-        ConnectionMode, Downstairs, NegotiationState, PendingJob,
+        ConnectionMode, Downstairs, DsState, NegotiationStateData, PendingJob,
     };
     use crate::{
         downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
-        BlockOpWaiter, BlockRes, ClientId, CrucibleError, DsState, ExtentFix,
-        ExtentRepairIDs, IOState, IOop, ImpactedBlocks, JobId, RawReadResponse,
-        ReconcileIO, ReconcileIOState, ReconciliationId, SnapshotDetails,
+        BlockOpWaiter, BlockRes, ClientId, CrucibleError, DsStateData,
+        ExtentFix, ExtentRepairIDs, IOState, IOop, ImpactedBlocks, JobId,
+        RawReadResponse, ReconcileIO, ReconcileIOState, ReconciliationId,
+        RegionMetadata, SnapshotDetails,
     };
 
     use bytes::BytesMut;
@@ -4024,15 +4034,15 @@ pub(crate) mod test {
         );
         let mode = ConnectionMode::Faulted;
         for state in [
-            NegotiationState::Start,
-            NegotiationState::WaitForPromote,
-            NegotiationState::WaitForRegionInfo,
-            NegotiationState::GetExtentVersions,
-            NegotiationState::LiveRepairReady,
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+            NegotiationStateData::LiveRepairReady,
         ] {
             ds.clients[to_repair].checked_state_transition(
                 &UpstairsState::Active,
-                DsState::Connecting { state, mode },
+                DsStateData::Connecting { state, mode },
             );
         }
     }
@@ -4045,7 +4055,7 @@ pub(crate) mod test {
         to_live_repair_ready(ds, to_repair);
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,
-            DsState::LiveRepair,
+            DsStateData::LiveRepair,
         );
     }
 
@@ -4054,15 +4064,16 @@ pub(crate) mod test {
         let up_state = UpstairsState::GoActive(BlockRes::dummy());
         for cid in ClientId::iter() {
             for state in [
-                NegotiationState::WaitForPromote,
-                NegotiationState::WaitForRegionInfo,
-                NegotiationState::GetExtentVersions,
-                NegotiationState::WaitQuorum,
-                NegotiationState::Reconcile,
+                NegotiationStateData::Start,
+                NegotiationStateData::WaitForPromote,
+                NegotiationStateData::WaitForRegionInfo,
+                NegotiationStateData::GetExtentVersions,
+                NegotiationStateData::WaitQuorum(RegionMetadata::default()),
+                NegotiationStateData::Reconcile,
             ] {
                 ds.clients[cid].checked_state_transition(
                     &up_state,
-                    DsState::Connecting { state, mode },
+                    DsStateData::Connecting { state, mode },
                 );
             }
         }

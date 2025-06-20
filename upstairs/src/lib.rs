@@ -67,7 +67,7 @@ mod stats;
 
 pub use client::{
     ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
-    NegotiationState,
+    NegotiationState, NegotiationStateData,
 };
 pub use crucible_common::impacted_blocks::*;
 
@@ -754,17 +754,20 @@ pub(crate) struct RawReadResponse {
 /// ```
 ///
 /// Complexity is hidden in the `Connecting` state, which wraps a
-/// [`NegotiationState`] implementing the negotiation state machine.
-#[allow(clippy::derive_partial_eq_without_eq)]
+/// [`NegotiationStateData`] implementing the negotiation state machine.
+///
+/// This is a *generic* downstairs state; it's specialized to either
+/// [`DsStateData`] (which is data-bearing) or [`DsState`] (which is
+/// serializable).  The `#[derive(..)]` annotations for serialization only apply
+/// if the generic parameter `N` is serializable, so it only applies to
+/// `DsState`.
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type", content = "value")]
-pub enum DsState {
+#[serde(rename = "DsState")]
+pub enum GenericDsState<N> {
     /// New connection
-    Connecting {
-        state: NegotiationState,
-        mode: ConnectionMode,
-    },
+    Connecting { state: N, mode: ConnectionMode },
 
     /// Ready for and/or currently receiving IO
     Active,
@@ -774,6 +777,29 @@ pub enum DsState {
 
     /// The IO task for the client is being stopped
     Stopping(ClientStopReason),
+}
+
+/// Downstairs state with data-bearing variants
+pub type DsStateData = GenericDsState<NegotiationStateData>;
+
+/// Downstairs state which can be serialized and sent over the network
+pub type DsState = GenericDsState<NegotiationState>;
+
+impl<N1, N2> From<&GenericDsState<N1>> for GenericDsState<N2>
+where
+    for<'a> N2: From<&'a N1>,
+{
+    fn from(value: &GenericDsState<N1>) -> Self {
+        match value {
+            GenericDsState::Connecting { state, mode } => Self::Connecting {
+                state: state.into(),
+                mode: *mode,
+            },
+            GenericDsState::Active => Self::Active,
+            GenericDsState::LiveRepair => Self::LiveRepair,
+            GenericDsState::Stopping(r) => Self::Stopping(*r),
+        }
+    }
 }
 
 impl std::fmt::Display for DsState {

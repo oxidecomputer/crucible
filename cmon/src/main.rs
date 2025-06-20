@@ -86,7 +86,7 @@ enum Action {
     Repair,
 }
 
-// Translate a DsState into a three letter string for printing.
+/// Translate a [`DsState`] into a three letter string for printing.
 fn short_state(dss: DsState) -> String {
     match dss {
         DsState::Connecting {
