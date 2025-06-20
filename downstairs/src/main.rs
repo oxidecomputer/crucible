@@ -419,16 +419,18 @@ async fn main() -> Result<()> {
                 .set_test_errors(read_errors, write_errors, flush_errors)
                 .build()?;
 
-            let downstairs = start_downstairs(
+            let downstairs = DownstairsClient::spawn(
                 d,
-                address,
-                oximeter,
-                port,
-                // TODO accept as an argument?
-                port + crucible_common::REPAIR_PORT_OFFSET,
-                cert_pem,
-                key_pem,
-                root_cert_pem,
+                DownstairsClientSettings {
+                    address,
+                    oximeter,
+                    port,
+                    // TODO accept as an argument?
+                    rport: port + crucible_common::REPAIR_PORT_OFFSET,
+                    cert_pem,
+                    key_pem,
+                    root_cert_pem,
+                },
             )
             .await?;
 

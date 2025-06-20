@@ -73,15 +73,17 @@ pub async fn run_downstairs_for_region(
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
     let handle = d.handle();
-    let _join_handle = start_downstairs(
+    let _join_handle = DownstairsClient::spawn(
         d,
-        run_params.address,
-        run_params.oximeter,
-        run_params.port,
-        run_params.rport,
-        run_params.cert_pem,
-        run_params.key_pem,
-        run_params.root_cert_pem,
+        DownstairsClientSettings {
+            address: run_params.address,
+            oximeter: run_params.oximeter,
+            port: run_params.port,
+            rport: run_params.rport,
+            cert_pem: run_params.cert_pem,
+            key_pem: run_params.key_pem,
+            root_cert_pem: run_params.root_cert_pem,
+        },
     )
     .await
     .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
