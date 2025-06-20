@@ -459,6 +459,11 @@ impl<T> ClientData<T> {
         ClientData(self.0.map(f))
     }
 
+    /// Builds a `ClientData` by applying a function to each item by reference
+    pub fn map_ref<U, F: FnMut(&T) -> U>(&self, mut f: F) -> ClientData<U> {
+        ClientData([f(&self.0[0]), f(&self.0[1]), f(&self.0[2])])
+    }
+
     #[cfg(test)]
     pub fn get(&self) -> &[T; 3] {
         &self.0
@@ -497,6 +502,12 @@ impl<T> ClientMap<T> {
     pub fn map<U, F: FnMut(T) -> U>(self, mut f: F) -> ClientMap<U> {
         ClientMap(self.0.map(move |v| v.map(&mut f)))
     }
+
+    /// Builds a `ClientMap` by applying a function to each item by reference
+    pub fn map_ref<U, F: FnMut(&T) -> U>(&self, mut f: F) -> ClientMap<U> {
+        ClientMap(self.0.map_ref(move |v| v.as_ref().map(&mut f)))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.iter().all(|i| i.is_none())
     }
