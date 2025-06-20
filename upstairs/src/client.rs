@@ -1032,11 +1032,13 @@ impl DownstairsClient {
                     ) | (
                         R::Replacing,
                         ConnectionMode::New,
-                        NegotiationStateData::WaitConnect(..)
+                        NegotiationStateData::Start
+                            | NegotiationStateData::WaitConnect(..)
                     ) | (
                         R::NegotiationFailed(..),
                         ConnectionMode::New,
-                        NegotiationStateData::WaitConnect(..)
+                        NegotiationStateData::Start
+                            | NegotiationStateData::WaitConnect(..)
                     )
                 )
             }
