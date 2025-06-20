@@ -766,7 +766,7 @@ impl Upstairs {
                     ..
                 }
             ) {
-                self.downstairs.check_gone_too_long(cid, &self.state);
+                self.downstairs.check_gone_too_long(cid);
             }
         }
     }
