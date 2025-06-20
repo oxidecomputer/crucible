@@ -112,7 +112,11 @@ impl DownstairsMend {
                 m.dirty || m != base_value
             });
             if any_diff {
-                info!(log, "extent {i} needs reconciliation: {meta:?}",);
+                info!(
+                    log,
+                    "extent {i} needs reconciliation: {:?}",
+                    meta.map_ref(|r| r.get(i).unwrap())
+                );
                 let ef = make_repair_list(i, meta, &log);
                 dsm.mend.insert(ExtentId(i as u32), ef);
             }
