@@ -11,6 +11,7 @@ use crucible_common::{x509::TLSContext, NegotiationError, VerboseTimeout};
 use crucible_protocol::{
     MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
+use strum::IntoDiscriminant;
 
 use std::{
     collections::BTreeSet,
@@ -99,7 +100,6 @@ impl ConnectionId {
 ///
 /// This data structure contains client-specific state and manages communication
 /// with a per-client IO task (through the `ClientTaskHandle`).
-#[derive(Debug)]
 pub(crate) struct DownstairsClient {
     /// Shared (static) configuration
     cfg: Arc<UpstairsConfig>,
@@ -440,11 +440,12 @@ impl DownstairsClient {
     /// # Panics
     /// If the current state is invalid
     pub(crate) fn begin_reconcile(&mut self) {
-        info!(self.log, "Transition from {:?} to Reconcile", self.state);
+        info!(self.log, "Transition from {:?} to Reconcile", self.state());
         let DsStateData::Connecting { state, mode } = &mut self.state else {
             panic!(
                 "invalid state {:?} for client {}",
-                self.state, self.client_id
+                self.state(),
+                self.client_id
             );
         };
         assert!(matches!(state, NegotiationStateData::WaitQuorum(..)));
@@ -461,12 +462,17 @@ impl DownstairsClient {
             } => {
                 info!(
                     self.log,
-                    "ready to deactivate from state {:?}", self.state
+                    "ready to deactivate from state {:?}",
+                    self.state(),
                 );
                 true
             }
             s => {
-                info!(self.log, "not ready to deactivate due to state {s:?}");
+                info!(
+                    self.log,
+                    "not ready to deactivate due to state {:?}",
+                    DsState::from(s)
+                );
                 false
             }
         }
@@ -867,7 +873,7 @@ impl DownstairsClient {
                 ..
             } => panic!(
                 "enqueue should not be called from state {:?}",
-                self.state
+                self.state()
             ),
         }
     }
@@ -1377,7 +1383,8 @@ impl DownstairsClient {
                 if !matches!(state, NegotiationStateData::WaitForPromote) {
                     error!(
                         self.log,
-                        "Received YouAreNowActive out of order! {state:?}",
+                        "Received YouAreNowActive out of order! {:?}",
+                        state.discriminant()
                     );
                     return Err(NegotiationError::OutOfOrder);
                 }
@@ -1500,7 +1507,7 @@ impl DownstairsClient {
                                         self.client_id,
                                         region_def.uuid(),
                                         uuid,
-                                        self.state,
+                                        self.state(),
                                         up_state,
                                     );
                                 }
@@ -1631,7 +1638,7 @@ impl DownstairsClient {
                     ConnectionMode::Offline => {
                         panic!(
                             "got ExtentVersions from invalid state {:?}",
-                            self.state
+                            self.state()
                         );
                     }
                 };
@@ -1659,7 +1666,8 @@ impl DownstairsClient {
         ) {
             panic!(
                 "[{}] should still be in reconcile, not {:?}",
-                self.client_id, self.state
+                self.client_id,
+                self.state()
             );
         }
         let prev_state = job
@@ -1819,7 +1827,7 @@ impl DownstairsClient {
 ///
 /// `Done` isn't actually present in the state machine; it's indicated by
 /// returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].
-#[derive(Debug, strum::EnumDiscriminants)]
+#[derive(strum::EnumDiscriminants)]
 #[strum_discriminants(name(NegotiationState))]
 #[strum_discriminants(derive(Serialize, Deserialize, JsonSchema))]
 #[strum_discriminants(serde(rename_all = "snake_case"))]
