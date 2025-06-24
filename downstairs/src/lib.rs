@@ -3691,6 +3691,7 @@ impl DownstairsClient {
     }
 
     /// Stops the running downstairs
+    #[cfg(any(test, feature = "integration-tests"))]
     pub async fn stop(self) -> Result<(), CrucibleError> {
         self.join_handle.abort();
         self.repair_handle.abort();
