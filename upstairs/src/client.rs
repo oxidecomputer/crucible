@@ -448,8 +448,8 @@ impl DownstairsClient {
                 self.client_id
             );
         };
-        assert!(matches!(state, NegotiationStateData::WaitQuorum(..)));
-        assert!(matches!(mode, ConnectionMode::New));
+        assert_eq!(state.discriminant(), NegotiationState::WaitQuorum);
+        assert_eq!(mode, &ConnectionMode::New);
         *state = NegotiationStateData::Reconcile;
     }
 
