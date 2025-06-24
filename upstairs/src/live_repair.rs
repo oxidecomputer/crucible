@@ -96,7 +96,6 @@ pub mod repair_test {
 
     const STOP_IO_ERROR: DsState =
         DsState::Stopping(ClientStopReason::Fault(ClientFaultReason::IOError));
-
     const STOP_FAILED_LR: DsState = DsState::Stopping(ClientStopReason::Fault(
         ClientFaultReason::FailedLiveRepair,
     ));
@@ -1118,15 +1117,15 @@ pub mod repair_test {
         );
         let mode = ConnectionMode::Faulted;
         for state in [
-            NegotiationState::Start,
-            NegotiationState::WaitForPromote,
-            NegotiationState::WaitForRegionInfo,
-            NegotiationState::GetExtentVersions,
-            NegotiationState::LiveRepairReady,
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+            NegotiationStateData::LiveRepairReady,
         ] {
             up.downstairs.clients[client].checked_state_transition(
                 &up.state,
-                DsState::Connecting { state, mode },
+                DsStateData::Connecting { state, mode },
             );
         }
         up.check_live_repair_start();

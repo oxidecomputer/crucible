@@ -280,7 +280,7 @@
         ]
       },
       "DsState": {
-        "description": "High-level states for a Downstairs\n\nThe state machine for a Downstairs is relatively simple:\n\n```text ┌────────────┐ ┌────► LiveRepair ├─────┐ start ┌─────────┴┐   └─────┬──────┘   ┌─▼──────┐ ────►│Connecting│         │          │Stopping│ └─▲───────┬┘   ┌─────▼──────┐   └─▲────┬─┘ │       └────►   Active   ├─────┘    │ │            └─────┬──────┘          │ │                  │                 │ └─────────────────◄┴─────────────────┘ ```\n\nComplexity is hidden in the `Connecting` state, which wraps a [`NegotiationState`] implementing the negotiation state machine.",
+        "description": "High-level states for a Downstairs\n\nThe state machine for a Downstairs is relatively simple:\n\n```text ┌────────────┐ ┌────► LiveRepair ├─────┐ start ┌─────────┴┐   └─────┬──────┘   ┌─▼──────┐ ────►│Connecting│         │          │Stopping│ └─▲───────┬┘   ┌─────▼──────┐   └─▲────┬─┘ │       └────►   Active   ├─────┘    │ │            └─────┬──────┘          │ │                  │                 │ └─────────────────◄┴─────────────────┘ ```\n\nComplexity is hidden in the `Connecting` state, which wraps a [`NegotiationStateData`] implementing the negotiation state machine.\n\nThis is a *generic* downstairs state; it's specialized to either [`DsStateData`] (which is data-bearing) or [`DsState`] (which is serializable).  The `#[derive(..)]` annotations for serialization only apply if the generic parameter `N` is serializable, so it only applies to `DsState`.",
         "oneOf": [
           {
             "description": "New connection",
@@ -384,8 +384,23 @@
         ]
       },
       "NegotiationState": {
-        "description": "Tracks client negotiation progress\n\nThe exact path through negotiation depends on the [`ConnectionMode`].\n\nThere are three main paths, shown below:\n\n```text ┌───────┐ │ Start │ └───┬───┘ │ ┌───────▼────────┐ │ WaitForPromote │ └───────┬────────┘ │ ┌────────▼──────────┐ │ WaitForRegionInfo │ └──┬──────────────┬─┘ Offline │              │ New / Faulted / Replaced (replay) │         ┌────▼────────────┐ │         │GetExtentVersions│ │         └─┬─────────────┬─┘ │           │ New         │ Faulted / Replaced │    ┌──────▼───┐    ┌────▼──────────┐ │    │WaitQuorum│    │LiveRepairReady│ │    └────┬─────┘    └────┬──────────┘ │         │               │ │    ┌────▼────┐          │ │    │Reconcile│          │ │    └────┬────┘          │ │         │               │ │     ┌───▼──┐            │ └─────► Done ◄────────────┘ └──────┘ ```\n\n`Done` isn't actually present in the state machine; it's indicated by returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].",
+        "description": "Auto-generated discriminant enum variants",
         "oneOf": [
+          {
+            "description": "One-shot sender to ask the client to open its connection\n\nThis is used to hold the client (without connecting) in cases where we have deliberately deactivated this client.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_connect"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
           {
             "description": "After connecting, waiting to hear `YesItsMe` from the client\n\nOnce this message is heard, sends `PromoteToActive` and transitions to `WaitForPromote`",
             "type": "object",
