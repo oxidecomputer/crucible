@@ -53,7 +53,7 @@ pub fn repair_main(
     ds: &Downstairs,
     addr: SocketAddr,
     log: &Logger,
-) -> Result<SocketAddr, String> {
+) -> Result<(tokio::task::JoinHandle<Result<()>>, SocketAddr), String> {
     /*
      * We must specify a configuration with a bind address.
      */
@@ -95,9 +95,12 @@ pub fn repair_main(
             .start();
     let local_addr = server.local_addr();
 
-    tokio::spawn(server);
+    let h = tokio::spawn(async move {
+        let r = server.await;
+        r.map_err(|e| anyhow::anyhow!("{e}"))
+    });
 
-    Ok(local_addr)
+    Ok((h, local_addr))
 }
 
 #[derive(Deserialize, JsonSchema)]

@@ -62,6 +62,29 @@ pub async fn run_downstairs_for_region(
         ));
     }
 
+    let certs = match (
+        run_params.cert_pem,
+        run_params.key_pem,
+        run_params.root_cert_pem,
+    ) {
+        (Some(cert_pem), Some(key_pem), Some(root_cert_pem)) => {
+            Some(DownstairsClientCerts {
+                cert_pem,
+                key_pem,
+                root_cert_pem,
+            })
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err(HttpError::for_bad_request(
+                Some(String::from("BadInput")),
+                "must provide all of cert_pem, key_pem, root_cert_pem \
+                 if any are provided"
+                    .to_owned(),
+            ))
+        }
+    };
+
     let d = Downstairs::new_builder(&run_params.data, run_params.read_only)
         .set_lossy(run_params.lossy)
         .set_test_errors(
@@ -73,15 +96,15 @@ pub async fn run_downstairs_for_region(
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
     let handle = d.handle();
-    let _join_handle = start_downstairs(
+    let _join_handle = DownstairsClient::spawn(
         d,
-        run_params.address,
-        run_params.oximeter,
-        run_params.port,
-        run_params.rport,
-        run_params.cert_pem,
-        run_params.key_pem,
-        run_params.root_cert_pem,
+        DownstairsClientSettings {
+            address: run_params.address,
+            oximeter: run_params.oximeter,
+            port: run_params.port,
+            rport: run_params.rport,
+            certs,
+        },
     )
     .await
     .map_err(|e| HttpError::for_internal_error(e.to_string()))?;

@@ -35,7 +35,7 @@ mod test {
     struct TestDownstairs {
         address: IpAddr,
         tempdir: TempDir,
-        downstairs: Option<RunningDownstairs>,
+        downstairs: Option<DownstairsClient>,
     }
 
     impl TestDownstairs {
@@ -88,13 +88,12 @@ mod test {
                 downstairs.clone_region(*clone_source).await?
             }
 
-            let downstairs = start_downstairs(
-                downstairs, address, None, /* oximeter */
-                0,    /* any port */
-                0,    /* any rport */
-                None, /* cert_pem */
-                None, /* key_pem */
-                None, /* root_cert_pem */
+            let downstairs = DownstairsClient::spawn(
+                downstairs,
+                DownstairsClientSettings {
+                    address,
+                    ..DownstairsClientSettings::default()
+                },
             )
             .await?;
 
@@ -111,15 +110,12 @@ mod test {
                 .build()?;
 
             self.downstairs = Some(
-                start_downstairs(
+                DownstairsClient::spawn(
                     downstairs,
-                    self.address,
-                    None, /* oximeter */
-                    0,    /* any port */
-                    0,    /* any rport */
-                    None, /* cert_pem */
-                    None, /* key_pem */
-                    None, /* root_cert_pem */
+                    DownstairsClientSettings {
+                        address: self.address,
+                        ..DownstairsClientSettings::default()
+                    },
                 )
                 .await?,
             );
@@ -134,15 +130,12 @@ mod test {
                     .build()?;
 
             self.downstairs = Some(
-                start_downstairs(
+                DownstairsClient::spawn(
                     downstairs,
-                    self.address,
-                    None, /* oximeter */
-                    0,    /* any port */
-                    0,    /* any rport */
-                    None, /* cert_pem */
-                    None, /* key_pem */
-                    None, /* root_cert_pem */
+                    DownstairsClientSettings {
+                        address: self.address,
+                        ..DownstairsClientSettings::default()
+                    },
                 )
                 .await?,
             );
@@ -167,13 +160,13 @@ mod test {
 
         pub fn address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
-            self.downstairs.as_ref().unwrap().address
+            self.downstairs.as_ref().unwrap().address()
         }
 
         // Return the repair address for a running downstairs
         pub fn repair_address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
-            self.downstairs.as_ref().unwrap().repair_address
+            self.downstairs.as_ref().unwrap().repair_address()
         }
     }
 

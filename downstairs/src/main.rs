@@ -200,11 +200,11 @@ enum Args {
         trace_endpoint: Option<String>,
 
         // TLS options
-        #[clap(long, action)]
+        #[clap(long, action, requires_all = ["key_pem", "root_cert_pem"])]
         cert_pem: Option<String>,
-        #[clap(long, action)]
+        #[clap(long, action, requires_all = ["cert_pem", "root_cert_pem"])]
         key_pem: Option<String>,
-        #[clap(long, action)]
+        #[clap(long, action, requires_all = ["cert_pem", "key_pem"])]
         root_cert_pem: Option<String>,
 
         #[clap(long, default_value = "rw", action)]
@@ -413,26 +413,35 @@ async fn main() -> Result<()> {
 
             let read_only = mode == Mode::Ro;
 
+            let certs = cert_pem.map(|cert_pem| {
+                // Clap ensures that these are all present together
+                DownstairsClientCerts {
+                    cert_pem,
+                    key_pem: key_pem.unwrap(),
+                    root_cert_pem: root_cert_pem.unwrap(),
+                }
+            });
+
             let d = Downstairs::new_builder(&data, read_only)
                 .set_lossy(lossy)
                 .set_logger(log)
                 .set_test_errors(read_errors, write_errors, flush_errors)
                 .build()?;
 
-            let downstairs = start_downstairs(
+            let downstairs = DownstairsClient::spawn(
                 d,
-                address,
-                oximeter,
-                port,
-                // TODO accept as an argument?
-                port + crucible_common::REPAIR_PORT_OFFSET,
-                cert_pem,
-                key_pem,
-                root_cert_pem,
+                DownstairsClientSettings {
+                    address,
+                    oximeter,
+                    port,
+                    // TODO accept as an argument?
+                    rport: port + crucible_common::REPAIR_PORT_OFFSET,
+                    certs,
+                },
             )
             .await?;
 
-            downstairs.join_handle.await?
+            downstairs.wait().await.map_err(anyhow::Error::from)
         }
         Args::RepairAPI => repair::write_openapi(&mut std::io::stdout()),
         Args::Serve {

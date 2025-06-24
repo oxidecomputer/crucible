@@ -884,9 +884,6 @@ enum NegotiationState {
 /// Immutable data shared by every `ConnectionState`
 #[derive(Debug)]
 struct ConnectionData {
-    /// Repair address, guaranteed to be valid by this point
-    repair_addr: SocketAddr,
-
     /// Token used to cancel the IO tasks
     #[expect(unused)]
     cancel: tokio_util::sync::DropGuard,
@@ -899,10 +896,6 @@ impl ConnectionData {
     /// Returns a dummy connection, for use with `std::mem::replace`
     fn dummy() -> Self {
         Self {
-            repair_addr: SocketAddr::new(
-                IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-                9001,
-            ),
             cancel: tokio_util::sync::CancellationToken::new().drop_guard(),
             reply_channel_tx: mpsc::unbounded_channel().0,
         }
@@ -2236,8 +2229,6 @@ impl DownstairsBuilder {
             active_upstairs: HashMap::new(),
             connection_state: HashMap::new(),
             dss,
-            address: None,
-            repair_address: None,
             log,
             request_tx,
             request_rx,
@@ -2277,8 +2268,6 @@ pub struct Downstairs {
     active_upstairs: HashMap<Uuid, ConnectionId>,
 
     dss: DsStatOuter,
-    pub address: Option<SocketAddr>,
-    pub repair_address: Option<SocketAddr>,
     log: Logger,
 
     /// Per-connection state
@@ -2648,17 +2637,38 @@ impl Downstairs {
         Ok(())
     }
 
-    fn spawn_runner(ds: Downstairs) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(ds.run())
+    fn spawn_runner(
+        ds: Downstairs,
+        state: DownstairsClientState,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(ds.run(state, cancel))
     }
 
     /// The main Downstairs function!
     ///
     /// This function receives and handles requests from various other tasks,
     /// most notable per-connection IO worker tasks.
-    async fn run(mut self) {
+    async fn run(
+        mut self,
+        state: DownstairsClientState,
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
         let log = self.log.new(o!("task" => "runner".to_string()));
-        while let Some(v) = self.request_rx.recv().await {
+        loop {
+            let v = tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!(log, "stop requested, exiting");
+                    break;
+                },
+                v = self.request_rx.recv() => {
+                    let Some(v) = v else {
+                        info!(log, "request channel closed, exiting");
+                        break;
+                    };
+                    v
+                },
+            };
             match v {
                 DownstairsRequest::ShowWork => {
                     show_work(&mut self);
@@ -2683,7 +2693,7 @@ impl Downstairs {
                     }
                 }
                 DownstairsRequest::Message { id, msg } => {
-                    self.on_message_for(id, msg).await;
+                    self.on_message_for(id, msg, &state).await;
                 }
                 DownstairsRequest::ConnectionClosed { id } => {
                     // Upstairs disconnected, so discard our local state
@@ -2705,6 +2715,7 @@ impl Downstairs {
         &mut self,
         m: Message,
         conn_id: ConnectionId,
+        client_state: &DownstairsClientState,
     ) -> Result<()> {
         let state = self.connection_state.get_mut(&conn_id).unwrap();
         match m {
@@ -2821,7 +2832,7 @@ impl Downstairs {
 
                 if let Err(e) = state.reply(Message::YesItsMe {
                     version: CRUCIBLE_MESSAGE_VERSION,
-                    repair_addr: state.data().repair_addr,
+                    repair_addr: client_state.repair_address,
                 }) {
                     bail!("Failed sending YesItsMe: {}", e);
                 }
@@ -3044,7 +3055,6 @@ impl Downstairs {
         let prev = self.connection_state.insert(
             id,
             ConnectionState::Open(ConnectionData {
-                repair_addr: self.repair_address.unwrap(),
                 cancel: cancel_guard,
                 reply_channel_tx,
             }),
@@ -3100,7 +3110,12 @@ impl Downstairs {
     }
 
     /// Handles a single message, either negotiation or doing IO
-    async fn on_message_for(&mut self, id: ConnectionId, m: Message) {
+    async fn on_message_for(
+        &mut self,
+        id: ConnectionId,
+        m: Message,
+        client_state: &DownstairsClientState,
+    ) {
         let Some(state) = self.connection_state.get_mut(&id) else {
             warn!(self.log, "got message for disconnected id {id:?}; ignoring");
             return;
@@ -3122,7 +3137,7 @@ impl Downstairs {
                 );
                 self.remove_connection(id);
             }
-        } else if let Err(e) = self.on_negotiation_step(m, id) {
+        } else if let Err(e) = self.on_negotiation_step(m, id, client_state) {
             warn!(
                 self.log,
                 "on_negotiation_step returns error {e:?}, disconnecting"
@@ -3465,178 +3480,276 @@ pub fn create_region_with_backend(
     Ok(region)
 }
 
-/// Return `struct` for `start_downstairs`
+/// Handle for a running Downstairs client
 #[derive(Debug)]
-pub struct RunningDownstairs {
-    pub join_handle: tokio::task::JoinHandle<Result<()>>,
-    pub address: SocketAddr,
-    pub repair_address: SocketAddr,
+pub struct DownstairsClient {
+    state: DownstairsClientState,
+
+    /// Handle to the main Downstairs task
+    join_handle: tokio::task::JoinHandle<Result<()>>,
+
+    /// Handle to the repair task
+    repair_handle: tokio::task::JoinHandle<Result<()>>,
+
+    /// Handle to the oximeter task (optional)
+    oximeter_handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
-/// Returns Ok if everything spawned ok, Err otherwise
-///
-/// Return Ok(main task join handle) if all the necessary tasks spawned
-/// successfully, and Err otherwise.
-#[allow(clippy::too_many_arguments)]
-pub async fn start_downstairs(
-    mut ds: Downstairs,
-    address: IpAddr,
-    oximeter: Option<SocketAddr>,
-    port: u16,
-    rport: u16,
-    cert_pem: Option<String>,
-    key_pem: Option<String>,
-    root_cert_pem: Option<String>,
-) -> Result<RunningDownstairs> {
-    let root_log = ds.log.clone();
-    if let Some(oximeter) = oximeter {
-        let dss = ds.dss.clone();
-        let log = root_log.new(o!("task" => "oximeter".to_string()));
+/// State associated with a running Downstairs client
+#[derive(Copy, Clone, Debug)]
+pub struct DownstairsClientState {
+    /// Socket address for IO to the downstairs
+    address: SocketAddr,
 
-        tokio::spawn(async move {
-            let producer_address = SocketAddr::new(address, 0);
-            if let Err(e) =
-                stats::ox_stats(dss, oximeter, producer_address, &log).await
-            {
-                error!(log, "ERROR: oximeter failed: {:?}", e);
-            } else {
-                warn!(log, "OK: oximeter all done");
-            }
+    /// Socket address for repair IO
+    repair_address: SocketAddr,
+}
+
+impl DownstairsClient {
+    /// Spawns a downstairs client owning the given [`Downstairs`]
+    pub async fn spawn(
+        ds: Downstairs,
+        settings: DownstairsClientSettings,
+    ) -> Result<Self> {
+        let root_log = ds.log.clone();
+        let oximeter_handle = settings.oximeter.map(|oximeter| {
+            let dss = ds.dss.clone();
+            let log = root_log.new(o!("task" => "oximeter".to_string()));
+
+            tokio::spawn(async move {
+                let producer_address = SocketAddr::new(settings.address, 0);
+                let r = stats::ox_stats(dss, oximeter, producer_address, &log)
+                    .await;
+                if let Err(e) = &r {
+                    error!(log, "ERROR: oximeter failed: {:?}", e);
+                } else {
+                    warn!(log, "OK: oximeter all done");
+                }
+                r
+            })
         });
-    }
 
-    // Setup a log for this task
-    let log = root_log.new(o!("task" => "main".to_string()));
+        // Setup a log for this task
+        let log = root_log.new(o!("task" => "main".to_string()));
 
-    let listen_on = match address {
-        IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
-        IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), port),
-    };
+        let listen_on = SocketAddr::new(settings.address, settings.port);
 
-    // Establish a listen server on the port.
-    let listener = TcpListener::bind(&listen_on).await?;
-    let local_addr = listener.local_addr()?;
-    ds.address = Some(local_addr);
+        // Establish a listen server on the port.
+        let listener = TcpListener::bind(&listen_on).await?;
+        let local_addr = listener.local_addr()?;
 
-    let info = crucible_common::BuildInfo::default();
-    info!(log, "Crucible Version: {}", info);
-    info!(
-        log,
-        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
-    );
+        let info = crucible_common::BuildInfo::default();
+        info!(log, "Crucible Version: {}", info);
+        info!(
+            log,
+            "Upstairs <-> Downstairs Message Version: {}",
+            CRUCIBLE_MESSAGE_VERSION
+        );
 
-    let repair_address = match address {
-        IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), rport),
-        IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), rport),
-    };
+        let repair_address = SocketAddr::new(settings.address, settings.rport);
 
-    let repair_log = root_log.new(o!("task" => "repair".to_string()));
-    let repair_listener =
-        match repair::repair_main(&ds, repair_address, &repair_log) {
-            Err(e) => {
-                // TODO tear down other things if repair server can't be
-                // started?
-                bail!("got {:?} from repair main", e);
-            }
+        let repair_log = root_log.new(o!("task" => "repair".to_string()));
+        let (repair_handle, repair_listener) =
+            match repair::repair_main(&ds, repair_address, &repair_log) {
+                Err(e) => {
+                    // TODO tear down other things if repair server can't be
+                    // started?
+                    bail!("got {:?} from repair main", e);
+                }
 
-            Ok(socket_addr) => socket_addr,
+                Ok(socket_addr) => socket_addr,
+            };
+
+        info!(log, "Using repair address: {:?}", repair_listener);
+
+        // Optionally require SSL connections
+        let ssl_acceptor = if let Some(certs) = &settings.certs {
+            let context = crucible_common::x509::TLSContext::from_paths(
+                &certs.cert_pem,
+                &certs.key_pem,
+                &certs.root_cert_pem,
+            )?;
+
+            let config = context.get_server_config()?;
+
+            info!(log, "Configured SSL acceptor");
+
+            Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+        } else {
+            // unencrypted
+            info!(log, "No SSL acceptor configured");
+            None
         };
 
-    ds.repair_address = Some(repair_listener);
-    info!(log, "Using repair address: {:?}", repair_listener);
+        let mut dss = ds.dss.clone(); // shared handle for stats
+        let handle = ds.handle(); // handle for passing messages
+        let state = DownstairsClientState {
+            address: local_addr,
+            repair_address: repair_listener,
+        };
 
-    // Optionally require SSL connections
-    let ssl_acceptor = if let Some(cert_pem_path) = cert_pem {
-        let key_pem_path = key_pem.unwrap();
-        let root_cert_pem_path = root_cert_pem.unwrap();
+        // This is where the actual work takes place; owning the Downstairs
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut ds_runner = Downstairs::spawn_runner(ds, state, cancel.clone());
 
-        let context = crucible_common::x509::TLSContext::from_paths(
-            &cert_pem_path,
-            &key_pem_path,
-            &root_cert_pem_path,
-        )?;
+        let join_handle = tokio::spawn(async move {
+            // We now loop listening for a connection from the Upstairs.
+            // When we get one, we call `proc()` to spawn worker tasks, then wait
+            // for another connection.
+            info!(log, "downstairs listening on {}", listen_on);
 
-        let config = context.get_server_config()?;
+            // We use a DropGuard to cancel the runner task when the outer future
+            // (here) is dropped by JoinHandle::abort()
+            #[expect(unused)]
+            let guard = cancel.drop_guard();
 
-        info!(log, "Configured SSL acceptor");
-
-        Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
-    } else {
-        // unencrypted
-        info!(log, "No SSL acceptor configured");
-        None
-    };
-
-    let mut dss = ds.dss.clone(); // shared handle for stats
-    let handle = ds.handle(); // handle for passing messages
-
-    // This is where the actual work takes place; owning the Downstairs
-    let mut ds_runner = Downstairs::spawn_runner(ds);
-
-    let join_handle = tokio::spawn(async move {
-        // We now loop listening for a connection from the Upstairs.
-        // When we get one, we call `proc()` to spawn worker tasks, then wait
-        // for another connection.
-        info!(log, "downstairs listening on {}", listen_on);
-        let mut id = ConnectionId(0);
-        loop {
-            let v = tokio::select! {
-                _ = &mut ds_runner => {
-                    info!(log, "downstairs runner stopped; exiting");
-                    break Ok(());
-                }
-                v = listener.accept() => {v}
-            };
-            let (sock, raddr) = v?;
-
-            /*
-             * We have a new connection; before we wrap it, set TCP_NODELAY
-             * to assure that we don't get Nagle'd.
-             */
-            sock.set_nodelay(true).expect("could not set TCP_NODELAY");
-
-            let stream: WrappedStream = if let Some(ssl_acceptor) =
-                &ssl_acceptor
-            {
-                let ssl_acceptor = ssl_acceptor.clone();
-                WrappedStream::Https(match ssl_acceptor.accept(sock).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(
-                            log,
-                            "rejecting connection from {:?}: {:?}", raddr, e,
-                        );
-                        continue;
+            let mut id = ConnectionId(0);
+            loop {
+                let v = tokio::select! {
+                    _ = &mut ds_runner => {
+                        info!(log, "downstairs runner stopped; exiting");
+                        break Ok(());
                     }
-                })
-            } else {
-                WrappedStream::Http(sock)
-            };
+                    v = listener.accept() => {v}
+                };
+                let (sock, raddr) = v?;
 
-            info!(log, "accepted connection from {:?}", raddr);
+                /*
+                 * We have a new connection; before we wrap it, set TCP_NODELAY
+                 * to assure that we don't get Nagle'd.
+                 */
+                sock.set_nodelay(true).expect("could not set TCP_NODELAY");
 
-            // Add one to the counter every time we have a connection
-            // from an upstairs
-            dss.add_connection();
-            let task_log = root_log.new(o!("id" => id.0.to_string()));
-            let handle = handle.clone();
-            if let Err(e) = proc_stream(handle, id, stream, &task_log).await {
-                error!(
-                    task_log,
-                    "connection ({raddr}) failed to spawn tasks: {e:?}",
-                );
-            } else {
-                info!(task_log, "connection ({raddr}): tasks spawned");
+                let stream: WrappedStream =
+                    if let Some(ssl_acceptor) = &ssl_acceptor {
+                        let ssl_acceptor = ssl_acceptor.clone();
+                        WrappedStream::Https(
+                            match ssl_acceptor.accept(sock).await {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(
+                                        log,
+                                        "rejecting connection from {:?}: {:?}",
+                                        raddr,
+                                        e,
+                                    );
+                                    continue;
+                                }
+                            },
+                        )
+                    } else {
+                        WrappedStream::Http(sock)
+                    };
+
+                info!(log, "accepted connection from {:?}", raddr);
+
+                // Add one to the counter every time we have a connection
+                // from an upstairs
+                dss.add_connection();
+                let task_log = root_log.new(o!("id" => id.0.to_string()));
+                let handle = handle.clone();
+                if let Err(e) = proc_stream(handle, id, stream, &task_log).await
+                {
+                    error!(
+                        task_log,
+                        "connection ({raddr}) failed to spawn tasks: {e:?}",
+                    );
+                } else {
+                    info!(task_log, "connection ({raddr}): tasks spawned");
+                }
+                id.0 += 1;
             }
-            id.0 += 1;
-        }
-    });
+        });
 
-    Ok(RunningDownstairs {
-        join_handle,
-        address: local_addr,
-        repair_address: repair_listener,
-    })
+        Ok(DownstairsClient {
+            join_handle,
+            repair_handle,
+            oximeter_handle,
+            state,
+        })
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.state.address
+    }
+
+    pub fn repair_address(&self) -> SocketAddr {
+        self.state.repair_address
+    }
+
+    /// Waits for the downstairs to stop on its own
+    ///
+    /// It's not clear whether this will ever actually happen; see
+    /// [`Self::stop`] for a way to make it stop.
+    pub async fn wait(self) -> Result<(), CrucibleError> {
+        Self::decode_err(self.join_handle.await, false)?;
+        Self::decode_err(self.repair_handle.await, false)?;
+        if let Some(ox) = self.oximeter_handle {
+            Self::decode_err(ox.await, false)?;
+        }
+        Ok(())
+    }
+
+    /// Stops the running downstairs
+    #[cfg(any(test, feature = "integration-tests"))]
+    pub async fn stop(self) -> Result<(), CrucibleError> {
+        self.join_handle.abort();
+        self.repair_handle.abort();
+
+        Self::decode_err(self.join_handle.await, true)?;
+        Self::decode_err(self.repair_handle.await, true)?;
+        if let Some(ox) = self.oximeter_handle {
+            Self::decode_err(ox.await, true)?;
+        }
+        Ok(())
+    }
+
+    fn decode_err<T: Into<CrucibleError>>(
+        e: Result<Result<(), T>, tokio::task::JoinError>,
+        cancel_ok: bool,
+    ) -> Result<(), CrucibleError> {
+        match e {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(r)) => Err(r.into()),
+            Err(e) => {
+                if cancel_ok && e.is_cancelled() {
+                    Ok(())
+                } else {
+                    Err(CrucibleError::GenericError(format!(
+                        "join failed: {e:?}"
+                    )))
+                }
+            }
+        }
+    }
+}
+
+/// Settings when constructing a [`DownstairsClient`]
+pub struct DownstairsClientSettings {
+    pub address: IpAddr,
+    pub oximeter: Option<SocketAddr>,
+    pub port: u16,
+    pub rport: u16,
+    pub certs: Option<DownstairsClientCerts>,
+}
+
+/// Paths to certificates
+pub struct DownstairsClientCerts {
+    pub cert_pem: String,
+    pub key_pem: String,
+    pub root_cert_pem: String,
+}
+
+impl Default for DownstairsClientSettings {
+    fn default() -> Self {
+        Self {
+            address: IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            oximeter: None,
+            port: 0,
+            rport: 0,
+            certs: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3647,9 +3760,6 @@ mod test {
     use std::net::Ipv4Addr;
     use tempfile::{tempdir, TempDir};
     use tokio::net::TcpSocket;
-
-    const DUMMY_REPAIR_SOCKET: SocketAddr =
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
 
     // Create a simple logger
     fn csl() -> Logger {
@@ -3768,7 +3878,6 @@ mod test {
         let mut ds = Downstairs::new_builder(&path_dir, false)
             .set_logger(csl())
             .build()?;
-        ds.repair_address = Some(DUMMY_REPAIR_SOCKET);
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -3842,10 +3951,9 @@ mod test {
         region.extend(extent_count, Backend::default())?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let mut ds = Downstairs::new_builder(&path_dir, false)
+        let ds = Downstairs::new_builder(&path_dir, false)
             .set_logger(csl())
             .build()?;
-        ds.repair_address = Some(DUMMY_REPAIR_SOCKET);
 
         Ok(ds)
     }
@@ -3946,7 +4054,6 @@ mod test {
         let gen = 10;
 
         let mut ds = create_test_downstairs(block_size, extent_size, 5, &dir)?;
-        ds.repair_address = Some(DUMMY_REPAIR_SOCKET);
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -5439,10 +5546,9 @@ mod test {
 
         let path_dir = dir.as_ref().to_path_buf();
 
-        let mut ds = Downstairs::new_builder(&path_dir, read_only)
+        let ds = Downstairs::new_builder(&path_dir, read_only)
             .set_logger(csl())
             .build()?;
-        ds.repair_address = Some(DUMMY_REPAIR_SOCKET);
         Ok(ds)
     }
 
@@ -5832,15 +5938,13 @@ mod test {
         let dir = tempdir()?;
 
         let ds = create_test_downstairs(bs, es, ec, &dir)?;
-        let _jh = start_downstairs(
+        let _jh = DownstairsClient::spawn(
             ds,
-            "127.0.0.1".parse().unwrap(),
-            None,
-            listen_port,
-            repair_port,
-            None,
-            None,
-            None,
+            DownstairsClientSettings {
+                port: listen_port,
+                rport: repair_port,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -6088,5 +6192,51 @@ mod test {
         let data = Bytes::from(vec![1u8; 513]);
         let r = RegionWrite::new(BlockIndex(0), &contexts, data, &def);
         assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_running_downstairs() {
+        let bs = 512;
+        let es = 4;
+        let ec = 5;
+        let dir = tempdir().unwrap();
+
+        let ds = create_test_downstairs(bs, es, ec, &dir).unwrap();
+        let jh = DownstairsClient::spawn(
+            ds,
+            DownstairsClientSettings {
+                port: 5555,
+                rport: 5556,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let sock = TcpSocket::new_v4().unwrap();
+        let addr =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5555);
+        let tcp = sock.connect(addr).await.unwrap();
+
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = MessageWriter::new(write);
+
+        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
+        let m = Message::HereIAm {
+            version: CRUCIBLE_MESSAGE_VERSION,
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: Vec::new(),
+        };
+        fw.send(m).await.unwrap();
+
+        let f = fr.next().await.unwrap();
+        assert!(matches!(f, Ok(Message::YesItsMe { .. })));
+
+        assert!(jh.stop().await.is_ok());
     }
 }
