@@ -1346,6 +1346,7 @@ dependencies = [
  "regex-syntax",
  "reqwest",
  "rustix 0.38.37",
+ "rustls-pki-types",
  "schemars",
  "scopeguard",
  "semver 1.0.26",
@@ -2597,7 +2598,6 @@ version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc2fdfdbff08affe55bb779f33b053aa1fe5dd5b54c257343c17edfa55711bdb"
 dependencies = [
- "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -2605,16 +2605,12 @@ dependencies = [
  "http",
  "http-body",
  "hyper",
- "ipnet",
  "libc",
- "percent-encoding",
  "pin-project-lite",
  "socket2",
- "system-configuration",
  "tokio",
  "tower-service",
  "tracing",
- "windows-registry 0.5.0",
 ]
 
 [[package]]
@@ -5153,7 +5149,7 @@ dependencies = [
  "wasm-streams",
  "web-sys",
  "webpki-roots",
- "windows-registry 0.4.0",
+ "windows-registry",
 ]
 
 [[package]]
@@ -7440,17 +7436,6 @@ dependencies = [
  "windows-result",
  "windows-strings",
  "windows-targets 0.53.0",
-]
-
-[[package]]
-name = "windows-registry"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c44a98275e31bfd112bb06ba96c8ab13c03383a3753fdddd715406a1824c7e0"
-dependencies = [
- "windows-link",
- "windows-result",
- "windows-strings",
 ]
 
 [[package]]

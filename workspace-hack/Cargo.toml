@@ -121,10 +121,11 @@ dof = { version = "0.3", default-features = false, features = ["des"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
-hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system", "full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
@@ -134,9 +135,10 @@ dof = { version = "0.3", default-features = false, features = ["des"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
-hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system", "full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
@@ -145,10 +147,11 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
-hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system", "full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
@@ -156,9 +159,10 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
-hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system", "full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-unknown-illumos.dependencies]
@@ -167,10 +171,11 @@ dof = { version = "0.3", default-features = false, features = ["des"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
-hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system", "full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml_edit = { version = "0.19", features = ["serde"] }
@@ -181,9 +186,10 @@ dof = { version = "0.3", default-features = false, features = ["des"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
-hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system", "full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml_edit = { version = "0.19", features = ["serde"] }
