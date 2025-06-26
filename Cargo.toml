@@ -67,7 +67,7 @@ nix = { version = "0.29", features = [ "feature", "uio" ] }
 num_enum = "0.7"
 num-derive = "0.4"
 num-traits = "0.2"
-omicron-zone-package = "0.12.0"
+omicron-zone-package = "0.12.2"
 openapiv3 = "2.0.0"
 opentelemetry = "0.29.1"
 opentelemetry-jaeger = { version = "0.20.0" }
