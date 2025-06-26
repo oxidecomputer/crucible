@@ -1346,7 +1346,6 @@ dependencies = [
  "regex-syntax",
  "reqwest",
  "rustix 0.38.37",
- "rustls-pki-types",
  "schemars",
  "scopeguard",
  "semver 1.0.26",
