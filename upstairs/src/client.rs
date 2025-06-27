@@ -188,10 +188,10 @@ impl DownstairsClient {
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
         let client_delay_us = Arc::new(AtomicU64::new(0));
-        let (client_task, client_connect_tx) = Self::new_io_task(
+        let (client_connect_tx, client_connect_rx) = oneshot::channel();
+        let client_task = Self::new_io_task(
             target_addr,
-            false, // do not delay in starting the task
-            false, // do not start the task until GoActive
+            ClientConnectDelay::Wait(client_connect_rx),
             client_id,
             tls_context.clone(),
             client_delay_us.clone(),
@@ -209,10 +209,7 @@ impl DownstairsClient {
             repair_addr: None,
             state: DsStateData::Connecting {
                 mode: ConnectionMode::New,
-                state: match client_connect_tx {
-                    Some(t) => NegotiationStateData::WaitConnect(t),
-                    None => NegotiationStateData::Start,
-                },
+                state: NegotiationStateData::WaitConnect(client_connect_tx),
             },
             last_flush: None,
             stats: DownstairsStats::default(),
@@ -572,11 +569,26 @@ impl DownstairsClient {
 
         self.connection_id.update();
 
-        // Restart with a short delay, connecting if we're not disabled
-        let state = match self.start_task(true, auto_connect) {
-            Some(t) => NegotiationStateData::WaitConnect(t),
-            None => NegotiationStateData::Start,
+        let (client_connect, state) = if auto_connect {
+            (
+                ClientConnectDelay::Delay(CLIENT_RECONNECT_DELAY),
+                NegotiationStateData::Start,
+            )
+        } else {
+            let (client_connect_tx, client_connect_rx) = oneshot::channel();
+            (
+                ClientConnectDelay::Wait(client_connect_rx),
+                NegotiationStateData::WaitConnect(client_connect_tx),
+            )
         };
+        self.client_task = Self::new_io_task(
+            self.target_addr,
+            client_connect,
+            self.client_id,
+            self.tls_context.clone(),
+            self.client_delay_us.clone(),
+            &self.log,
+        );
 
         let new_state = DsStateData::Connecting {
             mode: new_mode,
@@ -591,65 +603,32 @@ impl DownstairsClient {
         self.last_flush
     }
 
-    /// Starts a client IO task, saving the handle in `self.client_task`
-    ///
-    /// If we are running unit tests and `self.target_addr` is not populated, we
-    /// start a dummy task instead.
-    ///
-    /// Returns the connection oneshot, or `None` if we're connecting
-    /// automatically.
-    ///
-    /// # Panics
-    /// If `self.client_task` is not `None`, or `self.target_addr` is `None` and
-    /// this isn't running in test mode
-    #[must_use]
-    fn start_task(
-        &mut self,
-        delay: bool,
-        connect: bool,
-    ) -> Option<oneshot::Sender<()>> {
-        let (client_task, client_connect_tx) = Self::new_io_task(
-            self.target_addr,
-            delay,
-            connect,
-            self.client_id,
-            self.tls_context.clone(),
-            self.client_delay_us.clone(),
-            &self.log,
-        );
-        self.client_task = client_task;
-        client_connect_tx
-    }
-
     fn new_io_task(
         target: Option<SocketAddr>,
-        delay: bool,
-        connect: bool,
+        start: ClientConnectDelay,
         client_id: ClientId,
         tls_context: Option<Arc<TLSContext>>,
         client_delay_us: Arc<AtomicU64>,
         log: &Logger,
-    ) -> (ClientTaskHandle, Option<oneshot::Sender<()>>) {
+    ) -> ClientTaskHandle {
         #[cfg(test)]
         if let Some(target) = target {
             Self::new_network_task(
                 target,
-                delay,
-                connect,
+                start,
                 client_id,
                 tls_context,
                 client_delay_us,
                 log,
             )
         } else {
-            Self::new_dummy_task(connect)
+            Self::new_dummy_task(start)
         }
 
         #[cfg(not(test))]
         Self::new_network_task(
             target.expect("must provide socketaddr"),
-            delay,
-            connect,
+            start,
             client_id,
             tls_context,
             client_delay_us,
@@ -659,27 +638,18 @@ impl DownstairsClient {
 
     fn new_network_task(
         target: SocketAddr,
-        delay: bool,
-        connect: bool,
+        start: ClientConnectDelay,
         client_id: ClientId,
         tls_context: Option<Arc<TLSContext>>,
         client_delay_us: Arc<AtomicU64>,
         log: &Logger,
-    ) -> (ClientTaskHandle, Option<oneshot::Sender<()>>) {
+    ) -> ClientTaskHandle {
         // Messages in flight are limited by backpressure, so we can use
         // unbounded channels here without fear of runaway.
         let (client_request_tx, client_request_rx) = mpsc::unbounded_channel();
         let (client_response_tx, client_response_rx) =
             mpsc::unbounded_channel();
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
-        let (client_connect_tx, client_connect_rx) = oneshot::channel();
-
-        let client_connect_tx = if connect {
-            client_connect_tx.send(()).unwrap();
-            None
-        } else {
-            Some(client_connect_tx)
-        };
 
         let log = log.new(o!("" => "io task"));
         tokio::spawn(async move {
@@ -689,57 +659,41 @@ impl DownstairsClient {
                 target,
                 request_rx: client_request_rx,
                 response_tx: client_response_tx,
-                start: client_connect_rx,
                 stop: client_stop_rx,
                 recv_task: ClientRxTask {
                     handle: None,
                     log: log.clone(),
                 },
-                delay,
                 client_delay_us,
                 log,
             };
-            c.run().await
+            c.run(start).await
         });
-        (
-            ClientTaskHandle {
-                client_request_tx,
-                client_stop_tx: Some(client_stop_tx),
-                client_response_rx,
-            },
-            client_connect_tx,
-        )
+        ClientTaskHandle {
+            client_request_tx,
+            client_stop_tx: Some(client_stop_tx),
+            client_response_rx,
+        }
     }
 
     /// Starts a dummy IO task, returning its IO handle
     #[cfg(test)]
-    fn new_dummy_task(
-        connect: bool,
-    ) -> (ClientTaskHandle, Option<oneshot::Sender<()>>) {
+    fn new_dummy_task(_start: ClientConnectDelay) -> ClientTaskHandle {
         let (client_request_tx, client_request_rx) = mpsc::unbounded_channel();
         let (_client_response_tx, client_response_rx) =
             mpsc::unbounded_channel();
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
-        let (client_connect_tx, client_connect_rx) = oneshot::channel();
 
         // Forget these without dropping them, so that we can send values into
         // the void!
         std::mem::forget(client_request_rx);
         std::mem::forget(client_stop_rx);
-        std::mem::forget(client_connect_rx);
 
-        (
-            ClientTaskHandle {
-                client_request_tx,
-                client_stop_tx: Some(client_stop_tx),
-                client_response_rx,
-            },
-            if connect {
-                None
-            } else {
-                Some(client_connect_tx)
-            },
-        )
+        ClientTaskHandle {
+            client_request_tx,
+            client_stop_tx: Some(client_stop_tx),
+            client_response_rx,
+        }
     }
 
     /// Indicate that the upstairs has requested that we go active
@@ -2225,14 +2179,8 @@ struct ClientIoTask {
     /// Reply channel to the main task
     response_tx: mpsc::UnboundedSender<ClientResponse>,
 
-    /// Oneshot used to start the task
-    start: oneshot::Receiver<()>,
-
     /// Oneshot used to stop the task
     stop: oneshot::Receiver<ClientStopReason>,
-
-    /// Delay on startup, to avoid a busy-loop if connections always fail
-    delay: bool,
 
     /// Handle for the rx task
     recv_task: ClientRxTask,
@@ -2243,6 +2191,32 @@ struct ClientIoTask {
     client_delay_us: Arc<AtomicU64>,
 
     log: Logger,
+}
+
+enum ClientConnectDelay {
+    /// Connect after a fixed delay
+    Delay(std::time::Duration),
+    /// Wait for a oneshot to fire before connecting
+    Wait(oneshot::Receiver<()>),
+}
+
+impl ClientConnectDelay {
+    async fn wait(self, log: &Logger) -> Result<(), ClientRunResult> {
+        match self {
+            ClientConnectDelay::Delay(dur) => {
+                info!(log, "sleeping for {dur:?} before connecting");
+                tokio::time::sleep(dur).await;
+                Ok(())
+            }
+            ClientConnectDelay::Wait(rx) => {
+                info!(log, "client is waiting for oneshot");
+                rx.await.map_err(|e| {
+                    warn!(log, "failed to await start oneshot: {e}");
+                    ClientRunResult::QueueClosed
+                })
+            }
+        }
+    }
 }
 
 /// Handle for the rx side of client IO
@@ -2293,8 +2267,8 @@ impl Drop for ClientRxTask {
 }
 
 impl ClientIoTask {
-    async fn run(&mut self) {
-        let r = self.run_inner().await;
+    async fn run(&mut self, start: ClientConnectDelay) {
+        let r = self.run_inner(start).await;
 
         warn!(self.log, "client task is sending Done({r:?})");
         if self.response_tx.send(ClientResponse::Done(r)).is_err() {
@@ -2309,41 +2283,18 @@ impl ClientIoTask {
         info!(self.log, "client task is exiting");
     }
 
-    async fn run_inner(&mut self) -> ClientRunResult {
-        // If we're reconnecting, then add a short delay to avoid constantly
-        // spinning (e.g. if something is fundamentally wrong with the
-        // Downstairs)
-        //
-        // The upstairs can still stop us here, e.g. if we need to transition
-        // from Offline -> Faulted because we hit a job limit, that bounces the
-        // IO task (whether it *should* is debatable).
-        if self.delay {
-            tokio::select! {
-                s = &mut self.stop => {
-                    warn!(
-                        self.log,
-                        "client IO task stopped during sleep: {s:?}"
-                    );
-                    return s.into();
-                }
-                _ = tokio::time::sleep(CLIENT_RECONNECT_DELAY) => {
-                    // this is fine
-                },
-            }
-        }
-
-        // Wait for the start oneshot to fire.  This may happen immediately, but
-        // not necessarily (for example, if the client was deactivated).  We
-        // also wait for the stop oneshot here, in case someone decides to stop
-        // the IO task before it tries to connect.
+    async fn run_inner(
+        &mut self,
+        start: ClientConnectDelay,
+    ) -> ClientRunResult {
+        // Wait for either the connection delay to expire (either time-based or
+        // a oneshot), or for the stop oneshot to receive a message.
         tokio::select! {
-            s = &mut self.start => {
-                if let Err(e) = s {
-                    warn!(self.log, "failed to await start oneshot: {e}");
-                    return ClientRunResult::QueueClosed;
+            r = start.wait(&self.log) => {
+                if let Err(e) = r {
+                    return e;
                 }
-                // Otherwise, continue as usual
-            }
+            },
             s = &mut self.stop => {
                 warn!(
                     self.log,
