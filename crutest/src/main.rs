@@ -2516,9 +2516,17 @@ async fn replace_before_active(
     // that the initial downstairs are all synced up on the same flush and
     // generation numbers.
     fill_workload(volume, di, true).await?;
+
+    // Track which SocketAddr corresponds to which region.  This shifts over
+    // time as the test runs, so we have to track it correctly disable 2
+    // downstairs for a given region.
+    let mut regions = vec![];
+    for i in 0..targets.len() - 1 {
+        regions.push(Some(i as u32 / 3));
+    }
+    regions.push(None);
     let ds_total = targets.len() - 1;
-    let mut old_ds_a = 0;
-    let mut old_ds_b = 1;
+    let mut old_ds = 0;
     let mut new_ds = targets.len() - 1;
     for c in 1.. {
         info!(log, "[{c}] Touch every extent");
@@ -2534,11 +2542,24 @@ async fn replace_before_active(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        // Stop two downstairs, wait for dsc to confirm they are stopped.
-        for old_ds in [old_ds_a, old_ds_b] {
-            dsc_client.dsc_stop(old_ds).await.unwrap();
+        // Pick a second downstairs that's in the same region, so we can stop
+        // two downstairs and prevent activation.  This is linear-time with the
+        // number of targets, but that's fine (so is writing to every block).
+        assert!(regions[new_ds].is_none());
+        let region = regions[old_ds].unwrap();
+        let (other_ds, _) = regions
+            .iter()
+            .enumerate()
+            .find(|(i, d)| *i != old_ds && **d == Some(region))
+            .unwrap();
+
+        // Stop two downstairs in the same region, then wait for dsc to confirm
+        // they are stopped.  Having two downstairs stopped blocks activation.
+        for old_ds in [old_ds, other_ds] {
+            dsc_client.dsc_stop(old_ds as u32).await.unwrap();
             loop {
-                let res = dsc_client.dsc_get_ds_state(old_ds).await.unwrap();
+                let res =
+                    dsc_client.dsc_get_ds_state(old_ds as u32).await.unwrap();
                 let state = res.into_inner();
                 if state == DownstairsState::Exit {
                     break;
@@ -2564,14 +2585,14 @@ async fn replace_before_active(
 
         info!(
             log,
-            "[{c}] Replacing DS {old_ds_a}:{} with {new_ds}:{}",
-            targets[old_ds_a as usize],
+            "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
+            targets[old_ds],
             targets[new_ds],
         );
         match volume
             .replace_downstairs(
                 Uuid::new_v4(),
-                targets[old_ds_a as usize],
+                targets[old_ds],
                 targets[new_ds],
             )
             .await
@@ -2610,8 +2631,8 @@ async fn replace_before_active(
 
         // Start up all the stopped downstairs so they are ready for the next
         // loop.
-        for old_ds in [old_ds_a, old_ds_b] {
-            let res = dsc_client.dsc_start(old_ds).await;
+        for old_ds in [old_ds, other_ds] {
+            let res = dsc_client.dsc_start(old_ds as u32).await;
             info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
         }
 
@@ -2632,8 +2653,8 @@ async fn replace_before_active(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        old_ds_a = (old_ds_a + 1) % (ds_total as u32 + 1);
-        old_ds_b = (old_ds_b + 1) % (ds_total as u32 + 1);
+        regions.swap(old_ds, new_ds);
+        old_ds = (old_ds + 1) % (ds_total + 1);
         new_ds = (new_ds + 1) % (ds_total + 1);
 
         match wtq {
