@@ -2517,7 +2517,8 @@ async fn replace_before_active(
     // generation numbers.
     fill_workload(volume, di, true).await?;
     let ds_total = targets.len() - 1;
-    let mut old_ds = 0;
+    let mut old_ds_a = 0;
+    let mut old_ds_b = 1;
     let mut new_ds = targets.len() - 1;
     for c in 1.. {
         info!(log, "[{c}] Touch every extent");
@@ -2533,26 +2534,29 @@ async fn replace_before_active(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        // Stop a downstairs, wait for dsc to confirm it is stopped.
-        dsc_client.dsc_stop(old_ds).await.unwrap();
-        loop {
-            let res = dsc_client.dsc_get_ds_state(old_ds).await.unwrap();
-            let state = res.into_inner();
-            if state == DownstairsState::Exit {
-                break;
+        // Stop two downstairs, wait for dsc to confirm they are stopped.
+        for old_ds in [old_ds_a, old_ds_b] {
+            dsc_client.dsc_stop(old_ds).await.unwrap();
+            loop {
+                let res = dsc_client.dsc_get_ds_state(old_ds).await.unwrap();
+                let state = res.into_inner();
+                if state == DownstairsState::Exit {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
         info!(log, "[{c}] Request the upstairs activate");
-        // Spawn a task to re-activate, this will not finish till all three
-        // downstairs respond.
+        // Spawn a task to re-activate, this will not finish until 2-3
+        // downstairs respond (and we have disabled all but 1)
         gen += 1;
         let gc = volume.clone();
         let handle =
             tokio::spawn(async move { gc.activate_with_gen(gen).await });
 
-        //  Give the activation request time to percolate in the upstairs.
+        //  Give the activation request time to percolate in the upstairs; it
+        //  shouldn't get anywhere because we don't have enough downstairs
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         let is_active = volume.query_is_active().await.unwrap();
         info!(log, "[{c}] activate should now be waiting {:?}", is_active);
@@ -2560,14 +2564,14 @@ async fn replace_before_active(
 
         info!(
             log,
-            "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
-            targets[old_ds as usize],
+            "[{c}] Replacing DS {old_ds_a}:{} with {new_ds}:{}",
+            targets[old_ds_a as usize],
             targets[new_ds],
         );
         match volume
             .replace_downstairs(
                 Uuid::new_v4(),
-                targets[old_ds as usize],
+                targets[old_ds_a as usize],
                 targets[new_ds],
             )
             .await
@@ -2578,6 +2582,9 @@ async fn replace_before_active(
             }
         }
 
+        // At this point, we've got two Downstairs (one of which was provided
+        // initially, and one of which has just been replaced), so activation
+        // should happen!
         info!(log, "[{c}] Wait for activation after replacement");
         loop {
             let is_active = volume.query_is_active().await.unwrap();
@@ -2602,8 +2609,10 @@ async fn replace_before_active(
         }
 
         // Start up the old downstairs so it is ready for the next loop.
-        let res = dsc_client.dsc_start(old_ds).await;
-        info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
+        for old_ds in [old_ds_a, old_ds_b] {
+            let res = dsc_client.dsc_start(old_ds).await;
+            info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
+        }
 
         // Wait for all IO to finish before we continue
         loop {
@@ -2622,12 +2631,13 @@ async fn replace_before_active(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        old_ds = (old_ds + 1) % (ds_total as u32 + 1);
+        old_ds_a = (old_ds_a + 1) % (ds_total as u32 + 1);
+        old_ds_b = (old_ds_b + 1) % (ds_total as u32 + 1);
         new_ds = (new_ds + 1) % (ds_total + 1);
 
         match wtq {
             WhenToQuit::Count { count } => {
-                if c > count {
+                if c >= count {
                     break;
                 }
             }
