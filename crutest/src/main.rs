@@ -2608,7 +2608,8 @@ async fn replace_before_active(
             bail!("Requested volume verify failed: {:?}", e)
         }
 
-        // Start up the old downstairs so it is ready for the next loop.
+        // Start up all the stopped downstairs so they are ready for the next
+        // loop.
         for old_ds in [old_ds_a, old_ds_b] {
             let res = dsc_client.dsc_start(old_ds).await;
             info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
