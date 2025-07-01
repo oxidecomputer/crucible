@@ -289,6 +289,13 @@ if ! "$dsc" cmd start -c 2; then
     echo "Failed repair test part 1, starting downstairs 2" >> "$fail_log"
     echo
 fi
+state=$("$dsc" cmd state -c 2)
+while [[ "$state" != "Running" ]]; do
+    echo "downstairs 2 not restarted yet, waiting"
+    sleep 5
+    state=$("$dsc" cmd state -c 2)
+done
+echo "Downstairs 2 restarted"
 
 # Put a dump test in the middle of the repair test, so we
 # can see both a mismatch and that dump works.
