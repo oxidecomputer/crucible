@@ -2058,7 +2058,11 @@ impl Upstairs {
         });
         let ready_count = is_ready.iter().filter(|c| **c).count();
         if ready_count != 2 {
-            warn!(self.log, "min-quorum negotiation found {ready_count} ready downstairs; cancelling");
+            warn!(
+                self.log,
+                "min-quorum negotiation found {ready_count} \
+                 ready downstairs; cancelling"
+            );
             return;
         }
         info!(self.log, "Starting min-quorum negotiation");
@@ -2066,10 +2070,9 @@ impl Upstairs {
         match self.downstairs.collate() {
             Err(e) => {
                 error!(self.log, "Failed downstairs collate with: {e}");
-                // We failed to collate the three downstairs, so we need
-                // to reset that activation request.  Call
-                // `abort_reconciliation` to abort reconciliation for all
-                // clients.
+                // We failed to collate the two downstairs, so we need to reset
+                // that activation request.  Call `abort_reconciliation` to
+                // abort reconciliation for all clients.
                 self.set_disabled(e.into());
                 self.downstairs.abort_reconciliation(&self.state);
             }
