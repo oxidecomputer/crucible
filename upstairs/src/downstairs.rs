@@ -985,10 +985,11 @@ impl Downstairs {
          * Determine what extents don't match and what to do
          * about that
          */
-        if let Some(reconcile_list) = self.mismatch_list() {
-            let mut participating = ClientData::new(false);
+        if let Some((reconcile_list, participating)) = self.mismatch_list() {
             for i in ClientId::iter() {
-                participating[i] = self.clients[i].begin_reconcile();
+                if participating[i] {
+                    self.clients[i].begin_reconcile();
+                }
             }
 
             let task_list = self.convert_rc_to_messages(
@@ -2006,9 +2007,10 @@ impl Downstairs {
     }
 
     /// Compares region metadata from all three clients and builds a mend list
-    fn mismatch_list(&self) -> Option<DownstairsMend> {
+    fn mismatch_list(&self) -> Option<(DownstairsMend, ClientData<bool>)> {
         let log = self.log.new(o!("" => "mend".to_string()));
         let mut meta = ClientMap::new();
+        let mut participating = ClientData::new(false);
         for i in ClientId::iter() {
             if let DsStateData::Connecting {
                 state: NegotiationStateData::WaitQuorum(r),
@@ -2016,9 +2018,10 @@ impl Downstairs {
             } = self.clients[i].state_data()
             {
                 meta.insert(i, r);
+                participating[i] = true;
             }
         }
-        DownstairsMend::new(&meta, log)
+        DownstairsMend::new(&meta, log).map(|m| (m, participating))
     }
 
     pub(crate) fn submit_flush(

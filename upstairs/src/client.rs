@@ -432,14 +432,16 @@ impl DownstairsClient {
         self.skipped_jobs.insert(ds_id);
     }
 
-    /// Sets our state to `DsStateData::Reconcile` if we are in `WaitQuorum`
-    pub(crate) fn begin_reconcile(&mut self) -> bool {
+    /// Sets our state to `DsStateData::Reconcile`
+    ///
+    /// # Panics
+    /// If we are not currently in `WaitQuorum`
+    pub(crate) fn begin_reconcile(&mut self) {
         info!(
             self.log,
             "setting state to reconcile from {:?}",
             self.state()
         );
-        let mut changed = false;
         if let DsStateData::Connecting {
             state,
             mode: ConnectionMode::New,
@@ -448,13 +450,15 @@ impl DownstairsClient {
         {
             if matches!(state, NegotiationStateData::WaitQuorum(..)) {
                 *state = NegotiationStateData::Reconcile;
-                changed = true;
+            } else {
+                panic!(
+                    "invalid negotiation state {:?}",
+                    NegotiationState::from(&*state)
+                );
             }
+        } else {
+            panic!("invalid state {:?}", self.state());
         }
-        if !changed {
-            warn!(self.log, "invalid state for reconciliation, skipping");
-        }
-        changed
     }
 
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
