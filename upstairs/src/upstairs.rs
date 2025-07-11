@@ -1947,7 +1947,7 @@ impl Upstairs {
     /// list of files for an extent, then request each file.  Once all files
     /// are local to the downstairs needing repair, it will replace the
     /// existing extent files with the new ones.
-    fn on_wait_quorum(&mut self) -> bool {
+    fn on_wait_quorum(&mut self) {
         // Reconciliation only happens during initialization.
         let UpstairsState::GoActive {
             min_quorum_deadline,
@@ -1960,7 +1960,7 @@ impl Upstairs {
                 "could not connect region set due to bad state: {:?}",
                 self.state
             );
-            return false;
+            return;
         };
 
         let is_ready = self.downstairs.clients.map_ref(|c| {
@@ -1976,7 +1976,7 @@ impl Upstairs {
 
         match ready_count {
             0 => panic!("called on_wait_quorum with no WaitQuorum downstairs"),
-            1 => return false,
+            1 => return, // nothing to do yet
             2 => {
                 // Print a warning if `min_quorum` is already present.  This
                 // would be a little weird, because we're just now entering the
@@ -1991,7 +1991,7 @@ impl Upstairs {
                     )
                 }
                 *min_quorum_deadline = Some(Instant::now() + NEGOTIATION_DELAY);
-                return false;
+                return; // nothing to do yet
             }
             3 => {
                 if min_quorum_deadline.is_some() {
@@ -2014,20 +2014,17 @@ impl Upstairs {
                 // clients.
                 self.set_disabled(e.into());
                 self.downstairs.abort_reconciliation(&self.state);
-                false
             }
             Ok(true) => {
                 // We have populated all of the reconciliation requests in
                 // `Downstairs::reconcile_task_list`.  Start reconciliation by
                 // sending the first request.
                 self.downstairs.send_next_reconciliation_req();
-                true
             }
             Ok(false) => {
                 info!(self.log, "No downstairs reconciliation required");
                 self.on_reconciliation_done(false);
                 info!(self.log, "Set Active after no reconciliation");
-                true
             }
         }
     }
@@ -2424,7 +2421,7 @@ pub(crate) mod test {
 
     #[test]
     fn reconcile_not_ready() {
-        // Verify reconcile returns false when a downstairs is not ready
+        // Verify reconcile doesn't start when a downstairs is not ready
         let mut up = Upstairs::test_default(None, false);
         for cid in [ClientId::new(0), ClientId::new(1)] {
             for state in [
@@ -2449,8 +2446,27 @@ pub(crate) mod test {
             min_quorum_deadline: None,
         };
 
-        let res = up.on_wait_quorum();
-        assert!(!res);
+        up.on_wait_quorum();
+
+        // DS0 and DS1 are still in WaitQuorum
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            assert!(matches!(
+                up.ds_state(cid),
+                DsState::Connecting {
+                    state: NegotiationState::WaitQuorum,
+                    ..
+                }
+            ));
+        }
+        // DS2 is still in WaitConnect
+        assert!(matches!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::WaitConnect,
+                ..
+            }
+        ));
+        // The activation hasn't happened
         assert!(!matches!(&up.state, &UpstairsState::Active))
     }
 
