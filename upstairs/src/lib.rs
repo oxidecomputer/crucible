@@ -1049,6 +1049,11 @@ impl ReconcileIO {
             state: ClientData::new(ReconcileIOState::New),
         }
     }
+
+    /// Marks the job as skipped for the given client
+    fn skip(&mut self, i: ClientId) {
+        self.state[i] = ReconcileIOState::Skipped;
+    }
 }
 
 /*
