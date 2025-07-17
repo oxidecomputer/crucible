@@ -631,14 +631,10 @@ impl TestHarness {
 
         let join_handle = up_main(crucible_opts, 1, None, io, None).unwrap();
 
-        let mut handles: Vec<JoinHandle<()>> = vec![];
-
-        {
-            let guest = guest.clone();
-            handles.push(tokio::spawn(async move {
-                guest.activate().await.unwrap();
-            }));
-        }
+        let guest_ = guest.clone();
+        let activate_handle = tokio::spawn(async move {
+            guest_.activate().await.unwrap();
+        });
 
         // Connect all 3x Downstairs
         //
@@ -666,6 +662,7 @@ impl TestHarness {
         }
 
         assert!(guest.query_is_active().await.unwrap());
+        activate_handle.await.unwrap();
 
         TestHarness {
             log,
@@ -2951,13 +2948,10 @@ async fn test_ro_activate_from_list(activate: [bool; 3]) {
 
     let join_handle = up_main(crucible_opts, 1, None, io, None).unwrap();
 
-    let mut handles: Vec<JoinHandle<()>> = vec![];
-    {
-        let guest = guest.clone();
-        handles.push(tokio::spawn(async move {
-            guest.activate().await.unwrap();
-        }));
-    }
+    let guest_ = guest.clone();
+    let activate_handle = tokio::spawn(async move {
+        guest_.activate().await.unwrap();
+    });
 
     // Move negotiation along for downstairs we want to activate.
     for (i, ds) in [&mut ds1, &mut ds2, &mut ds3].iter_mut().enumerate() {
@@ -2977,6 +2971,7 @@ async fn test_ro_activate_from_list(activate: [bool; 3]) {
     }
 
     assert!(guest.query_is_active().await.unwrap());
+    activate_handle.await.unwrap();
 
     // Create our test harness so we can send IO.
     let mut harness = TestHarness {
