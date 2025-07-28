@@ -13,6 +13,7 @@ use crate::{
         ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
         NegotiationStateData, ShouldSendError,
     },
+    format_job_list,
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
     live_repair::ExtentInfo,
@@ -1459,13 +1460,13 @@ impl Downstairs {
 
         info!(
             self.log,
-            "RE:{} repair extent with ids {},{},{},{} deps:{:?}",
+            "RE:{} repair extent with ids {},{},{},{} deps:{}",
             extent,
             close_id,
             repair_id,
             noop_id,
             reopen_id,
-            close_deps,
+            format_job_list(&close_deps),
         );
 
         let repair = self.repair.as_mut().unwrap(); // reborrow
