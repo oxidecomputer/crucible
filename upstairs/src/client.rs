@@ -1,11 +1,11 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt, integrity_hash, io_limits::ClientIOLimits, live_repair::ExtentInfo,
-    upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
-    ClientId, ConnectionMode, CrucibleDecoder, CrucibleError, DownstairsIO,
-    DsState, DsStateData, EncryptionContext, IOState, IOop, JobId, Message,
-    RawReadResponse, ReconcileIO, ReconcileIOState, RegionDefinitionStatus,
-    RegionMetadata,
+    cdt, format_job_list, integrity_hash, io_limits::ClientIOLimits,
+    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
+    ClientIOStateCount, ClientId, ConnectionMode, CrucibleDecoder,
+    CrucibleError, DownstairsIO, DsState, DsStateData, EncryptionContext,
+    IOState, IOop, JobId, Message, RawReadResponse, ReconcileIO,
+    ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
 };
 use crucible_common::{x509::TLSContext, NegotiationError, VerboseTimeout};
 use crucible_protocol::{
@@ -399,7 +399,8 @@ impl DownstairsClient {
                     });
                     info!(
                         self.log,
-                        " {} final dependency list {:?}", ds_id, dependencies
+                        " {ds_id} final dependency list {}",
+                        format_job_list(dependencies),
                     );
                 }
             }
@@ -2277,8 +2278,22 @@ impl ClientIoTask {
                 "client task could not reply to main task; shutting down?"
             );
         }
-        while let Some(v) = self.request_rx.recv().await {
-            warn!(self.log, "exiting client task is ignoring message {v}");
+        if let Some(v) = self.request_rx.recv().await {
+            // Flush out the queue, waiting for the other side to close the
+            // channel before dropping it ourself.
+            let mut n = 0;
+            while self.request_rx.recv().await.is_some() {
+                n += 1;
+            }
+            warn!(
+                self.log,
+                "exiting client task is ignoring message {v}{}",
+                if n > 0 {
+                    format!(" and {n} other messages")
+                } else {
+                    "".to_owned()
+                }
+            );
         }
         info!(self.log, "client task is exiting");
     }

@@ -1595,6 +1595,15 @@ pub struct DtraceInfo {
     pub ds_ro_lr_skipped: [usize; 3],
 }
 
+pub(crate) fn format_job_list(ids: &[JobId]) -> String {
+    let n = ids.len();
+    if n < 4 {
+        format!("[{ids:?}]")
+    } else {
+        format!("[{:?}, ... {:?}] ({n} total)", ids[0], ids[n - 1],)
+    }
+}
+
 /*
  * This is the main upstairs task that starts all the other async tasks.
  *
