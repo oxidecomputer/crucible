@@ -115,9 +115,6 @@ pub enum CrucibleError {
     #[error("Snapshot failed! {0}")]
     SnapshotFailed(String),
 
-    #[error("Snapshot {0} exists already")]
-    SnapshotExistsAlready(String),
-
     #[error("Attempting to modify read-only region!")]
     ModifyingReadOnlyRegion,
 
@@ -426,7 +423,6 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::OffsetUnaligned
             | CrucibleError::RegionIncompatible(_)
             | CrucibleError::ReplaceRequestInvalid(_)
-            | CrucibleError::SnapshotExistsAlready(_)
             | CrucibleError::Unsupported(_) => {
                 dropshot::HttpError::for_bad_request(None, e.to_string())
             }

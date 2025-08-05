@@ -1,7 +1,7 @@
 // Copyright 2023 Oxide Computer Company
 
 #[cfg(test)]
-mod test {
+mod integration_tests {
     use std::net::IpAddr;
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -5838,5 +5838,40 @@ mod test {
 
         // Make sure everything worked
         volume.activate().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn double_snapshot_all_the_way_across_the_sky() {
+        let log = csl();
+        let child = TestDownstairsSet::small(false).await.unwrap();
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: 512,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: child.blocks_per_extent(),
+                extent_count: child.extent_count(),
+                opts: child.opts(),
+                gen: 2,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
+        volume.activate().await.unwrap();
+
+        let snapshot_name = Uuid::new_v4().to_string();
+
+        volume
+            .flush(Some(SnapshotDetails {
+                snapshot_name: snapshot_name.clone(),
+            }))
+            .await
+            .unwrap();
+
+        volume
+            .flush(Some(SnapshotDetails { snapshot_name }))
+            .await
+            .unwrap();
     }
 }

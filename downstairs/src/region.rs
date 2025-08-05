@@ -961,11 +961,25 @@ impl Region {
                 );
 
                 if std::path::Path::new(&test_path).is_dir() {
-                    crucible_bail!(
-                        SnapshotExistsAlready,
-                        "{}",
+                    // If the snapshot exists already, then a previous call to
+                    // `flush` succeeded, and this function can return Ok. As
+                    // long as job dependency lists are honoured, then no
+                    // concurrent writes can come in, and even if the `flush`
+                    // was called multiple times (say from a saga that is
+                    // retrying a call) all downstairs should be consistent.
+                    //
+                    // This assumes that the snapshot name is random and name
+                    // collisions are either not possible or so rare that this
+                    // check should be considered the same as a previous flush
+                    // succeeding.
+
+                    info!(
+                        self.log,
+                        "snapshot {} exists already, returning Ok",
                         snapshot_details.snapshot_name,
                     );
+
+                    return Ok(());
                 }
 
                 // Look up dataset name for path (this works with any path, and
@@ -1008,9 +1022,27 @@ impl Region {
                     );
                 }
             }
+        } else if cfg!(feature = "integration-tests") {
+            // Fake snapshots existing already for integration tests
+            if let Some(snapshot_details) = snapshot_details {
+                let snapshot_path = format!(
+                    "{}/snapshot-{}",
+                    self.dir.clone().into_os_string().into_string().unwrap(),
+                    snapshot_details.snapshot_name,
+                );
+
+                if Path::new(&snapshot_path).exists() {
+                    warn!(self.log, "snapshot {snapshot_path} exists already");
+                    return Ok(());
+                }
+
+                let mut file = std::fs::File::create(snapshot_path)?;
+                write!(file, "test")?;
+            }
         } else if snapshot_details.is_some() {
             error!(self.log, "Snapshot request received on unsupported binary");
         }
+
         Ok(())
     }
 
