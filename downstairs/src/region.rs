@@ -953,6 +953,7 @@ impl Region {
         if cfg!(feature = "zfs_snapshot") {
             if let Some(snapshot_details) = snapshot_details {
                 info!(self.log, "Flush and snap request received");
+
                 // Check if the path exists, return an error if it does
                 let test_path = format!(
                     "{}/.zfs/snapshot/{}",
@@ -1013,6 +1014,13 @@ impl Region {
                     })?;
 
                 if !output.status.success() {
+                    error!(
+                        self.log,
+                        "snapshot failed {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+
                     crucible_bail!(
                         SnapshotFailed,
                         "{}",
@@ -1021,23 +1029,6 @@ impl Region {
                         })?,
                     );
                 }
-            }
-        } else if cfg!(feature = "integration-tests") {
-            // Fake snapshots existing already for integration tests
-            if let Some(snapshot_details) = snapshot_details {
-                let snapshot_path = format!(
-                    "{}/snapshot-{}",
-                    self.dir.clone().into_os_string().into_string().unwrap(),
-                    snapshot_details.snapshot_name,
-                );
-
-                if Path::new(&snapshot_path).exists() {
-                    warn!(self.log, "snapshot {snapshot_path} exists already");
-                    return Ok(());
-                }
-
-                let mut file = std::fs::File::create(snapshot_path)?;
-                write!(file, "test")?;
             }
         } else if snapshot_details.is_some() {
             error!(self.log, "Snapshot request received on unsupported binary");
