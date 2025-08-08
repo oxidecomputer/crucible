@@ -244,7 +244,7 @@ mod integration_tests {
                     }
 
                     bail!(
-                        "chown failed {} {}",
+                        "zfs allow snapshot {} {}",
                         String::from_utf8_lossy(&output.stdout),
                         String::from_utf8_lossy(&output.stderr),
                     );
