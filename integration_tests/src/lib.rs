@@ -519,7 +519,7 @@ mod integration_tests {
 
     impl<T: TestDownstairsDataset> TestDownstairsSet<T> {
         /// Spin off three downstairs, with a 5120b region
-        pub async fn small(read_only: bool) -> Result<TestDownstairsSet<T>> {
+        pub async fn small(read_only: bool) -> Result<Self> {
             // 5 * 2 * 512 = 5120b
             let blocks_per_extent = 5;
             let extent_count = 2;
@@ -534,9 +534,7 @@ mod integration_tests {
         }
 
         /// Spin off three SQLite downstairs, with a 5120b region
-        pub async fn small_sqlite(
-            read_only: bool,
-        ) -> Result<TestDownstairsSet<T>> {
+        pub async fn small_sqlite(read_only: bool) -> Result<Self> {
             // 5 * 2 * 512 = 5120b
             let blocks_per_extent = 5;
             let extent_count = 2;
@@ -551,7 +549,7 @@ mod integration_tests {
         }
 
         /// Spin off three downstairs, with a 50 MB region
-        pub async fn big(read_only: bool) -> Result<TestDownstairsSet<T>> {
+        pub async fn big(read_only: bool) -> Result<Self> {
             // 512 * 188 * 512 = 49283072b ~= 50MB
             let blocks_per_extent = 512;
             let extent_count = 188;
@@ -566,7 +564,7 @@ mod integration_tests {
         }
 
         /// Spin off three problematic downstairs, with a 10 MB region
-        pub async fn problem() -> Result<TestDownstairsSet<T>> {
+        pub async fn problem() -> Result<Self> {
             // 512 * 40 * 512 = 10485760b = 10MB
             let blocks_per_extent = 512;
             let extent_count = 188;
@@ -587,7 +585,7 @@ mod integration_tests {
             extent_count: u32,
             problematic: bool,
             backend: Backend,
-        ) -> Result<TestDownstairsSet<T>> {
+        ) -> Result<Self> {
             let downstairs1 = TestDownstairs::new(
                 "127.0.0.1".parse()?,
                 true,
