@@ -33,7 +33,7 @@ mod integration_tests {
         fn path_buf(&self) -> Result<PathBuf>;
 
         /// Returns true if a snapshot exists
-        fn snapshot_exists(&self, snapshot_name: String) -> Result<bool>;
+        fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool>;
 
         /// Should the Downstairs be stopped during the drop of this object?
         ///
@@ -258,7 +258,7 @@ mod integration_tests {
                 Ok(path)
             }
 
-            fn snapshot_exists(&self, snapshot_name: String) -> Result<bool> {
+            fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
                 let output = Command::new("zfs")
                     .args([
                         "list",
@@ -334,7 +334,7 @@ mod integration_tests {
             Ok(self.tempdir.path().to_path_buf())
         }
 
-        fn snapshot_exists(&self, _snapshot_name: String) -> Result<bool> {
+        fn snapshot_exists(&self, _snapshot_name: &str) -> Result<bool> {
             bail!("cannot check if snapshot exists for tempdir dataset!")
         }
 
@@ -502,7 +502,7 @@ mod integration_tests {
             self.downstairs.as_ref().unwrap().repair_address()
         }
 
-        pub fn snapshot_exists(&self, snapshot_name: String) -> Result<bool> {
+        pub fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
             self.dataset.snapshot_exists(snapshot_name)
         }
     }
@@ -722,20 +722,10 @@ mod integration_tests {
             self.downstairs3.address()
         }
 
-        pub fn snapshot_exists(&self, snapshot_name: String) -> Result<bool> {
-            if !self.downstairs1.snapshot_exists(snapshot_name.clone())? {
-                return Ok(false);
-            }
-
-            if !self.downstairs2.snapshot_exists(snapshot_name.clone())? {
-                return Ok(false);
-            }
-
-            if !self.downstairs3.snapshot_exists(snapshot_name)? {
-                return Ok(false);
-            }
-
-            Ok(true)
+        pub fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
+            Ok(self.downstairs1.snapshot_exists(snapshot_name)?
+                && self.downstairs2.snapshot_exists(snapshot_name)?
+                && self.downstairs3.snapshot_exists(snapshot_name)?)
         }
     }
 
@@ -5118,7 +5108,7 @@ mod integration_tests {
         let (_pantry, volume_id, client) =
             get_pantry_and_client_for_tds(&tds).await;
 
-        if tds.snapshot_exists("testpost".to_string())? {
+        if tds.snapshot_exists("testpost")? {
             bail!("snapshot testpost exists before creation!");
         }
 
@@ -5131,7 +5121,7 @@ mod integration_tests {
             )
             .await?;
 
-        if !tds.snapshot_exists("testpost".to_string())? {
+        if !tds.snapshot_exists("testpost")? {
             bail!("snapshot testpost does not exist!");
         }
 
@@ -6239,7 +6229,7 @@ mod integration_tests {
 
         let snapshot_name = Uuid::new_v4().to_string();
 
-        if child.snapshot_exists(snapshot_name.clone())? {
+        if child.snapshot_exists(&snapshot_name)? {
             bail!("snapshot exists before creation!");
         }
 
@@ -6249,7 +6239,7 @@ mod integration_tests {
             }))
             .await?;
 
-        if !child.snapshot_exists(snapshot_name.clone())? {
+        if !child.snapshot_exists(&snapshot_name)? {
             bail!("snapshot does not exist after creation!");
         }
 
@@ -6259,7 +6249,7 @@ mod integration_tests {
             }))
             .await?;
 
-        if !child.snapshot_exists(snapshot_name)? {
+        if !child.snapshot_exists(&snapshot_name)? {
             bail!("snapshot disappeared after second flush!");
         }
 
