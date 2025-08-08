@@ -78,6 +78,9 @@ mod integration_tests {
                     .output()
                     .unwrap();
 
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
                 if output.status.success() {
                     let output = Command::new("pfexec")
                         .args(["zpool", "destroy", &self.name])
@@ -85,12 +88,21 @@ mod integration_tests {
                         .unwrap();
 
                     if !output.status.success() {
+                        panic!("zpool destroy failed {stdout} {stderr}");
+                    }
+                } else {
+                    // If the status is not success, then make sure that "no
+                    // such pool" is present in the stderr. If not then some
+                    // other error occurred and this code should panic.
+                    if !stderr.contains("no such pool") {
                         panic!(
-                            "zpool destroy failed {} {}",
-                            String::from_utf8_lossy(&output.stdout),
-                            String::from_utf8_lossy(&output.stderr),
+                            "unrecognized error from zpool list: {} {}",
+                            stdout, stderr,
                         );
                     }
+
+                    // zpool list returned "no such pool", meaning no destroy is
+                    // required.
                 }
             }
         }
