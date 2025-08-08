@@ -954,7 +954,7 @@ impl Region {
             if let Some(snapshot_details) = snapshot_details {
                 info!(self.log, "Flush and snap request received");
 
-                // Check if the path exists, return an error if it does
+                // Check if the path exists, return Ok if it does
                 let test_path = format!(
                     "{}/.zfs/snapshot/{}",
                     self.dir.clone().into_os_string().into_string().unwrap(),
