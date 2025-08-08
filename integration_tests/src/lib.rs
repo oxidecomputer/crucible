@@ -4,7 +4,6 @@
 mod integration_tests {
     use std::net::IpAddr;
     use std::net::SocketAddr;
-    use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -436,8 +435,8 @@ mod integration_tests {
             })
         }
 
-        pub fn path(&self) -> Result<Box<Path>> {
-            Ok(self.dataset.path_buf()?.into())
+        pub fn path(&self) -> Result<PathBuf> {
+            self.dataset.path_buf()
         }
 
         pub async fn reboot_read_only(&mut self) -> Result<()> {
