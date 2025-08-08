@@ -48,15 +48,146 @@ mod integration_tests {
         use std::fs::OpenOptions;
         use std::process::Command;
 
-        #[allow(dead_code)]
         #[derive(Debug)]
-        pub struct TestDownstairsZfsDataset {
-            tempdir: TempDir,
-            pool_name: String,
+        pub struct Zpool {
+            name: String,
         }
 
-        impl TestDownstairsZfsDataset {
-            fn mountpoint(&self) -> Result<String> {
+        impl Zpool {
+            pub fn new(name: String, path: String) -> Result<Self> {
+                let output = Command::new("pfexec")
+                    .args(["zpool", "create", &name, &path])
+                    .output()?;
+
+                if !output.status.success() {
+                    bail!(
+                        "zpool create failed {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+
+                Ok(Zpool { name })
+            }
+        }
+
+        impl Drop for Zpool {
+            fn drop(&mut self) {
+                let output = Command::new("pfexec")
+                    .args(["zpool", "list", &self.name])
+                    .output()
+                    .unwrap();
+
+                if output.status.success() {
+                    let output = Command::new("pfexec")
+                        .args(["zpool", "destroy", &self.name])
+                        .output()
+                        .unwrap();
+
+                    if !output.status.success() {
+                        panic!(
+                            "zpool destroy failed {} {}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr),
+                        );
+                    }
+                }
+            }
+        }
+
+        #[derive(Debug)]
+        pub struct ZfsDataset {
+            pool: Zpool,
+            name: String,
+        }
+
+        impl ZfsDataset {
+            pub fn new(pool: Zpool, name: String) -> Result<Self> {
+                let output = Command::new("pfexec")
+                    .args(["zfs", "create", &format!("{}/{}", pool.name, name)])
+                    .output()?;
+
+                if !output.status.success() {
+                    bail!(
+                        "zfs create failed {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+
+                Ok(ZfsDataset { pool, name })
+            }
+
+            pub fn chown(&self, uid: &str) -> Result<()> {
+                let output = Command::new("pfexec")
+                    .args([
+                        "chown",
+                        uid.trim_end(), // remove '\n' from end
+                        &self.mountpoint()?,
+                    ])
+                    .output()?;
+
+                if !output.status.success() {
+                    bail!(
+                        "chown failed {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+
+                Ok(())
+            }
+
+            pub fn allow_snapshots(&self, uid: &str) -> Result<()> {
+                let output = Command::new("pfexec")
+                    .args([
+                        "zfs",
+                        "allow",
+                        uid.trim_end(), // remove '\n' from end
+                        "snapshot",
+                        &format!("{}/{}", self.pool.name, self.name),
+                    ])
+                    .output()?;
+
+                if !output.status.success() {
+                    bail!(
+                        "zfs allow snapshot {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+
+                Ok(())
+            }
+
+            pub fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
+                let output = Command::new("zfs")
+                    .args([
+                        "list",
+                        "-t",
+                        "snapshot",
+                        &format!(
+                            "{}/{}@{}",
+                            self.pool.name, self.name, snapshot_name,
+                        ),
+                    ])
+                    .output()?;
+
+                if output.status.success() {
+                    return Ok(true);
+                }
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                if stderr.contains("dataset does not exist") {
+                    return Ok(false);
+                }
+
+                bail!("zfs list -t snapshot failed: {stdout} {stderr}");
+            }
+
+            pub fn mountpoint(&self) -> Result<String> {
                 let output = Command::new("zfs")
                     .args([
                         "get",
@@ -64,7 +195,7 @@ mod integration_tests {
                         "-o",
                         "value",
                         "mountpoint",
-                        &format!("{}/downstairs", self.pool_name),
+                        &format!("{}/{}", self.pool.name, self.name),
                     ])
                     .output()?;
 
@@ -80,6 +211,13 @@ mod integration_tests {
 
                 Ok(mountpoint.trim_end().to_string())
             }
+        }
+
+        #[allow(dead_code)]
+        #[derive(Debug)]
+        pub struct TestDownstairsZfsDataset {
+            tempdir: TempDir,
+            dataset: ZfsDataset,
         }
 
         impl TestDownstairsDataset for TestDownstairsZfsDataset {
@@ -109,76 +247,23 @@ mod integration_tests {
 
                 // Create said temporary zpool using that file
 
-                let pool_name =
-                    format!("test-downstairs-dataset-{}", Uuid::new_v4());
-
-                let output = Command::new("pfexec")
-                    .args([
-                        "zpool",
-                        "create",
-                        &pool_name,
-                        &path.clone().into_os_string().into_string().unwrap(),
-                    ])
-                    .output()?;
-
-                if !output.status.success() {
-                    bail!(
-                        "zpool create failed {} {}",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr),
-                    );
-                }
+                let pool = Zpool::new(
+                    format!("test-downstairs-dataset-{}", Uuid::new_v4()),
+                    path.clone().into_os_string().into_string().unwrap(),
+                )?;
 
                 // Create a dataset
 
-                let output = Command::new("pfexec")
-                    .args([
-                        "zfs",
-                        "create",
-                        &format!("{}/downstairs", pool_name),
-                    ])
-                    .output()?;
+                let dataset =
+                    ZfsDataset::new(pool, String::from("downstairs"))?;
 
-                if !output.status.success() {
-                    let destroy_output = Command::new("pfexec")
-                        .args(["zpool", "destroy", &pool_name])
-                        .output()?;
-
-                    if !destroy_output.status.success() {
-                        panic!(
-                            "zpool destroy failed {} {}",
-                            String::from_utf8_lossy(&destroy_output.stdout),
-                            String::from_utf8_lossy(&destroy_output.stderr),
-                        );
-                    }
-
-                    bail!(
-                        "zfs create failed {} {}",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr),
-                    );
-                }
-
-                // Adjust permissions
-
-                let dataset = TestDownstairsZfsDataset { tempdir, pool_name };
+                // Adjust permissions and allow the non-root user to snapshot
+                // this new dataset
 
                 let uid: String = {
                     let output = Command::new("id").args(["-u"]).output()?;
 
                     if !output.status.success() {
-                        let destroy_output = Command::new("pfexec")
-                            .args(["zpool", "destroy", &dataset.pool_name])
-                            .output()?;
-
-                        if !destroy_output.status.success() {
-                            panic!(
-                                "zpool destroy failed {} {}",
-                                String::from_utf8_lossy(&destroy_output.stdout),
-                                String::from_utf8_lossy(&destroy_output.stderr),
-                            );
-                        }
-
                         bail!(
                             "id -u failed {} {}",
                             String::from_utf8_lossy(&output.stdout),
@@ -189,128 +274,24 @@ mod integration_tests {
                     String::from_utf8_lossy(&output.stdout).to_string()
                 };
 
-                let output = Command::new("pfexec")
-                    .args([
-                        "chown",
-                        uid.trim_end(), // remove '\n' from end
-                        &dataset.mountpoint()?,
-                    ])
-                    .output()?;
+                dataset.chown(&uid)?;
+                dataset.allow_snapshots(&uid)?;
 
-                if !output.status.success() {
-                    let destroy_output = Command::new("pfexec")
-                        .args(["zpool", "destroy", &dataset.pool_name])
-                        .output()?;
-
-                    if !destroy_output.status.success() {
-                        panic!(
-                            "zpool destroy failed {} {}",
-                            String::from_utf8_lossy(&destroy_output.stdout),
-                            String::from_utf8_lossy(&destroy_output.stderr),
-                        );
-                    }
-
-                    bail!(
-                        "chown failed {} {}",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr),
-                    );
-                }
-
-                // Allow the non-root user to snapshot this new dataset
-
-                let output = Command::new("pfexec")
-                    .args([
-                        "zfs",
-                        "allow",
-                        uid.trim_end(), // remove '\n' from end
-                        "snapshot",
-                        &format!("{}/downstairs", dataset.pool_name),
-                    ])
-                    .output()?;
-
-                if !output.status.success() {
-                    let destroy_output = Command::new("pfexec")
-                        .args(["zpool", "destroy", &dataset.pool_name])
-                        .output()?;
-
-                    if !destroy_output.status.success() {
-                        panic!(
-                            "zpool destroy failed {} {}",
-                            String::from_utf8_lossy(&destroy_output.stdout),
-                            String::from_utf8_lossy(&destroy_output.stderr),
-                        );
-                    }
-
-                    bail!(
-                        "zfs allow snapshot {} {}",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr),
-                    );
-                }
-
-                Ok(dataset)
+                Ok(TestDownstairsZfsDataset { tempdir, dataset })
             }
 
             fn path_buf(&self) -> Result<PathBuf> {
                 let mut path = PathBuf::new();
-                path.push(&self.mountpoint()?);
+                path.push(&self.dataset.mountpoint()?);
                 Ok(path)
             }
 
             fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
-                let output = Command::new("zfs")
-                    .args([
-                        "list",
-                        "-t",
-                        "snapshot",
-                        &format!(
-                            "{}/downstairs@{}",
-                            self.pool_name, snapshot_name,
-                        ),
-                    ])
-                    .output()?;
-
-                if output.status.success() {
-                    return Ok(true);
-                }
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                if stderr.contains("dataset does not exist") {
-                    return Ok(false);
-                }
-
-                bail!("zfs list -t snapshot failed: {stdout} {stderr}");
+                self.dataset.snapshot_exists(snapshot_name)
             }
 
             fn stop_downstairs_during_drop(&self) -> bool {
                 true
-            }
-        }
-
-        impl Drop for TestDownstairsZfsDataset {
-            fn drop(&mut self) {
-                let output = Command::new("pfexec")
-                    .args(["zpool", "list", &self.pool_name])
-                    .output()
-                    .unwrap();
-
-                if output.status.success() {
-                    let output = Command::new("pfexec")
-                        .args(["zpool", "destroy", &self.pool_name])
-                        .output()
-                        .unwrap();
-
-                    if !output.status.success() {
-                        panic!(
-                            "zpool destroy failed {} {}",
-                            String::from_utf8_lossy(&output.stdout),
-                            String::from_utf8_lossy(&output.stderr),
-                        );
-                    }
-                }
             }
         }
     }
