@@ -1148,19 +1148,6 @@ impl DownstairsClient {
                     "DS Reports error {e:?} on job {}, {:?} EC", ds_id, job,
                 );
                 match (&job.work, &e) {
-                    // Some errors can be returned without considering the
-                    // Downstairs bad. For example, it's still an error if a
-                    // snapshot exists already but we should not increment
-                    // `downstairs_errors` and transition that Downstairs to
-                    // Failed - that downstairs is still able to serve IO.
-                    (
-                        IOop::Flush {
-                            snapshot_details: Some(..),
-                            ..
-                        },
-                        CrucibleError::SnapshotExistsAlready(..),
-                    ) => (),
-
                     // If a read job fails, we sometimes need to panic
                     (IOop::Read { .. }, CrucibleError::HashMismatch) => {
                         panic!(

@@ -1,9 +1,10 @@
 // Copyright 2023 Oxide Computer Company
 
 #[cfg(test)]
-mod test {
+mod integration_tests {
     use std::net::IpAddr;
     use std::net::SocketAddr;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use anyhow::*;
@@ -24,6 +25,317 @@ mod test {
     use tokio::sync::mpsc;
     use uuid::*;
 
+    trait TestDownstairsDataset: Sized {
+        /// Create a new dataset for a region of [`size`] bytes
+        fn new(size: u64) -> Result<Self>;
+
+        /// The path where the Downstairs should run
+        fn path_buf(&self) -> Result<PathBuf>;
+
+        /// Returns true if a snapshot exists
+        fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool>;
+
+        /// Should the Downstairs be stopped during the drop of this object?
+        ///
+        /// Note: if this returns true, a multi-threaded tokio runtime is
+        /// required!
+        fn stop_downstairs_during_drop(&self) -> bool;
+    }
+
+    #[cfg(target_os = "illumos")]
+    mod zfs_storage {
+        use super::*;
+        use std::fs::OpenOptions;
+        use std::process::Command;
+
+        #[derive(Debug)]
+        pub struct Zpool {
+            name: String,
+        }
+
+        impl Zpool {
+            pub fn new(name: String, path: String) -> Result<Self> {
+                let output = Command::new("pfexec")
+                    .args(["zpool", "create", &name, &path])
+                    .output()?;
+
+                if !output.status.success() {
+                    bail!(
+                        "zpool create failed {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+
+                Ok(Zpool { name })
+            }
+        }
+
+        impl Drop for Zpool {
+            fn drop(&mut self) {
+                let output = Command::new("pfexec")
+                    .args(["zpool", "list", &self.name])
+                    .output()
+                    .unwrap();
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                if output.status.success() {
+                    let output = Command::new("pfexec")
+                        .args(["zpool", "destroy", &self.name])
+                        .output()
+                        .unwrap();
+
+                    if !output.status.success() {
+                        panic!("zpool destroy failed {stdout} {stderr}");
+                    }
+                } else {
+                    // If the status is not success, then make sure that "no
+                    // such pool" is present in the stderr. If not then some
+                    // other error occurred and this code should panic.
+                    if !stderr.contains("no such pool") {
+                        panic!(
+                            "unrecognized error from zpool list: {} {}",
+                            stdout, stderr,
+                        );
+                    }
+
+                    // zpool list returned "no such pool", meaning no destroy is
+                    // required.
+                }
+            }
+        }
+
+        #[derive(Debug)]
+        pub struct ZfsDataset {
+            pool: Zpool,
+            name: String,
+        }
+
+        impl ZfsDataset {
+            pub fn new(pool: Zpool, name: String) -> Result<Self> {
+                let output = Command::new("pfexec")
+                    .args(["zfs", "create", &format!("{}/{}", pool.name, name)])
+                    .output()?;
+
+                if !output.status.success() {
+                    bail!(
+                        "zfs create failed {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+
+                Ok(ZfsDataset { pool, name })
+            }
+
+            pub fn chown(&self, uid: &str) -> Result<()> {
+                let output = Command::new("pfexec")
+                    .args([
+                        "chown",
+                        uid.trim_end(), // remove '\n' from end
+                        &self.mountpoint()?,
+                    ])
+                    .output()?;
+
+                if !output.status.success() {
+                    bail!(
+                        "chown failed {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+
+                Ok(())
+            }
+
+            pub fn allow_snapshots(&self, uid: &str) -> Result<()> {
+                let output = Command::new("pfexec")
+                    .args([
+                        "zfs",
+                        "allow",
+                        uid.trim_end(), // remove '\n' from end
+                        "snapshot",
+                        &format!("{}/{}", self.pool.name, self.name),
+                    ])
+                    .output()?;
+
+                if !output.status.success() {
+                    bail!(
+                        "zfs allow snapshot {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+
+                Ok(())
+            }
+
+            pub fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
+                let output = Command::new("zfs")
+                    .args([
+                        "list",
+                        "-t",
+                        "snapshot",
+                        &format!(
+                            "{}/{}@{}",
+                            self.pool.name, self.name, snapshot_name,
+                        ),
+                    ])
+                    .output()?;
+
+                if output.status.success() {
+                    return Ok(true);
+                }
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                if stderr.contains("dataset does not exist") {
+                    return Ok(false);
+                }
+
+                bail!("zfs list -t snapshot failed: {stdout} {stderr}");
+            }
+
+            pub fn mountpoint(&self) -> Result<String> {
+                let output = Command::new("zfs")
+                    .args([
+                        "get",
+                        "-pH",
+                        "-o",
+                        "value",
+                        "mountpoint",
+                        &format!("{}/{}", self.pool.name, self.name),
+                    ])
+                    .output()?;
+
+                if !output.status.success() {
+                    bail!(
+                        "zfs get failed {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+
+                let mountpoint = String::from_utf8_lossy(&output.stdout);
+
+                Ok(mountpoint.trim_end().to_string())
+            }
+        }
+
+        #[allow(dead_code)]
+        #[derive(Debug)]
+        pub struct TestDownstairsZfsDataset {
+            tempdir: TempDir,
+            dataset: ZfsDataset,
+        }
+
+        impl TestDownstairsDataset for TestDownstairsZfsDataset {
+            fn new(size: u64) -> Result<TestDownstairsZfsDataset> {
+                let tempdir = tempfile::Builder::new()
+                    .prefix(&"downstairs-")
+                    .rand_bytes(8)
+                    .tempdir()?;
+
+                // Create a large file for a temporary zpool
+
+                let mut path = tempdir.path().to_path_buf();
+                path.push("dataset");
+
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&path)?;
+
+                // Minimum zpool size is 64M, so adjust the requested size
+                // accordingly.
+                let size = std::cmp::max(size, 64 * 1024 * 1024);
+                file.set_len(size)?;
+                drop(file);
+
+                // Create said temporary zpool using that file
+
+                let pool = Zpool::new(
+                    format!("test-downstairs-dataset-{}", Uuid::new_v4()),
+                    path.clone().into_os_string().into_string().unwrap(),
+                )?;
+
+                // Create a dataset
+
+                let dataset =
+                    ZfsDataset::new(pool, String::from("downstairs"))?;
+
+                // Adjust permissions and allow the non-root user to snapshot
+                // this new dataset
+
+                let uid: String = {
+                    let output = Command::new("id").args(["-u"]).output()?;
+
+                    if !output.status.success() {
+                        bail!(
+                            "id -u failed {} {}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr),
+                        );
+                    }
+
+                    String::from_utf8_lossy(&output.stdout).to_string()
+                };
+
+                dataset.chown(&uid)?;
+                dataset.allow_snapshots(&uid)?;
+
+                Ok(TestDownstairsZfsDataset { tempdir, dataset })
+            }
+
+            fn path_buf(&self) -> Result<PathBuf> {
+                let mut path = PathBuf::new();
+                path.push(&self.dataset.mountpoint()?);
+                Ok(path)
+            }
+
+            fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
+                self.dataset.snapshot_exists(snapshot_name)
+            }
+
+            fn stop_downstairs_during_drop(&self) -> bool {
+                true
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct TestDownstairsTempdirDataset {
+        tempdir: TempDir,
+    }
+
+    impl TestDownstairsDataset for TestDownstairsTempdirDataset {
+        fn new(_size: u64) -> Result<TestDownstairsTempdirDataset> {
+            let tempdir = tempfile::Builder::new()
+                .prefix(&"downstairs-")
+                .rand_bytes(8)
+                .tempdir()?;
+
+            Ok(TestDownstairsTempdirDataset { tempdir })
+        }
+
+        fn path_buf(&self) -> Result<PathBuf> {
+            Ok(self.tempdir.path().to_path_buf())
+        }
+
+        fn snapshot_exists(&self, _snapshot_name: &str) -> Result<bool> {
+            bail!("cannot check if snapshot exists for tempdir dataset!")
+        }
+
+        fn stop_downstairs_during_drop(&self) -> bool {
+            false
+        }
+    }
+
     // Create a simple logger
     fn csl() -> Logger {
         let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
@@ -32,13 +344,27 @@ mod test {
 
     #[allow(dead_code)]
     #[derive(Debug)]
-    struct TestDownstairs {
+    struct TestDownstairs<T: TestDownstairsDataset> {
         address: IpAddr,
-        tempdir: TempDir,
+        dataset: T,
         downstairs: Option<DownstairsClient>,
     }
 
-    impl TestDownstairs {
+    impl<T: TestDownstairsDataset> Drop for TestDownstairs<T> {
+        fn drop(&mut self) {
+            if self.dataset.stop_downstairs_during_drop() {
+                if let Some(downstairs) = self.downstairs.take() {
+                    tokio::task::block_in_place(move || {
+                        tokio::runtime::Handle::current()
+                            .block_on(async move { downstairs.stop().await })
+                            .unwrap();
+                    });
+                }
+            }
+        }
+    }
+
+    impl<T: TestDownstairsDataset> TestDownstairs<T> {
         #[allow(clippy::too_many_arguments)]
         pub async fn new(
             address: IpAddr,
@@ -50,13 +376,11 @@ mod test {
             backend: Backend,
             clone_source: Option<SocketAddr>,
         ) -> Result<Self> {
-            let tempdir = tempfile::Builder::new()
-                .prefix(&"downstairs-")
-                .rand_bytes(8)
-                .tempdir()?;
+            let dataset =
+                T::new(blocks_per_extent * extent_count as u64 * 512)?;
 
             let region = create_region_with_backend(
-                tempdir.path().to_path_buf(),
+                dataset.path_buf()?,
                 Block {
                     value: blocks_per_extent,
                     shift: 9,
@@ -72,7 +396,7 @@ mod test {
             // this skips automatic migration of SQLite -> raw extents and lets
             // us keep writing to a SQLite region.
             let builder = if read_only {
-                Downstairs::new_builder(tempdir.path(), read_only)
+                Downstairs::new_builder(&dataset.path_buf()?, read_only)
             } else {
                 assert!(!region.read_only());
                 DownstairsBuilder::from_region(region)
@@ -99,13 +423,17 @@ mod test {
 
             Ok(TestDownstairs {
                 address,
-                tempdir,
+                dataset,
                 downstairs: Some(downstairs),
             })
         }
 
+        pub fn path(&self) -> Result<PathBuf> {
+            self.dataset.path_buf()
+        }
+
         pub async fn reboot_read_only(&mut self) -> Result<()> {
-            let downstairs = Downstairs::new_builder(self.tempdir.path(), true)
+            let downstairs = Downstairs::new_builder(&self.path()?, true)
                 .set_logger(csl())
                 .build()?;
 
@@ -124,10 +452,9 @@ mod test {
         }
 
         pub async fn reboot_read_write(&mut self) -> Result<()> {
-            let downstairs =
-                Downstairs::new_builder(self.tempdir.path(), false)
-                    .set_logger(csl())
-                    .build()?;
+            let downstairs = Downstairs::new_builder(&self.path()?, false)
+                .set_logger(csl())
+                .build()?;
 
             self.downstairs = Some(
                 DownstairsClient::spawn(
@@ -151,10 +478,9 @@ mod test {
             // Note that we don't start the new Downstairs here, so we'll clear
             // out `self.downstairs`.
             self.downstairs = None;
-            let mut downstairs =
-                Downstairs::new_builder(self.tempdir.path(), true)
-                    .set_logger(csl())
-                    .build()?;
+            let mut downstairs = Downstairs::new_builder(&self.path()?, true)
+                .set_logger(csl())
+                .build()?;
             downstairs.clone_region(source).await
         }
 
@@ -168,21 +494,25 @@ mod test {
             // If start_downstairs returned Ok, then address will be populated
             self.downstairs.as_ref().unwrap().repair_address()
         }
+
+        pub fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
+            self.dataset.snapshot_exists(snapshot_name)
+        }
     }
 
     #[derive(Debug)]
-    struct TestDownstairsSet {
-        downstairs1: TestDownstairs,
-        downstairs2: TestDownstairs,
-        downstairs3: TestDownstairs,
+    struct TestDownstairsSet<T: TestDownstairsDataset> {
+        downstairs1: TestDownstairs<T>,
+        downstairs2: TestDownstairs<T>,
+        downstairs3: TestDownstairs<T>,
         crucible_opts: CrucibleOpts,
         blocks_per_extent: u64,
         extent_count: u32,
     }
 
-    impl TestDownstairsSet {
+    impl<T: TestDownstairsDataset> TestDownstairsSet<T> {
         /// Spin off three downstairs, with a 5120b region
-        pub async fn small(read_only: bool) -> Result<TestDownstairsSet> {
+        pub async fn small(read_only: bool) -> Result<Self> {
             // 5 * 2 * 512 = 5120b
             let blocks_per_extent = 5;
             let extent_count = 2;
@@ -197,9 +527,7 @@ mod test {
         }
 
         /// Spin off three SQLite downstairs, with a 5120b region
-        pub async fn small_sqlite(
-            read_only: bool,
-        ) -> Result<TestDownstairsSet> {
+        pub async fn small_sqlite(read_only: bool) -> Result<Self> {
             // 5 * 2 * 512 = 5120b
             let blocks_per_extent = 5;
             let extent_count = 2;
@@ -214,7 +542,7 @@ mod test {
         }
 
         /// Spin off three downstairs, with a 50 MB region
-        pub async fn big(read_only: bool) -> Result<TestDownstairsSet> {
+        pub async fn big(read_only: bool) -> Result<Self> {
             // 512 * 188 * 512 = 49283072b ~= 50MB
             let blocks_per_extent = 512;
             let extent_count = 188;
@@ -229,7 +557,7 @@ mod test {
         }
 
         /// Spin off three problematic downstairs, with a 10 MB region
-        pub async fn problem() -> Result<TestDownstairsSet> {
+        pub async fn problem() -> Result<Self> {
             // 512 * 40 * 512 = 10485760b = 10MB
             let blocks_per_extent = 512;
             let extent_count = 188;
@@ -250,7 +578,7 @@ mod test {
             extent_count: u32,
             problematic: bool,
             backend: Backend,
-        ) -> Result<TestDownstairsSet> {
+        ) -> Result<Self> {
             let downstairs1 = TestDownstairs::new(
                 "127.0.0.1".parse()?,
                 true,
@@ -361,7 +689,7 @@ mod test {
             Ok(())
         }
 
-        pub async fn new_downstairs(&self) -> Result<TestDownstairs> {
+        pub async fn new_downstairs(&self) -> Result<TestDownstairs<T>> {
             TestDownstairs::new(
                 "127.0.0.1".parse()?,
                 true,
@@ -386,14 +714,27 @@ mod test {
         pub fn downstairs3_address(&self) -> SocketAddr {
             self.downstairs3.address()
         }
+
+        pub fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
+            Ok(self.downstairs1.snapshot_exists(snapshot_name)?
+                && self.downstairs2.snapshot_exists(snapshot_name)?
+                && self.downstairs3.snapshot_exists(snapshot_name)?)
+        }
     }
+
+    type DefaultTestDownstairs = TestDownstairs<TestDownstairsTempdirDataset>;
+    type DefaultTestDownstairsSet =
+        TestDownstairsSet<TestDownstairsTempdirDataset>;
+    #[cfg(target_os = "illumos")]
+    type ZfsTestDownstairsSet =
+        TestDownstairsSet<zfs_storage::TestDownstairsZfsDataset>;
 
     #[tokio::test]
     async fn integration_test_region() -> Result<()> {
         // Test a simple single layer volume with a read, write, read
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -442,7 +783,7 @@ mod test {
         // that exceed our MDTS (and should be split automatically)
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::big(false).await?;
+        let tds = DefaultTestDownstairsSet::big(false).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -498,7 +839,7 @@ mod test {
     async fn volume_zero_length_io() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -532,20 +873,20 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_two_layers() -> Result<()> {
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_common(tds, opts, false).await
     }
 
     #[tokio::test]
     async fn integration_test_two_layers_write_unwritten() -> Result<()> {
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_common(tds, opts, true).await
     }
 
     async fn integration_test_two_layers_common(
-        tds: TestDownstairsSet,
+        tds: DefaultTestDownstairsSet,
         opts: CrucibleOpts,
         is_write_unwritten: bool,
     ) -> Result<()> {
@@ -629,7 +970,7 @@ mod test {
     async fn integration_test_three_layers() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in memory block io full of 11
@@ -714,7 +1055,7 @@ mod test {
     async fn integration_test_url() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let server = Server::run();
@@ -786,7 +1127,7 @@ mod test {
         // Just do a read of a new volume.
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(true).await?;
+        let tds = DefaultTestDownstairsSet::small(true).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -832,7 +1173,7 @@ mod test {
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -898,7 +1239,7 @@ mod test {
         // Should result in:
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -966,7 +1307,7 @@ mod test {
         // |ABBBBBBBBBB|
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -1035,7 +1376,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1044,7 +1385,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1117,7 +1458,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1126,7 +1467,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1218,7 +1559,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1227,7 +1568,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1295,7 +1636,7 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_two_layers_parent_smaller() -> Result<()> {
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_small_common(tds, opts, false).await
     }
@@ -1303,13 +1644,13 @@ mod test {
     #[tokio::test]
     async fn integration_test_two_layers_parent_smaller_unwritten() -> Result<()>
     {
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
         integration_test_two_layers_small_common(tds, opts, true).await
     }
 
     async fn integration_test_two_layers_small_common(
-        tds: TestDownstairsSet,
+        tds: DefaultTestDownstairsSet,
         opts: CrucibleOpts,
         is_write_unwritten: bool,
     ) -> Result<()> {
@@ -1396,7 +1737,7 @@ mod test {
         //     |1111111111|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1476,7 +1817,7 @@ mod test {
         //     |1111155555|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1572,7 +1913,7 @@ mod test {
         //     |1121100300|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1666,7 +2007,7 @@ mod test {
         // SV  |5555555555|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1765,7 +2106,7 @@ mod test {
             .await?;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1774,7 +2115,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1889,7 +2230,7 @@ mod test {
             .await?;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1898,7 +2239,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1995,7 +2336,7 @@ mod test {
     async fn integration_test_multi_read_only() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(true).await?;
+        let tds = DefaultTestDownstairsSet::small(true).await?;
         let mut opts = tds.opts();
 
         let vcr_1 = VolumeConstructionRequest::Volume {
@@ -2068,7 +2409,7 @@ mod test {
         // SV  |55555-----|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
@@ -2128,7 +2469,8 @@ mod test {
 
         // boot three downstairs, write some data to them, then change to
         // read-only.
-        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let mut test_downstairs_set =
+            DefaultTestDownstairsSet::small(false).await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -2204,7 +2546,7 @@ mod test {
 
         // create a new volume, layering a new set of downstairs on top of the
         // read-only one we just (re)booted
-        let top_layer_tds = TestDownstairsSet::small(false).await?;
+        let top_layer_tds = DefaultTestDownstairsSet::small(false).await?;
         let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
 
@@ -2284,13 +2626,13 @@ mod test {
         // boot three downstairs, write some data to them, then change to
         // read-only.
         let mut test_downstairs_set =
-            TestDownstairsSet::small_sqlite(false).await?;
+            DefaultTestDownstairsSet::small_sqlite(false).await?;
 
         // This must be a SQLite extent!
         assert!(test_downstairs_set
             .downstairs1
-            .tempdir
             .path()
+            .unwrap()
             .join("00/000/000.db")
             .exists());
 
@@ -2331,8 +2673,8 @@ mod test {
         // This must still be a SQLite backend!
         assert!(test_downstairs_set
             .downstairs1
-            .tempdir
             .path()
+            .unwrap()
             .join("00/000/000.db")
             .exists());
 
@@ -2376,15 +2718,15 @@ mod test {
 
         // create a new volume, layering a new set of downstairs on top of the
         // read-only one we just (re)booted
-        let top_layer_tds = TestDownstairsSet::small(false).await?;
+        let top_layer_tds = DefaultTestDownstairsSet::small(false).await?;
         let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
 
         // The new volume is **not** using the SQLite backend!
         assert!(!top_layer_tds
             .downstairs1
-            .tempdir
             .path()
+            .unwrap()
             .join("00/000/000.db")
             .exists());
 
@@ -2462,12 +2804,12 @@ mod test {
         // boot three downstairs, write some data to them, then reopen as
         // read-write (which will automatically migrate the extent)
         let mut test_downstairs_set =
-            TestDownstairsSet::small_sqlite(false).await?;
+            DefaultTestDownstairsSet::small_sqlite(false).await?;
         // This must be a SQLite extent!
         assert!(test_downstairs_set
             .downstairs1
-            .tempdir
             .path()
+            .unwrap()
             .join("00/000/000.db")
             .exists());
 
@@ -2506,8 +2848,8 @@ mod test {
         // This must still be a SQLite extent!
         assert!(test_downstairs_set
             .downstairs1
-            .tempdir
             .path()
+            .unwrap()
             .join("00/000/000.db")
             .exists());
 
@@ -2515,8 +2857,8 @@ mod test {
         // This should now be migrated, and the DB file should be deleted
         assert!(!test_downstairs_set
             .downstairs1
-            .tempdir
             .path()
+            .unwrap()
             .join("00/000/000.db")
             .exists());
 
@@ -2563,7 +2905,8 @@ mod test {
 
         // boot three downstairs, write some data to them, then change to
         // read-only.
-        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let mut test_downstairs_set =
+            DefaultTestDownstairsSet::small(false).await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -2600,7 +2943,7 @@ mod test {
         test_downstairs_set.reboot_read_only().await?;
 
         // Make the new downstairs
-        let mut new_ds = TestDownstairs::new(
+        let mut new_ds = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             true,
@@ -2652,7 +2995,7 @@ mod test {
 
         // Clone an original downstairs directly to our new downstairs
         let clone_source = test_downstairs_set.downstairs1.repair_address();
-        let mut new_ds = TestDownstairs::new(
+        let mut new_ds = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             true,
@@ -2715,13 +3058,13 @@ mod test {
         // boot three downstairs, write some data to them, then change to
         // read-only.
         let mut test_downstairs_set =
-            TestDownstairsSet::small_sqlite(false).await?;
+            DefaultTestDownstairsSet::small_sqlite(false).await?;
 
         // This must be a SQLite extent!
         assert!(test_downstairs_set
             .downstairs1
-            .tempdir
             .path()
+            .unwrap()
             .join("00/000/000.db")
             .exists());
 
@@ -2760,7 +3103,7 @@ mod test {
         test_downstairs_set.reboot_read_only().await?;
 
         // Make the new downstairs
-        let mut new_ds = TestDownstairs::new(
+        let mut new_ds = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             true,
@@ -2781,7 +3124,7 @@ mod test {
         let new_target = new_ds.address();
 
         // The cloned region should have the .db file
-        assert!(new_ds.tempdir.path().join("00/000/000.db").exists());
+        assert!(new_ds.path().unwrap().join("00/000/000.db").exists());
 
         // Replace one of the targets in our original with the new downstairs.
         let mut new_opts = test_downstairs_set.opts();
@@ -2820,7 +3163,7 @@ mod test {
         // Verify repair ready returns false when an extent is open
 
         // Create a downstairs
-        let new_ds = TestDownstairs::new(
+        let new_ds = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,  // encrypted
             false, // read only
@@ -2855,7 +3198,7 @@ mod test {
         // even when extents are open.
 
         // Create a downstairs
-        let new_ds = TestDownstairs::new(
+        let new_ds = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true, // encrypted
             true, // read only
@@ -2889,7 +3232,7 @@ mod test {
         // Test downstairs region clone.
         // Verify different extent count will fail.
 
-        let mut ds_one = TestDownstairs::new(
+        let mut ds_one = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             true,
@@ -2905,7 +3248,7 @@ mod test {
         ds_one.reboot_read_only().await.unwrap();
         let clone_source = ds_one.repair_address();
 
-        let mut ds_two = TestDownstairs::new(
+        let mut ds_two = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             true,
@@ -2927,7 +3270,7 @@ mod test {
         // Test downstairs region clone.
         // Verify different extent size will fail.
 
-        let mut ds_one = TestDownstairs::new(
+        let mut ds_one = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             true,
@@ -2943,7 +3286,7 @@ mod test {
         ds_one.reboot_read_only().await.unwrap();
         let clone_source = ds_one.repair_address();
 
-        let mut ds_two = TestDownstairs::new(
+        let mut ds_two = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             true,
@@ -2965,7 +3308,7 @@ mod test {
         // Test downstairs region clone.
         // Verify you can't clone from a RW downstairs
 
-        let ds_one = TestDownstairs::new(
+        let ds_one = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             false, // <- RO is false.
@@ -2980,7 +3323,7 @@ mod test {
 
         let clone_source = ds_one.repair_address();
 
-        let mut ds_two = TestDownstairs::new(
+        let mut ds_two = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             true,
@@ -3002,7 +3345,7 @@ mod test {
         // Test downstairs region clone.
         // Verify downstairs encryption state must match.
 
-        let ds_one = TestDownstairs::new(
+        let ds_one = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             false,
             true,
@@ -3017,7 +3360,7 @@ mod test {
 
         let clone_source = ds_one.repair_address();
 
-        let mut ds_two = TestDownstairs::new(
+        let mut ds_two = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true, // <- Encrypted is different
             true,
@@ -3040,7 +3383,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // boot three downstairs, write some data to them
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            DefaultTestDownstairsSet::small(false).await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3131,7 +3475,8 @@ mod test {
 
         // boot three downstairs, write some data to them, then change to
         // read-only.
-        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let mut test_downstairs_set =
+            DefaultTestDownstairsSet::small(false).await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3185,7 +3530,7 @@ mod test {
         volume.activate().await?;
 
         // Make the new downstairs, but don't start it
-        let mut new_ds = TestDownstairs::new(
+        let mut new_ds = DefaultTestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
             true,
             true,
@@ -3261,7 +3606,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            DefaultTestDownstairsSet::small(false).await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3306,7 +3652,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            DefaultTestDownstairsSet::small(false).await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3346,7 +3693,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            DefaultTestDownstairsSet::small(false).await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3401,7 +3749,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            DefaultTestDownstairsSet::small(false).await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3456,7 +3805,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // boot three downstairs, write some data to them
-        let test_downstairs_set = TestDownstairsSet::big(false).await?;
+        let test_downstairs_set = DefaultTestDownstairsSet::big(false).await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3572,7 +3921,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Create three problematic downstairs.
-        let test_downstairs_set = TestDownstairsSet::problem().await?;
+        let test_downstairs_set = DefaultTestDownstairsSet::problem().await?;
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3643,7 +3992,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3679,7 +4028,7 @@ mod test {
     #[tokio::test]
     async fn integration_test_guest_activate_twice() -> Result<()> {
         // Verify multiple activations don't return error
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3698,7 +4047,7 @@ mod test {
         // Verify we fail activate_with_gen() if we are already active
         // and the generation number we are requesting with does not
         // match the number that the upstairs is already active with.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3716,7 +4065,7 @@ mod test {
         // Verify activate_with_gen() will work if we are already active
         // and the new requested generation number matches what we activated
         // with.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3733,7 +4082,7 @@ mod test {
     async fn integration_test_guest_activate_with_gen_1() -> Result<()> {
         // Verify activate_with_gen() works when we send it with the
         // same number that we passed to up_main.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3750,7 +4099,7 @@ mod test {
         // Verify activate_with_gen() works if we are not active yet and
         // the requested generation number is higher than what we sent
         // to up_main.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3768,7 +4117,7 @@ mod test {
     #[tokio::test]
     async fn integration_test_guest_drop_early() -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3788,7 +4137,7 @@ mod test {
     async fn integration_test_guest_drop() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3830,7 +4179,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3857,7 +4206,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let log = csl();
@@ -3931,7 +4280,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let log = csl();
@@ -3977,7 +4326,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin up three read-only downstairs
-        let tds = TestDownstairsSet::small(true).await?;
+        let tds = DefaultTestDownstairsSet::small(true).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4009,7 +4358,7 @@ mod test {
         // downstairs, but not another while the replace is active.
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let log = csl();
@@ -4056,7 +4405,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4122,7 +4471,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4175,7 +4524,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4231,7 +4580,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4282,7 +4631,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4333,7 +4682,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4382,7 +4731,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4415,7 +4764,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4445,8 +4794,8 @@ mod test {
 
     /// Given a &TestDownstairsSet, spawn a Pantry, attach a
     /// CruciblePantryClient, and return both plus the Volume ID.
-    async fn get_pantry_and_client_for_tds(
-        tds: &TestDownstairsSet,
+    async fn get_pantry_and_client_for_tds<T: TestDownstairsDataset>(
+        tds: &TestDownstairsSet<T>,
     ) -> (Arc<Pantry>, Uuid, CruciblePantryClient) {
         const BLOCK_SIZE: usize = 512;
 
@@ -4508,7 +4857,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
         let opts = tds.opts();
 
         // Start a pantry, and get the client for it
@@ -4600,7 +4949,7 @@ mod test {
     #[tokio::test]
     async fn test_pantry_import_from_url_ovmf_bad_digest() {
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
 
         // Start a pantry, and get the client for it
         let (_pantry, volume_id, client) =
@@ -4664,7 +5013,7 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
 
         let volume_id = Uuid::new_v4();
@@ -4742,14 +5091,19 @@ mod test {
         assert_eq!(vec![0x55; 5120], &buffer[..]);
     }
 
-    #[tokio::test]
-    async fn test_pantry_snapshot() {
+    #[cfg(target_os = "illumos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_pantry_snapshot() -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = ZfsTestDownstairsSet::small(false).await?;
 
         // Start a pantry, get the client for it, then use it to snapshot
         let (_pantry, volume_id, client) =
             get_pantry_and_client_for_tds(&tds).await;
+
+        if tds.snapshot_exists("testpost")? {
+            bail!("snapshot testpost exists before creation!");
+        }
 
         client
             .snapshot(
@@ -4758,10 +5112,15 @@ mod test {
                     snapshot_id: "testpost".to_string(),
                 },
             )
-            .await
-            .unwrap();
+            .await?;
 
-        client.detach(&volume_id.to_string()).await.unwrap();
+        if !tds.snapshot_exists("testpost")? {
+            bail!("snapshot testpost does not exist!");
+        }
+
+        client.detach(&volume_id.to_string()).await?;
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -4770,7 +5129,7 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
 
         // Start a pantry, get the client for it, then use it to bulk_write in data
@@ -4828,7 +5187,7 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
         let opts = tds.opts();
 
         // Start a pantry, get the client for it, then use it to bulk_write in data
@@ -4883,7 +5242,7 @@ mod test {
     async fn test_pantry_fail_bulk_write_one_byte() {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write in data
         let (_pantry, volume_id, client) =
@@ -4915,7 +5274,7 @@ mod test {
     async fn test_pantry_fail_bulk_read_one_byte() {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_read data
         let (_pantry, volume_id, client) =
@@ -4973,7 +5332,7 @@ mod test {
         // Spin off three downstairs, build our Crucible struct (with a
         // read-only parent pointing to the random data above)
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
         let opts = tds.opts();
 
         let volume_id = Uuid::new_v4();
@@ -5104,7 +5463,7 @@ mod test {
     async fn test_pantry_bulk_read() {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write then
         // bulk_read in data
@@ -5186,7 +5545,7 @@ mod test {
     async fn test_pantry_bulk_read_max_chunk_size() {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
@@ -5241,7 +5600,7 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
@@ -5371,7 +5730,7 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
@@ -5500,7 +5859,7 @@ mod test {
     async fn test_pantry_validate_fail() {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
 
         // Start a pantry, get the client for it
         let (_pantry, volume_id, client) =
@@ -5549,7 +5908,7 @@ mod test {
 
         info!(log, "test_volume_replace of a volume");
         // Make three downstairs
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
         let volume_id = Uuid::new_v4();
 
@@ -5627,7 +5986,7 @@ mod test {
         let log = csl();
 
         // Make three downstairs
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
         let opts = tds.opts();
         let volume_id = Uuid::new_v4();
 
@@ -5670,7 +6029,7 @@ mod test {
         // Make a new volume, and make the original volume the read only
         // parent.
         // Make three new downstairs for the new volume.
-        let sv_tds = TestDownstairsSet::small(false).await.unwrap();
+        let sv_tds = DefaultTestDownstairsSet::small(false).await.unwrap();
         let sv_opts = sv_tds.opts();
         let sv_volume_id = Uuid::new_v4();
 
@@ -5747,7 +6106,7 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
         let opts = tds.opts();
 
         // Start a pantry, get the client for it, then use it to bulk_write
@@ -5806,7 +6165,7 @@ mod test {
     #[tokio::test]
     async fn test_auto_flush_deactivate() {
         let log = csl();
-        let child = TestDownstairsSet::small(false).await.unwrap();
+        let child = DefaultTestDownstairsSet::small(false).await.unwrap();
         let vcr = VolumeConstructionRequest::Volume {
             id: Uuid::new_v4(),
             block_size: 512,
@@ -5838,5 +6197,55 @@ mod test {
 
         // Make sure everything worked
         volume.activate().await.unwrap();
+    }
+
+    #[cfg(target_os = "illumos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn double_snapshot_all_the_way_across_the_sky() -> Result<()> {
+        let log = csl();
+        let child = ZfsTestDownstairsSet::small(false).await?;
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: 512,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: child.blocks_per_extent(),
+                extent_count: child.extent_count(),
+                opts: child.opts(),
+                gen: 2,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Volume::construct(vcr, None, log.clone()).await?;
+        volume.activate().await?;
+
+        let snapshot_name = Uuid::new_v4().to_string();
+
+        if child.snapshot_exists(&snapshot_name)? {
+            bail!("snapshot exists before creation!");
+        }
+
+        volume
+            .flush(Some(SnapshotDetails {
+                snapshot_name: snapshot_name.clone(),
+            }))
+            .await?;
+
+        if !child.snapshot_exists(&snapshot_name)? {
+            bail!("snapshot does not exist after creation!");
+        }
+
+        volume
+            .flush(Some(SnapshotDetails {
+                snapshot_name: snapshot_name.clone(),
+            }))
+            .await?;
+
+        if !child.snapshot_exists(&snapshot_name)? {
+            bail!("snapshot disappeared after second flush!");
+        }
+
+        Ok(())
     }
 }

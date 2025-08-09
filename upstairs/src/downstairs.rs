@@ -3388,9 +3388,6 @@ impl Downstairs {
                     client_id, ds_id
                 );
             }
-            Some(CrucibleError::SnapshotExistsAlready(_)) => {
-                // This is fine, nothing to worry about
-            }
             Some(_err) => {
                 let Some(job) = self.ds_active.get(&ds_id) else {
                     panic!("I don't think we should be here");

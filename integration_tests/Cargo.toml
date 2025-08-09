@@ -14,9 +14,7 @@ anyhow.workspace = true
 base64.workspace = true
 bytes.workspace = true
 crucible-client-types.workspace = true
-# importantly, don't use features = ["zfs_snapshot"] here, this will cause
-# cleanup issues!
-crucible-downstairs = { workspace = true, features = ["integration-tests"] }
+crucible-downstairs = { workspace = true, features = ["integration-tests", "zfs_snapshot"] }
 crucible-pantry-client.workspace = true
 crucible-pantry.workspace = true
 crucible = { workspace = true, features = ["integration-tests"] }
