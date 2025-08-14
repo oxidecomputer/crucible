@@ -58,7 +58,6 @@ syn = { version = "2", features = ["extra-traits", "full", "visit", "visit-mut"]
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
-toml_edit = { version = "0.19", features = ["serde"] }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 usdt = { version = "0.5" }
@@ -110,7 +109,6 @@ time = { version = "0.3", features = ["formatting", "local-offset", "macros", "p
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
-toml_edit = { version = "0.19", features = ["serde"] }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 usdt = { version = "0.5" }
@@ -180,6 +178,7 @@ rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
+toml_edit = { version = "0.19", features = ["serde"] }
 
 [target.x86_64-unknown-illumos.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
@@ -193,5 +192,6 @@ rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
+toml_edit = { version = "0.19", features = ["serde"] }
 
 ### END HAKARI SECTION
