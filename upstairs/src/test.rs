@@ -254,7 +254,7 @@ pub(crate) mod up_test {
     // key material made with `openssl rand -base64 32`
     #[test]
     pub fn test_upstairs_encryption_context_ok() -> Result<()> {
-        use rand::{thread_rng, Rng};
+        use rand::{rng, Rng};
 
         let key_bytes = engine::general_purpose::STANDARD
             .decode("ClENKTXD2bCyXSHnKXY7GGnk+NvQKbwpatjWP2fJzk0=")
@@ -262,7 +262,7 @@ pub(crate) mod up_test {
         let context = EncryptionContext::new(key_bytes, 512);
 
         let mut block = [0u8; 512];
-        thread_rng().fill(&mut block[..]);
+        rng().fill(&mut block[..]);
 
         let orig_block = block;
 
@@ -277,7 +277,7 @@ pub(crate) mod up_test {
 
     #[test]
     pub fn test_upstairs_encryption_context_wrong_nonce() -> Result<()> {
-        use rand::{thread_rng, Rng};
+        use rand::{rng, Rng};
 
         let key_bytes = engine::general_purpose::STANDARD
             .decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=")
@@ -285,7 +285,7 @@ pub(crate) mod up_test {
         let context = EncryptionContext::new(key_bytes, 512);
 
         let mut block = [0u8; 512];
-        thread_rng().fill(&mut block[..]);
+        rng().fill(&mut block[..]);
 
         let orig_block = block;
 
@@ -311,7 +311,7 @@ pub(crate) mod up_test {
 
     #[test]
     pub fn test_upstairs_encryption_context_wrong_tag() -> Result<()> {
-        use rand::{thread_rng, Rng};
+        use rand::{rng, Rng};
 
         let key_bytes = engine::general_purpose::STANDARD
             .decode("EVrH+ABhMP0MLfxynCalDq1vWCCWCWFfsSsJoJeDCx8=")
@@ -319,7 +319,7 @@ pub(crate) mod up_test {
         let context = EncryptionContext::new(key_bytes, 512);
 
         let mut block = [0u8; 512];
-        thread_rng().fill(&mut block[..]);
+        rng().fill(&mut block[..]);
 
         let orig_block = block;
 
@@ -348,15 +348,15 @@ pub(crate) mod up_test {
     #[test]
     pub fn test_upstairs_validate_encrypted_read_response() -> Result<()> {
         // Set up the encryption context
-        use rand::{thread_rng, Rng};
+        use rand::{rng, Rng};
         let mut key = vec![0u8; 32];
-        thread_rng().fill(&mut key[..]);
+        rng().fill(&mut key[..]);
         let context = EncryptionContext::new(key.clone(), 512);
 
         // Encrypt some random data
         let mut data = BytesMut::with_capacity(512);
         data.resize(512, 0u8);
-        thread_rng().fill(&mut data[..]);
+        rng().fill(&mut data[..]);
 
         let original_data = data.clone();
 
@@ -408,9 +408,9 @@ pub(crate) mod up_test {
     pub fn test_upstairs_validate_encrypted_read_response_blank_block(
     ) -> Result<()> {
         // Set up the encryption context
-        use rand::{thread_rng, Rng};
+        use rand::{rng, Rng};
         let mut key = vec![0u8; 32];
-        thread_rng().fill(&mut key[..]);
+        rng().fill(&mut key[..]);
         let context = EncryptionContext::new(key.clone(), 512);
 
         let mut data = BytesMut::with_capacity(512);
@@ -433,11 +433,11 @@ pub(crate) mod up_test {
 
     #[test]
     pub fn test_upstairs_validate_unencrypted_read_response() -> Result<()> {
-        use rand::{thread_rng, Rng};
+        use rand::{rng, Rng};
 
         let mut data = BytesMut::with_capacity(512);
         data.resize(512, 0u8);
-        thread_rng().fill(&mut data[..]);
+        rng().fill(&mut data[..]);
 
         let read_response_hash = integrity_hash(&[&data[..]]);
         let original_data = data.clone();

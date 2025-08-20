@@ -2003,7 +2003,7 @@ async fn fill_sparse_workload(
     volume: &Volume,
     di: &mut DiskInfo,
 ) -> Result<()> {
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     let mut extent_block_start = 0;
     // We loop over all sub volumes, doing one write to each extent.
@@ -2013,7 +2013,7 @@ async fn fill_sparse_workload(
         for extent in 0..extents {
             let mut block_index: usize =
                 extent_block_start + (extent * extent_size);
-            let random_offset = rng.gen_range(0..extent_size);
+            let random_offset = rng.random_range(0..extent_size);
             block_index += random_offset;
 
             let offset = BlockIndex(block_index.try_into().unwrap());
@@ -2055,7 +2055,7 @@ async fn generic_workload(
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     let count_width = match wtq {
         WhenToQuit::Count { count } => count.to_string().len(),
@@ -2068,7 +2068,7 @@ async fn generic_workload(
     let max_io_size = std::cmp::min(10, total_blocks);
 
     for c in 1.. {
-        let op = rng.gen_range(0..10);
+        let op = rng.random_range(0..10);
         if op == 0 {
             // flush
             if !quiet {
@@ -2090,13 +2090,13 @@ async fn generic_workload(
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to max_io_size
-            let size = rng.gen_range(1..=max_io_size);
+            let size = rng.random_range(1..=max_io_size);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
             let block_max = total_blocks - size + 1;
-            let block_index = rng.gen_range(0..block_max);
+            let block_index = rng.random_range(0..block_max);
 
             // Convert offset and length to their byte values.
             let offset = BlockIndex(block_index as u64);
@@ -2232,12 +2232,12 @@ async fn replay_workload(
     dsc_client: Client,
     ds_count: u32,
 ) -> Result<()> {
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
     let mut generic_wtq = WhenToQuit::Count { count: 300 };
 
     for c in 1.. {
         // Pick a DS at random
-        let stopped_ds = rng.gen_range(0..ds_count);
+        let stopped_ds = rng.random_range(0..ds_count);
         dsc_client.dsc_stop(stopped_ds).await.unwrap();
         loop {
             let res = dsc_client.dsc_get_ds_state(stopped_ds).await.unwrap();
@@ -2827,7 +2827,7 @@ async fn dirty_workload(
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     /*
      * To store our write requests
@@ -2843,7 +2843,7 @@ async fn dirty_workload(
     let block_max = di.volume_info.total_blocks() - size + 1;
     let count_width = count.to_string().len();
     for c in 1..=count {
-        let block_index = rng.gen_range(0..block_max);
+        let block_index = rng.random_range(0..block_max);
         /*
          * Convert offset and length to their byte values.
          */
@@ -2964,11 +2964,11 @@ async fn rand_read_write_workload(
                 RandReadWriteMode::Write => {
                     let mut buf = BytesMut::new();
                     buf.resize(cfg.blocks_per_io * block_size, 0u8);
-                    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+                    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
                     rng.fill_bytes(&mut buf);
                     while !stop.load(Ordering::Acquire) {
-                        let offset =
-                            rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
+                        let offset = rng
+                            .random_range(0..=total_blocks - cfg.blocks_per_io);
                         volume
                             .write(BlockIndex(offset as u64), buf.clone())
                             .await
@@ -2978,10 +2978,10 @@ async fn rand_read_write_workload(
                 }
                 RandReadWriteMode::Read => {
                     let mut buf = Buffer::new(cfg.blocks_per_io, block_size);
-                    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+                    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
                     while !stop.load(Ordering::Acquire) {
-                        let offset =
-                            rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
+                        let offset = rng
+                            .random_range(0..=total_blocks - cfg.blocks_per_io);
                         volume
                             .read(BlockIndex(offset as u64), &mut buf)
                             .await
@@ -3128,11 +3128,11 @@ async fn bufferbloat_workload(
         let handle = tokio::spawn(async move {
             let mut buf = BytesMut::new();
             buf.resize(cfg.blocks_per_io * block_size, 0u8);
-            let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+            let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
             rng.fill_bytes(&mut buf);
             while !stop.load(Ordering::Acquire) {
                 let offset =
-                    rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
+                    rng.random_range(0..=total_blocks - cfg.blocks_per_io);
                 volume
                     .write(BlockIndex(offset as u64), buf.clone())
                     .await
@@ -3205,7 +3205,7 @@ async fn one_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     /*
      * Once we have our IO size, decide where the starting offset should
@@ -3214,7 +3214,7 @@ async fn one_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
      */
     let size = 1;
     let block_max = di.volume_info.total_blocks() - size + 1;
-    let block_index = rng.gen_range(0..block_max);
+    let block_index = rng.random_range(0..block_max);
 
     /*
      * Convert offset and length to their byte values.
@@ -3339,7 +3339,7 @@ async fn write_flush_read_workload(
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     let count_width = count.to_string().len();
     let block_size = di.volume_info.block_size;
@@ -3348,7 +3348,7 @@ async fn write_flush_read_workload(
          * Pick a random size (in blocks) for the IO, up to the size of the
          * max IO we allow.
          */
-        let size = rng.gen_range(1..=di.max_block_io);
+        let size = rng.random_range(1..=di.max_block_io);
 
         /*
          * Once we have our IO size, decide where the starting offset should
@@ -3356,7 +3356,7 @@ async fn write_flush_read_workload(
          * IO size.
          */
         let block_max = di.volume_info.total_blocks() - size + 1;
-        let block_index = rng.gen_range(0..block_max);
+        let block_index = rng.random_range(0..block_max);
 
         /*
          * Convert offset and length to their byte values.
@@ -3464,7 +3464,7 @@ async fn repair_workload(
     di: &mut DiskInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     // TODO: Allow user to request r/w/f percentage (how???)
     // We want at least one write, otherwise there will be nothing to
@@ -3477,7 +3477,7 @@ async fn repair_workload(
     let block_size = di.volume_info.block_size;
     let size_width = (10 * block_size).to_string().len();
     for c in 1..=count {
-        let op = rng.gen_range(0..10);
+        let op = rng.random_range(0..10);
         // Make sure the last few commands are not a flush
         if c + 3 < count && op == 0 {
             // flush
@@ -3501,13 +3501,13 @@ async fn repair_workload(
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10);
+            let size = rng.random_range(1..=10);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
             let block_max = total_blocks - size + 1;
-            let block_index = rng.gen_range(0..block_max);
+            let block_index = rng.random_range(0..block_max);
 
             // Convert offset and length to their byte values.
             let offset = BlockIndex(block_index as u64);
@@ -3575,7 +3575,7 @@ async fn demo_workload(
     di: &mut DiskInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     // Because this workload issues a bunch of IO all at the same time,
     // we can't be sure the order will be preserved for our IOs.
@@ -3590,7 +3590,7 @@ async fn demo_workload(
     // TODO: Let the user select the number of loops
     // TODO: Allow user to request r/w/f percentage (how???)
     for _ in 1..=count {
-        let op = rng.gen_range(0..10);
+        let op = rng.random_range(0..10);
         if op == 0 {
             // flush
             let future = volume.flush(None);
@@ -3598,13 +3598,13 @@ async fn demo_workload(
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10);
+            let size = rng.random_range(1..=10);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
             let block_max = di.volume_info.total_blocks() - size + 1;
-            let block_index = rng.gen_range(0..block_max);
+            let block_index = rng.random_range(0..block_max);
 
             // Convert offset and length to their byte values.
             let offset = BlockIndex(block_index as u64);
@@ -3907,7 +3907,7 @@ async fn dep_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
          */
         for ioc in 0..200 {
             my_offset = (my_offset + block_size) % final_offset;
-            if random() {
+            if rand::random_bool(0.5) {
                 /*
                  * Generate a write buffer with a locally unique value.
                  */

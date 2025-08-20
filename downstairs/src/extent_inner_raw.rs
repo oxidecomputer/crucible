@@ -1558,8 +1558,8 @@ mod test {
         assert!(inner.get_block_context(1)?.is_none());
 
         // Set and verify a new context for block 0
-        let blob1 = rand::thread_rng().gen::<[u8; 12]>();
-        let blob2 = rand::thread_rng().gen::<[u8; 16]>();
+        let blob1 = rand::rng().random::<[u8; 12]>();
+        let blob2 = rand::rng().random::<[u8; 16]>();
 
         // Set and verify block 0's context
         inner.set_dirty_and_block_context(&DownstairsBlockContext {
@@ -1686,10 +1686,10 @@ mod test {
             inner.set_dirty_and_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: Some(EncryptionContext {
-                        nonce: rand::thread_rng().gen::<[u8; 12]>(),
-                        tag: rand::thread_rng().gen::<[u8; 16]>(),
+                        nonce: rand::rng().random::<[u8; 12]>(),
+                        tag: rand::rng().random::<[u8; 16]>(),
                     }),
-                    hash: rand::thread_rng().gen::<u64>(),
+                    hash: rand::rng().random::<u64>(),
                 },
                 block: 0,
                 on_disk_hash: i,
@@ -1697,10 +1697,10 @@ mod test {
             inner.set_dirty_and_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: Some(EncryptionContext {
-                        nonce: rand::thread_rng().gen::<[u8; 12]>(),
-                        tag: rand::thread_rng().gen::<[u8; 16]>(),
+                        nonce: rand::rng().random::<[u8; 12]>(),
+                        tag: rand::rng().random::<[u8; 16]>(),
                     }),
-                    hash: rand::thread_rng().gen::<u64>(),
+                    hash: rand::rng().random::<u64>(),
                 },
                 block: 1,
                 on_disk_hash: i,
