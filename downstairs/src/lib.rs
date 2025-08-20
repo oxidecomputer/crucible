@@ -1617,6 +1617,10 @@ impl ActiveConnection {
     ) -> Message {
         let upstairs_connection = self.upstairs_connection;
 
+        if flags.lossy && random() && random() {
+            info!(self.log, "lossy pause {:?}", job_id);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         match &work {
             IOop::Read {
                 dependencies,
