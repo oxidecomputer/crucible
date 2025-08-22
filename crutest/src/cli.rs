@@ -350,7 +350,7 @@ async fn cli_write_unwritten(
         let mut data =
             BytesMut::with_capacity(di.volume_info.block_size as usize);
         data.extend(
-            (0..di.volume_info.block_size).map(|_| rand::rng().random::<u8>()),
+            (0..di.volume_info.block_size).map(|_| rand::random::<u8>()),
         );
         data
     };

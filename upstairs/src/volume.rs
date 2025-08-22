@@ -1942,7 +1942,6 @@ mod test {
 
     use base64::{engine, Engine};
     use fakedata_generator::gen_ipv4;
-    use rand::prelude::*;
     use slog::{o, Drain, Logger};
     use tempfile::tempdir;
 
@@ -3473,7 +3472,7 @@ mod test {
     // Return a generic set of CrucibleOpts
     fn generic_crucible_opts(vol_id: Uuid) -> CrucibleOpts {
         // Generate random data for our key
-        let key_bytes = rand::rng().random::<[u8; 32]>();
+        let key_bytes = rand::random::<[u8; 32]>();
         let key_string = engine::general_purpose::STANDARD.encode(key_bytes);
 
         let ds_ip = gen_ipv4();
@@ -4967,7 +4966,7 @@ mod test {
         let mut n_opts = o_opts.clone();
 
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-        let key_bytes = rand::rng().random::<[u8; 32]>();
+        let key_bytes = rand::random::<[u8; 32]>();
         let key_string = engine::general_purpose::STANDARD.encode(key_bytes);
         n_opts.key = Some(key_string);
 
