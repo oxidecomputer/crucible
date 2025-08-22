@@ -17,7 +17,6 @@ mod integration_tests {
     use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
     use httptest::{matchers::*, responders::*, Expectation, Server};
-    use rand::Rng;
     use repair_client::Client;
     use sha2::Digest;
     use slog::{info, o, warn, Drain, Logger};
@@ -614,7 +613,7 @@ mod integration_tests {
             .await?;
 
             // Generate random data for our key
-            let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
+            let key_bytes = rand::random::<[u8; 32]>();
             let key_string =
                 engine::general_purpose::STANDARD.encode(key_bytes);
 
@@ -815,7 +814,7 @@ mod integration_tests {
 
         for i in 0..10 {
             let mut data = vec![0; BLOCK_SIZE * NUM_BLOCKS];
-            rand::thread_rng().fill(&mut data[..]);
+            rand::fill(&mut data[..]);
             volume
                 .write(BlockIndex(i), BytesMut::from(data.as_slice()))
                 .await?;
@@ -2492,7 +2491,7 @@ mod integration_tests {
         let random_buffer = {
             let mut random_buffer =
                 vec![0u8; volume.total_size().await? as usize];
-            rand::thread_rng().fill(&mut random_buffer[..]);
+            rand::fill(&mut random_buffer[..]);
             random_buffer
         };
 
@@ -2656,7 +2655,7 @@ mod integration_tests {
         let random_buffer = {
             let mut random_buffer =
                 vec![0u8; volume.total_size().await? as usize];
-            rand::thread_rng().fill(&mut random_buffer[..]);
+            rand::fill(&mut random_buffer[..]);
             random_buffer
         };
 
@@ -2833,7 +2832,7 @@ mod integration_tests {
         let random_buffer = {
             let mut random_buffer =
                 vec![0u8; volume.total_size().await? as usize];
-            rand::thread_rng().fill(&mut random_buffer[..]);
+            rand::fill(&mut random_buffer[..]);
             random_buffer
         };
 
@@ -2928,7 +2927,7 @@ mod integration_tests {
         let random_buffer = {
             let mut random_buffer =
                 vec![0u8; volume.total_size().await? as usize];
-            rand::thread_rng().fill(&mut random_buffer[..]);
+            rand::fill(&mut random_buffer[..]);
             random_buffer
         };
 
@@ -3088,7 +3087,7 @@ mod integration_tests {
         let random_buffer = {
             let mut random_buffer =
                 vec![0u8; volume.total_size().await? as usize];
-            rand::thread_rng().fill(&mut random_buffer[..]);
+            rand::fill(&mut random_buffer[..]);
             random_buffer
         };
 
@@ -3406,7 +3405,7 @@ mod integration_tests {
         let random_buffer = {
             let mut random_buffer =
                 vec![0u8; volume.total_size().await? as usize];
-            rand::thread_rng().fill(&mut random_buffer[..]);
+            rand::fill(&mut random_buffer[..]);
             random_buffer
         };
 
@@ -3498,7 +3497,7 @@ mod integration_tests {
         let random_buffer = {
             let mut random_buffer =
                 vec![0u8; volume.total_size().await? as usize];
-            rand::thread_rng().fill(&mut random_buffer[..]);
+            rand::fill(&mut random_buffer[..]);
             random_buffer
         };
 
@@ -3827,7 +3826,7 @@ mod integration_tests {
         let random_buffer = {
             let mut random_buffer =
                 vec![0u8; volume.total_size().await? as usize];
-            rand::thread_rng().fill(&mut random_buffer[..]);
+            rand::fill(&mut random_buffer[..]);
             random_buffer
         };
 
@@ -3952,7 +3951,7 @@ mod integration_tests {
                         i / 512, // block offset!
                         {
                             let mut random_buffer = vec![0u8; CHUNK_SIZE];
-                            rand::thread_rng().fill(&mut random_buffer[..]);
+                            rand::fill(&mut random_buffer[..]);
                             random_buffer
                         },
                     )
@@ -5647,7 +5646,7 @@ mod integration_tests {
 
         for i in 0..(total_size / CHUNK_SIZE) {
             let mut data = vec![0u8; CHUNK_SIZE];
-            rand::thread_rng().fill(&mut data[..]);
+            rand::fill(&mut data[..]);
             let base64_encoded_data =
                 engine::general_purpose::STANDARD.encode(&data);
 
@@ -5777,7 +5776,7 @@ mod integration_tests {
 
         for i in 0..(total_size / CHUNK_SIZE) {
             let mut data = vec![0u8; CHUNK_SIZE];
-            rand::thread_rng().fill(&mut data[..]);
+            rand::fill(&mut data[..]);
             let base64_encoded_data =
                 engine::general_purpose::STANDARD.encode(&data);
 

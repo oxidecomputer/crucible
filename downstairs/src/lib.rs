@@ -1469,7 +1469,7 @@ impl ActiveConnection {
             .get_next(&mut stop_at)
             .or_else(|| retry.pop_front())
         {
-            if flags.lossy && random() && random() {
+            if flags.lossy && rand::random_bool(0.25) {
                 // Skip a job that needs to be done, moving it to the back of
                 // the list.  This exercises job dependency tracking in the face
                 // of arbitrary reordering.
@@ -1617,7 +1617,7 @@ impl ActiveConnection {
     ) -> Message {
         let upstairs_connection = self.upstairs_connection;
 
-        if flags.lossy && random() && random() {
+        if flags.lossy && rand::random_bool(0.25) {
             info!(self.log, "lossy pause {:?}", job_id);
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -1630,7 +1630,7 @@ impl ActiveConnection {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let response = if flags.read_errors && random() && random() {
+                let response = if flags.read_errors && rand::random_bool(0.25) {
                     warn!(self.log, "returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else {
@@ -1665,7 +1665,7 @@ impl ActiveConnection {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let result = if flags.write_errors && random() && random() {
+                let result = if flags.write_errors && rand::random_bool(0.25) {
                     warn!(self.log, "returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else {
@@ -1685,7 +1685,7 @@ impl ActiveConnection {
                 writes,
                 dependencies,
             } => {
-                let result = if flags.write_errors && random() && random() {
+                let result = if flags.write_errors && rand::random_bool(0.25) {
                     warn!(self.log, "returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else {
@@ -1713,7 +1713,7 @@ impl ActiveConnection {
                 snapshot_details,
                 extent_limit,
             } => {
-                let result = if flags.flush_errors && random() && random() {
+                let result = if flags.flush_errors && rand::random_bool(0.25) {
                     warn!(self.log, "returning error on flush!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else {
@@ -5249,7 +5249,7 @@ mod test {
         let mut random_data = vec![0; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0);
 
-        let mut rng = ChaCha20Rng::from_entropy();
+        let mut rng = ChaCha20Rng::from_os_rng();
         rng.fill_bytes(&mut random_data);
 
         // write random_data to file
@@ -5317,7 +5317,7 @@ mod test {
         let mut random_data = vec![0; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0);
 
-        let mut rng = ChaCha20Rng::from_entropy();
+        let mut rng = ChaCha20Rng::from_os_rng();
         rng.fill_bytes(&mut random_data);
 
         // write random_data to file
@@ -5399,7 +5399,7 @@ mod test {
         let mut random_data = vec![0; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0);
 
-        let mut rng = ChaCha20Rng::from_entropy();
+        let mut rng = ChaCha20Rng::from_os_rng();
         rng.fill_bytes(&mut random_data);
 
         // write random_data to file
@@ -5482,7 +5482,7 @@ mod test {
         let mut random_data = vec![0u8; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0u8);
 
-        let mut rng = ChaCha20Rng::from_entropy();
+        let mut rng = ChaCha20Rng::from_os_rng();
         rng.fill_bytes(&mut random_data);
 
         // write random_data to file

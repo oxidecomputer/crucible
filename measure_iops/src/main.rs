@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
 
     guest.activate().await?;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let bsz: u64 = guest.get_block_size().await?;
     let total_blocks: u64 = guest.total_size().await? / bsz;
@@ -122,9 +122,9 @@ async fn main() -> Result<()> {
         let mut ops = Vec::with_capacity(io_depth);
         for _ in 0..io_depth {
             let offset: u64 =
-                rng.gen::<u64>() % (total_blocks - io_size as u64 / bsz);
+                rng.random::<u64>() % (total_blocks - io_size as u64 / bsz);
 
-            if rng.gen::<bool>() {
+            if rng.random::<bool>() {
                 ops.push(RandomOp::Read(
                     offset,
                     Buffer::new(io_size / bsz as usize, bsz as usize),
@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
                     bytes.resize(io_size, 0);
                 } else {
                     bytes.extend((0..io_size).map(|_| -> u8 {
-                        rng.sample(rand::distributions::Standard)
+                        rng.sample(rand::distr::StandardUniform)
                     }));
                 }
                 ops.push(RandomOp::Write(offset, bytes));

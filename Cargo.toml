@@ -76,8 +76,8 @@ progenitor = "0.10.0"
 progenitor-client = "0.10.0"
 proptest = "1.6.0"
 rayon = "1.10.0"
-rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
-rand_chacha = "0.3.1"
+rand = { version = "0.9.1", features = [ "small_rng"] }
+rand_chacha = "0.9.0"
 reedline = "0.39.0"
 rangemap = "1.5.1"
 reqwest = { version = "0.12", features = ["default", "blocking", "json", "stream"] }

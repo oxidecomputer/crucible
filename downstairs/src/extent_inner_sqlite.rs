@@ -1289,7 +1289,6 @@ mod test {
     use super::*;
     use bytes::{Bytes, BytesMut};
     use crucible_common::BlockOffset;
-    use rand::Rng;
     use rand::RngCore;
     use tempfile::tempdir;
 
@@ -1349,8 +1348,8 @@ mod test {
 
         // Set and verify a new context for block 0
 
-        let blob1 = rand::thread_rng().gen::<[u8; 12]>();
-        let blob2 = rand::thread_rng().gen::<[u8; 16]>();
+        let blob1 = rand::random::<[u8; 12]>();
+        let blob2 = rand::random::<[u8; 16]>();
 
         // Set and verify block 0's context
         inner.set_dirty_and_block_context(&DownstairsBlockContext {
@@ -1553,10 +1552,10 @@ mod test {
             inner.set_dirty_and_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: Some(EncryptionContext {
-                        nonce: rand::thread_rng().gen::<[u8; 12]>(),
-                        tag: rand::thread_rng().gen::<[u8; 16]>(),
+                        nonce: rand::random::<[u8; 12]>(),
+                        tag: rand::random::<[u8; 16]>(),
                     }),
-                    hash: rand::thread_rng().gen::<u64>(),
+                    hash: rand::random::<u64>(),
                 },
                 block: 0,
                 on_disk_hash: i,
@@ -1564,10 +1563,10 @@ mod test {
             inner.set_dirty_and_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: Some(EncryptionContext {
-                        nonce: rand::thread_rng().gen::<[u8; 12]>(),
-                        tag: rand::thread_rng().gen::<[u8; 16]>(),
+                        nonce: rand::random::<[u8; 12]>(),
+                        tag: rand::random::<[u8; 16]>(),
                     }),
-                    hash: rand::thread_rng().gen::<u64>(),
+                    hash: rand::random::<u64>(),
                 },
                 block: 1,
                 on_disk_hash: i,
@@ -1762,7 +1761,7 @@ mod test {
         .unwrap();
 
         let mut data = BytesMut::from(&vec![0u8; 512 * 2] as &[u8]);
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         rng.fill_bytes(&mut data);
         let data = data.freeze();
 

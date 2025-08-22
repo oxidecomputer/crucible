@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
     }
 
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let rounds = 1500;
     let handoff_amount = rounds / opt.num_upstairs;
@@ -184,18 +184,18 @@ async fn main() -> Result<()> {
 
         let sz = cpf.sz();
 
-        let mut offset: u64 = rng.gen::<u64>() % sz;
-        let mut bsz: usize = rng.gen::<usize>() % 4096;
+        let mut offset: u64 = rng.random::<u64>() % sz;
+        let mut bsz: usize = rng.random_range(0..4096);
 
         while ((offset + bsz as u64) > sz) || (bsz == 0) {
-            offset = rng.gen::<u64>() % sz;
-            bsz = rng.gen::<usize>() % 4096;
+            offset = rng.random::<u64>() % sz;
+            bsz = rng.random_range(0..4096);
         }
 
         // println!("testing {}: offset {} sz {}", idx, offset, bsz);
 
         let vec: Vec<u8> = (0..bsz)
-            .map(|_| rng.sample(rand::distributions::Standard))
+            .map(|_| rng.sample(rand::distr::StandardUniform))
             .collect();
 
         let mut vec2 = vec![0; bsz];

@@ -489,7 +489,7 @@ mod test {
         // Build a write which only writes the first 4 blocks
         let mut data = BytesMut::new();
         data.resize(10 * 512, 0u8);
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         rng.fill_bytes(&mut data);
 
         let blocks: Vec<_> = (0..10)
@@ -557,7 +557,7 @@ mod test {
         // Build a write which only writes the first 4 blocks
         let mut data = BytesMut::new();
         data.resize(10 * 512, 0u8);
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         rng.fill_bytes(&mut data);
 
         let blocks: Vec<_> = (0..10)
