@@ -1065,11 +1065,15 @@ name = "crucible-downstairs"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bincode",
  "bytes",
  "chrono",
  "clap",
  "crucible-common",
+ "crucible-downstairs-admin-api",
+ "crucible-downstairs-repair-api",
+ "crucible-downstairs-types",
  "crucible-protocol",
  "crucible-workspace-hack",
  "dropshot",
@@ -1121,6 +1125,42 @@ dependencies = [
  "usdt",
  "uuid",
  "version_check",
+]
+
+[[package]]
+name = "crucible-downstairs-admin-api"
+version = "0.1.0"
+dependencies = [
+ "crucible-downstairs-types",
+ "crucible-workspace-hack",
+ "dropshot",
+ "schemars",
+ "serde",
+ "uuid",
+]
+
+[[package]]
+name = "crucible-downstairs-repair-api"
+version = "0.1.0"
+dependencies = [
+ "crucible-common",
+ "crucible-downstairs-types",
+ "crucible-workspace-hack",
+ "dropshot",
+ "hyper",
+ "schemars",
+ "serde",
+]
+
+[[package]]
+name = "crucible-downstairs-types"
+version = "0.1.0"
+dependencies = [
+ "crucible-common",
+ "crucible-workspace-hack",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

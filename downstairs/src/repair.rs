@@ -2,19 +2,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dropshot::ApiDescription;
-use dropshot::Body;
-use dropshot::ConfigDropshot;
-use dropshot::HandlerTaskMode;
-use dropshot::HttpError;
-use dropshot::HttpResponseOk;
-use dropshot::HttpServerStarter;
-use dropshot::RequestContext;
-use dropshot::{endpoint, Path};
+use crucible_downstairs_repair_api::*;
+use crucible_downstairs_types::FileType;
+use dropshot::{
+    Body, ConfigDropshot, HandlerTaskMode, HttpError, HttpResponseOk,
+    HttpServerStarter, Path, RequestContext,
+};
 use hyper::{Response, StatusCode};
-use schemars::JsonSchema;
 use semver::Version;
-use serde::Deserialize;
 
 use super::*;
 use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
@@ -30,22 +25,10 @@ pub struct FileServerContext {
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
-    let api = build_api();
+    let api = crucible_downstairs_repair_api_mod::stub_api_description()?;
     api.openapi("Downstairs Repair", Version::new(0, 0, 1))
         .write(f)?;
     Ok(())
-}
-
-fn build_api() -> ApiDescription<Arc<FileServerContext>> {
-    let mut api = ApiDescription::new();
-    api.register(get_extent_file).unwrap();
-    api.register(get_files_for_extent).unwrap();
-    api.register(get_region_info).unwrap();
-    api.register(get_region_mode).unwrap();
-    api.register(extent_repair_ready).unwrap();
-    api.register(get_work).unwrap();
-
-    api
 }
 
 /// Returns Ok(listen address) if everything launched ok, Err otherwise
@@ -67,7 +50,10 @@ pub fn repair_main(
     /*
      * Build a description of the API
      */
-    let api = build_api();
+    let api = crucible_downstairs_repair_api_mod::api_description::<
+        CrucibleDownstairsRepairImpl,
+    >()
+    .unwrap();
 
     /*
      * Record the region directory where all the extents and metadata
@@ -103,58 +89,120 @@ pub fn repair_main(
     Ok((h, local_addr))
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Eid {
-    eid: u32,
-}
+/// Implementation of the Crucible Downstairs Repair API.
+pub struct CrucibleDownstairsRepairImpl;
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub enum FileType {
-    #[serde(rename = "data")]
-    Data,
-    #[serde(rename = "db")]
-    Database,
-    #[serde(rename = "db_shm")]
-    DatabaseSharedMemory,
-    #[serde(rename = "db_wal")]
-    DatabaseLog,
-}
+impl CrucibleDownstairsRepairApi for CrucibleDownstairsRepairImpl {
+    type Context = Arc<FileServerContext>;
 
-#[derive(Deserialize, JsonSchema)]
-pub struct FileSpec {
-    eid: u32,
-    file_type: FileType,
-}
+    async fn get_extent_file(
+        rqctx: RequestContext<Self::Context>,
+        path: Path<ExtentFilePath>,
+    ) -> Result<Response<Body>, HttpError> {
+        let fs = path.into_inner();
+        let eid = ExtentId(fs.eid);
 
-#[endpoint {
-    method = GET,
-    path = "/newextent/{eid}/{file_type}",
-}]
-async fn get_extent_file(
-    rqctx: RequestContext<Arc<FileServerContext>>,
-    path: Path<FileSpec>,
-) -> Result<Response<Body>, HttpError> {
-    let fs = path.into_inner();
-    let eid = ExtentId(fs.eid);
+        let mut extent_path =
+            extent_path(rqctx.context().region_dir.clone(), eid);
+        match fs.file_type {
+            FileType::Database => {
+                extent_path.set_extension("db");
+            }
+            FileType::DatabaseSharedMemory => {
+                extent_path.set_extension("db-shm");
+            }
+            FileType::DatabaseLog => {
+                extent_path.set_extension("db-wal");
+            }
+            // No file extension
+            FileType::Data => (),
+        };
 
-    let mut extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
-    match fs.file_type {
-        FileType::Database => {
-            extent_path.set_extension("db");
+        get_a_file(extent_path).await
+    }
+
+    /// Return true if the provided extent is closed or the region is read only.
+    async fn extent_repair_ready(
+        rqctx: RequestContext<Self::Context>,
+        path: Path<ExtentPath>,
+    ) -> Result<HttpResponseOk<bool>, HttpError> {
+        let eid: usize = path.into_inner().eid as usize;
+        let downstairs = &rqctx.context().downstairs;
+
+        // If the region is read only, the extent is always ready.
+        if rqctx.context().read_only {
+            return Ok(HttpResponseOk(true));
         }
-        FileType::DatabaseSharedMemory => {
-            extent_path.set_extension("db-shm");
-        }
-        FileType::DatabaseLog => {
-            extent_path.set_extension("db-wal");
-        }
-        // No file extension
-        FileType::Data => (),
-    };
 
-    get_a_file(extent_path).await
+        downstairs
+            .is_extent_closed(ExtentId(eid as u32))
+            .await
+            .map(HttpResponseOk)
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))
+    }
+
+    /// Get the list of files related to an extent.
+    ///
+    /// For a given extent, return a vec of strings representing the names of
+    /// the files that exist for that extent.
+    async fn get_files_for_extent(
+        rqctx: RequestContext<Self::Context>,
+        path: Path<ExtentPath>,
+    ) -> Result<HttpResponseOk<Vec<String>>, HttpError> {
+        let eid = ExtentId(path.into_inner().eid);
+        let extent_dir = extent_dir(rqctx.context().region_dir.clone(), eid);
+
+        // Some sanity checking on the extent path
+        let m = extent_dir.symlink_metadata().map_err(|e| {
+            HttpError::for_bad_request(
+                None,
+                format!("Failed to get {:?} metadata: {:#}", extent_dir, e),
+            )
+        })?;
+        if m.file_type().is_symlink() {
+            Err(HttpError::for_bad_request(
+                None,
+                format!("File {:?} is a symlink", extent_dir),
+            ))
+        } else if !extent_dir.is_dir() {
+            Err(HttpError::for_bad_request(
+                None,
+                format!("Expected {:?} to be a directory", extent_dir),
+            ))
+        } else {
+            let files = extent_file_list(extent_dir, eid)?;
+            Ok(HttpResponseOk(files))
+        }
+    }
+    /// Return the RegionDefinition describing our region.
+    async fn get_region_info(
+        rqctx: RequestContext<Self::Context>,
+    ) -> Result<HttpResponseOk<crucible_common::RegionDefinition>, HttpError>
+    {
+        let region_definition = rqctx.context().region_definition;
+
+        Ok(HttpResponseOk(region_definition))
+    }
+
+    /// Return the region-mode describing our region.
+    async fn get_region_mode(
+        rqctx: RequestContext<Self::Context>,
+    ) -> Result<HttpResponseOk<bool>, HttpError> {
+        let read_only = rqctx.context().read_only;
+
+        Ok(HttpResponseOk(read_only))
+    }
+
+    /// Get work queue information.
+    async fn get_work(
+        rqctx: RequestContext<Self::Context>,
+    ) -> Result<HttpResponseOk<bool>, HttpError> {
+        let downstairs = &rqctx.context().downstairs;
+        downstairs
+            .show_work()
+            .map(|_| HttpResponseOk(true))
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))
+    }
 }
 
 async fn get_a_file(
@@ -201,70 +249,6 @@ async fn get_a_file(
     }
 }
 
-/// Return true if the provided extent is closed or the region is read only
-#[endpoint {
-    method = GET,
-    path = "/extent/{eid}/repair-ready",
-}]
-async fn extent_repair_ready(
-    rqctx: RequestContext<Arc<FileServerContext>>,
-    path: Path<Eid>,
-) -> Result<HttpResponseOk<bool>, HttpError> {
-    let eid: usize = path.into_inner().eid as usize;
-    let downstairs = &rqctx.context().downstairs;
-
-    // If the region is read only, the extent is always ready.
-    if rqctx.context().read_only {
-        return Ok(HttpResponseOk(true));
-    }
-
-    downstairs
-        .is_extent_closed(ExtentId(eid as u32))
-        .await
-        .map(HttpResponseOk)
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))
-}
-
-/**
- * Get the list of files related to an extent.
- *
- * For a given extent, return a vec of strings representing the names of
- * the files that exist for that extent.
- */
-#[endpoint {
-    method = GET,
-    path = "/extent/{eid}/files",
-}]
-async fn get_files_for_extent(
-    rqctx: RequestContext<Arc<FileServerContext>>,
-    path: Path<Eid>,
-) -> Result<HttpResponseOk<Vec<String>>, HttpError> {
-    let eid = ExtentId(path.into_inner().eid);
-    let extent_dir = extent_dir(rqctx.context().region_dir.clone(), eid);
-
-    // Some sanity checking on the extent path
-    let m = extent_dir.symlink_metadata().map_err(|e| {
-        HttpError::for_bad_request(
-            None,
-            format!("Failed to get {:?} metadata: {:#}", extent_dir, e),
-        )
-    })?;
-    if m.file_type().is_symlink() {
-        Err(HttpError::for_bad_request(
-            None,
-            format!("File {:?} is a symlink", extent_dir),
-        ))
-    } else if !extent_dir.is_dir() {
-        Err(HttpError::for_bad_request(
-            None,
-            format!("Expected {:?} to be a directory", extent_dir),
-        ))
-    } else {
-        let files = extent_file_list(extent_dir, eid)?;
-        Ok(HttpResponseOk(files))
-    }
-}
-
 /**
  * Return the list of extent files we have in our region directory
  * that correspond to the given extent.  Return an error if any
@@ -294,46 +278,6 @@ fn extent_file_list(
     }
 
     Ok(files)
-}
-/// Return the RegionDefinition describing our region.
-#[endpoint {
-    method = GET,
-    path = "/region-info",
-}]
-async fn get_region_info(
-    rqctx: RequestContext<Arc<FileServerContext>>,
-) -> Result<HttpResponseOk<crucible_common::RegionDefinition>, HttpError> {
-    let region_definition = rqctx.context().region_definition;
-
-    Ok(HttpResponseOk(region_definition))
-}
-
-/// Return the region-mode describing our region.
-#[endpoint {
-    method = GET,
-    path = "/region-mode",
-}]
-async fn get_region_mode(
-    rqctx: RequestContext<Arc<FileServerContext>>,
-) -> Result<HttpResponseOk<bool>, HttpError> {
-    let read_only = rqctx.context().read_only;
-
-    Ok(HttpResponseOk(read_only))
-}
-
-/// Work queue
-#[endpoint {
-    method = GET,
-    path = "/work",
-}]
-async fn get_work(
-    rqctx: RequestContext<Arc<FileServerContext>>,
-) -> Result<HttpResponseOk<bool>, HttpError> {
-    let downstairs = &rqctx.context().downstairs;
-    downstairs
-        .show_work()
-        .map(|_| HttpResponseOk(true))
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))
 }
 
 #[cfg(test)]
