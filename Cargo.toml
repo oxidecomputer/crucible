@@ -17,7 +17,9 @@ members = [
     "nbd_server",
     "package",
     "pantry",
+    "pantry-api",
     "pantry-client",
+    "pantry-types",
     "protocol",
     "repair-client",
     "smf",
@@ -133,6 +135,8 @@ crucible-client-types = { path = "./crucible-client-types" }
 crucible-agent-client = { path = "./agent-client" }
 crucible-common = { path = "./common" }
 crucible-control-client = { path = "./control-client" }
+crucible-pantry-api = { path = "./pantry-api" }
+crucible-pantry-types = { path = "./pantry-types" }
 # importantly, don't use features = ["zfs_snapshot"] here, this will cause
 # cleanup issues in the integration tests!
 crucible-downstairs = { path = "./downstairs" }

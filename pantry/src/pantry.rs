@@ -27,10 +27,7 @@ use crucible::Volume;
 use crucible::VolumeConstructionRequest;
 use crucible_common::crucible_bail;
 use crucible_common::CrucibleError;
-
-use crate::server::ExpectedDigest;
-use crate::server::PantryStatus;
-use crate::server::VolumeStatus;
+use crucible_pantry_types::{ExpectedDigest, PantryStatus, VolumeStatus};
 
 pub enum ActiveObservation {
     /// This Pantry has never seen this Volume active
