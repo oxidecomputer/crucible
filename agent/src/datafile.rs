@@ -1,7 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 
+use super::model::*;
 use anyhow::{anyhow, bail, Result};
-use crucible_agent_types::region::*;
 use crucible_common::write_json;
 use serde::{Deserialize, Serialize};
 use slog::{crit, error, info, Logger};

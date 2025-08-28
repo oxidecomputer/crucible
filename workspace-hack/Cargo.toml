@@ -30,7 +30,6 @@ futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
-getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hashbrown = { version = "0.15" }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -82,7 +81,6 @@ futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
-getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hashbrown = { version = "0.15" }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -122,6 +120,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 [target.x86_64-unknown-linux-gnu.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
 dof = { version = "0.3", default-features = false, features = ["des"] }
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -135,6 +134,7 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
 dof = { version = "0.3", default-features = false, features = ["des"] }
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -146,6 +146,7 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.aarch64-apple-darwin.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -157,6 +158,7 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -168,6 +170,7 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 [target.x86_64-unknown-illumos.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
 dof = { version = "0.3", default-features = false, features = ["des"] }
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -181,6 +184,7 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 [target.x86_64-unknown-illumos.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
 dof = { version = "0.3", default-features = false, features = ["des"] }
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }

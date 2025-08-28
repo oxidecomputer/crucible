@@ -1,4 +1,4 @@
-// Copyright 2025 Oxide Computer Company
+// Copyright 2021 Oxide Computer Company
 
 use std::net::SocketAddr;
 use std::path::Path;
