@@ -298,6 +298,33 @@
           }
         }
       }
+    },
+    "/crucible/0/work": {
+      "get": {
+        "operationId": "region_get_work_queue",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Array_of_JobInfo",
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/JobInfo"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -390,6 +417,22 @@
         "required": [
           "running_snapshots",
           "snapshots"
+        ]
+      },
+      "JobInfo": {
+        "type": "object",
+        "properties": {
+          "region_id": {
+            "$ref": "#/components/schemas/RegionId"
+          },
+          "request_time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "region_id",
+          "request_time"
         ]
       },
       "Region": {
