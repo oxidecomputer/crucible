@@ -1,0 +1,15 @@
+[package]
+name = "crucible-downstairs-types"
+version = "0.1.0"
+license = "MPL-2.0"
+edition = "2021"
+rust-version = "1.81"
+
+[dependencies]
+crucible-common.workspace = true
+crucible-workspace-hack.workspace = true
+schemars.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

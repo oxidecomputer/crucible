@@ -48,7 +48,7 @@
     },
     "/extent/{eid}/repair-ready": {
       "get": {
-        "summary": "Return true if the provided extent is closed or the region is read only",
+        "summary": "Return true if the provided extent is closed or the region is read only.",
         "operationId": "extent_repair_ready",
         "parameters": [
           {
@@ -85,6 +85,7 @@
     },
     "/newextent/{eid}/{file_type}": {
       "get": {
+        "summary": "Get a specific extent file (data, database, or log files).",
         "operationId": "get_extent_file",
         "parameters": [
           {

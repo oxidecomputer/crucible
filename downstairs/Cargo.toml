@@ -8,11 +8,14 @@ rust-version = "1.81"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 bincode.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crucible-common.workspace = true
+crucible-downstairs-api.workspace = true
+crucible-downstairs-types.workspace = true
 crucible-protocol.workspace = true
 dropshot.workspace = true
 futures-core.workspace = true
