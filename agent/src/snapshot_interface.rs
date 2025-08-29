@@ -1,7 +1,7 @@
 // Copyright 2023 Oxide Computer Company
 
-use super::model::*;
 use anyhow::{bail, Result};
+use crucible_agent_types::snapshot::Snapshot;
 use slog::{error, info, Logger};
 #[cfg(test)]
 use std::collections::HashSet;

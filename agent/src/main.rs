@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
+use crucible_agent_types::smf::SmfProperty;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
 use semver::Version;
 use slog::{debug, error, info, o, Logger};
@@ -40,14 +41,15 @@ const RESERVATION_FACTOR: f64 = 1.25;
 const QUOTA_FACTOR: u64 = 3;
 
 mod datafile;
-mod model;
+mod resource;
 mod server;
 mod smf_interface;
 mod snapshot_interface;
 
-use model::Resource;
-use model::State;
+use crucible_agent_types::region::{self, State};
 use smf_interface::*;
+
+use crate::resource::Resource;
 
 #[derive(Debug, Parser)]
 #[clap(name = PROG, about = "Crucible zone management agent")]
@@ -343,7 +345,9 @@ async fn main() -> Result<()> {
 }
 
 fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
-    let api = server::make_api()?;
+    // TODO: Switch to OpenAPI manager once available
+    let api =
+        crucible_agent_api::crucible_agent_api_mod::stub_api_description()?;
     api.openapi("Crucible Agent", Version::new(0, 0, 1))
         .write(f)?;
     Ok(())
@@ -511,7 +515,7 @@ where
             // crucible zone that both processes must share and that address is
             // what will be used by other zones. In the future this could be a
             // parameter that comes along with the region POST parameters.
-            properties.push(crate::model::SmfProperty {
+            properties.push(SmfProperty {
                 name: "address",
                 typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
                 val: df.get_listen_addr().ip().to_string(),
@@ -520,7 +524,7 @@ where
             // If the region has a source, then it was created as a clone and
             // must be started read only.
             if r.source.is_some() {
-                properties.push(crate::model::SmfProperty {
+                properties.push(SmfProperty {
                     name: "mode",
                     typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
                     val: "ro".to_string(),
@@ -686,7 +690,7 @@ where
                 // is what will be used by other zones. In the future this could
                 // be a parameter that comes along with the region POST
                 // parameters.
-                properties.push(crate::model::SmfProperty {
+                properties.push(SmfProperty {
                     name: "address",
                     typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
                     val: df.get_listen_addr().ip().to_string(),
@@ -823,10 +827,10 @@ where
 mod test {
     use super::*;
 
-    use crate::model::*;
     use crate::snapshot_interface::SnapshotInterface;
     use crate::snapshot_interface::TestSnapshotInterface;
 
+    use crucible_agent_types::{region::*, snapshot::*};
     use slog::{o, Drain, Logger};
     use std::collections::BTreeMap;
     use tempfile::*;
@@ -1867,7 +1871,7 @@ fn worker(
 fn worker_region_create(
     log: &Logger,
     prog: &Path,
-    region: &model::Region,
+    region: &region::Region,
     dir: &Path,
 ) -> Result<()> {
     let log = log.new(o!("region" => region.id.0.to_string()));
@@ -1961,7 +1965,7 @@ fn worker_region_create(
 
 fn worker_region_destroy(
     log: &Logger,
-    region: &model::Region,
+    region: &region::Region,
     region_dataset: ZFSDataset,
 ) -> Result<()> {
     let log = log.new(o!("region" => region.id.0.to_string()));
