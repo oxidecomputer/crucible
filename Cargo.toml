@@ -17,7 +17,9 @@ members = [
     "nbd_server",
     "package",
     "pantry",
+    "pantry-api",
     "pantry-client",
+    "pantry-types",
     "protocol",
     "repair-client",
     "smf",
@@ -137,7 +139,9 @@ crucible-control-client = { path = "./control-client" }
 # cleanup issues in the integration tests!
 crucible-downstairs = { path = "./downstairs" }
 crucible-pantry = { path = "./pantry" }
+crucible-pantry-api = { path = "./pantry-api" }
 crucible-pantry-client = { path = "./pantry-client" }
+crucible-pantry-types = { path = "./pantry-types" }
 crucible-protocol = { path = "./protocol" }
 crucible-smf = { path = "./smf" }
 dsc-client = { path = "./dsc-client" }
