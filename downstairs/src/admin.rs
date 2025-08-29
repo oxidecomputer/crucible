@@ -1,7 +1,7 @@
 // Copyright 2022 Oxide Computer Company
 use super::*;
 
-use crucible_downstairs_admin_api::*;
+use crucible_downstairs_api::*;
 use crucible_downstairs_types::RunDownstairsForRegionParams;
 use dropshot::{
     ConfigDropshot, HttpError, HttpResponseCreated, HttpServerStarter, Path,

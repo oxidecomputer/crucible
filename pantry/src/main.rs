@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use crucible_pantry_api::crucible_pantry_api_mod;
 use semver::Version;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -46,7 +47,8 @@ async fn main() -> Result<()> {
 }
 
 fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
-    let api = server::make_api().map_err(|e| anyhow!(e))?;
+    // TODO: Switch to OpenAPI manager once available.
+    let api = crucible_pantry_api_mod::stub_api_description()?;
     api.openapi("Crucible Pantry", Version::new(0, 0, 1))
         .write(f)?;
     Ok(())

@@ -1,5 +1,5 @@
 [package]
-name = "crucible-downstairs-repair-api"
+name = "crucible-downstairs-api"
 version = "0.1.0"
 license = "MPL-2.0"
 edition = "2021"
@@ -13,3 +13,4 @@ dropshot.workspace = true
 hyper.workspace = true
 schemars.workspace = true
 serde.workspace = true
+uuid.workspace = true

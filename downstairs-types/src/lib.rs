@@ -6,13 +6,6 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-// Repair API types
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Eid {
-    pub eid: u32,
-}
-
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum FileType {

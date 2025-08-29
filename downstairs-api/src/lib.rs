@@ -1,11 +1,34 @@
 // Copyright 2025 Oxide Computer Company
 
+//! API traits for Crucible downstairs operations.
+
 use crucible_common::RegionDefinition;
-use crucible_downstairs_types::FileType;
-use dropshot::{Body, HttpError, HttpResponseOk, Path, RequestContext};
+use crucible_downstairs_types::{FileType, RunDownstairsForRegionParams};
+use dropshot::{
+    Body, HttpError, HttpResponseCreated, HttpResponseOk, Path, RequestContext,
+    TypedBody,
+};
 use hyper::Response;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// API trait for the downstairs admin server.
+#[dropshot::api_description]
+pub trait CrucibleDownstairsAdminApi {
+    type Context;
+
+    /// Start a downstairs instance for a specific region.
+    #[endpoint {
+        method = POST,
+        path = "/regions/{uuid}/downstairs"
+    }]
+    async fn run_downstairs_for_region(
+        rqctx: RequestContext<Self::Context>,
+        path_param: Path<RunDownstairsForRegionPath>,
+        run_params: TypedBody<RunDownstairsForRegionParams>,
+    ) -> Result<HttpResponseCreated<DownstairsRunningResponse>, HttpError>;
+}
 
 /// API trait for the downstairs repair server.
 #[dropshot::api_description]
@@ -73,6 +96,18 @@ pub trait CrucibleDownstairsRepairApi {
     ) -> Result<HttpResponseOk<bool>, HttpError>;
 }
 
+// Admin API types
+#[derive(Deserialize, JsonSchema)]
+pub struct RunDownstairsForRegionPath {
+    pub uuid: Uuid,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct DownstairsRunningResponse {
+    pub uuid: Uuid,
+}
+
+// Repair API types
 #[derive(Deserialize, JsonSchema)]
 pub struct ExtentPath {
     pub eid: u32,

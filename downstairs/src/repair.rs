@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crucible_downstairs_repair_api::*;
+use crucible_downstairs_api::*;
 use crucible_downstairs_types::FileType;
 use dropshot::{
     Body, ConfigDropshot, HandlerTaskMode, HttpError, HttpResponseOk,

@@ -9,8 +9,7 @@ members = [
     "crudd",
     "crutest",
     "downstairs",
-    "downstairs-admin-api",
-    "downstairs-repair-api",
+    "downstairs-api",
     "downstairs-types",
     "dsc",
     "dsc-client",
@@ -20,7 +19,9 @@ members = [
     "nbd_server",
     "package",
     "pantry",
+    "pantry-api",
     "pantry-client",
+    "pantry-types",
     "protocol",
     "repair-client",
     "smf",
@@ -139,11 +140,12 @@ crucible-control-client = { path = "./control-client" }
 # importantly, don't use features = ["zfs_snapshot"] here, this will cause
 # cleanup issues in the integration tests!
 crucible-downstairs = { path = "./downstairs" }
-crucible-downstairs-admin-api = { path = "./downstairs-admin-api" }
-crucible-downstairs-repair-api = { path = "./downstairs-repair-api" }
+crucible-downstairs-api = { path = "./downstairs-api" }
 crucible-downstairs-types = { path = "./downstairs-types" }
 crucible-pantry = { path = "./pantry" }
+crucible-pantry-api = { path = "./pantry-api" }
 crucible-pantry-client = { path = "./pantry-client" }
+crucible-pantry-types = { path = "./pantry-types" }
 crucible-protocol = { path = "./protocol" }
 crucible-smf = { path = "./smf" }
 dsc-client = { path = "./dsc-client" }
