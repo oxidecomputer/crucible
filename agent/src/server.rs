@@ -2,7 +2,7 @@
 use super::datafile::DataFile;
 use anyhow::{anyhow, Result};
 use crucible_agent_api::*;
-use crucible_agent_types::region;
+use crucible_agent_types::{region, snapshot};
 use dropshot::{
     HandlerTaskMode, HttpError, HttpResponseDeleted, HttpResponseOk,
     Path as TypedPath, RequestContext, TypedBody,
@@ -122,7 +122,7 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
     async fn region_get_snapshot(
         rc: RequestContext<Self::Context>,
         path: TypedPath<GetSnapshotPath>,
-    ) -> Result<HttpResponseOk<region::Snapshot>, HttpError> {
+    ) -> Result<HttpResponseOk<snapshot::Snapshot>, HttpError> {
         let p = path.into_inner();
 
         match rc.context().get(&p.id) {
@@ -171,7 +171,7 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
             }
         }
 
-        let request = region::DeleteSnapshotRequest {
+        let request = snapshot::DeleteSnapshotRequest {
             id: p.id.clone(),
             name: p.name,
         };
@@ -185,7 +185,7 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
     async fn region_run_snapshot(
         rc: RequestContext<Arc<DataFile>>,
         path: TypedPath<RunSnapshotPath>,
-    ) -> Result<HttpResponseOk<region::RunningSnapshot>, HttpError> {
+    ) -> Result<HttpResponseOk<snapshot::RunningSnapshot>, HttpError> {
         let p = path.into_inner();
 
         match rc.context().get(&p.id) {
@@ -216,7 +216,7 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
         }
 
         // TODO support running snapshots with their own X509 creds
-        let create = region::CreateRunningSnapshotRequest {
+        let create = snapshot::CreateRunningSnapshotRequest {
             id: p.id,
             name: p.name,
             cert_pem: None,
@@ -249,7 +249,7 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
             }
         }
 
-        let request = region::DeleteRunningSnapshotRequest {
+        let request = snapshot::DeleteRunningSnapshotRequest {
             id: p.id,
             name: p.name,
         };

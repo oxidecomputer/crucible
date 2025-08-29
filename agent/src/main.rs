@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
+use crucible_agent_types::smf::SmfProperty;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
 use semver::Version;
 use slog::{debug, error, info, o, Logger};
@@ -40,13 +41,15 @@ const RESERVATION_FACTOR: f64 = 1.25;
 const QUOTA_FACTOR: u64 = 3;
 
 mod datafile;
+mod resource;
 mod server;
 mod smf_interface;
 mod snapshot_interface;
 
-use crucible_agent_types::region::State;
-use crucible_agent_types::region::{self, Resource};
+use crucible_agent_types::region::{self, State};
 use smf_interface::*;
+
+use crate::resource::Resource;
 
 #[derive(Debug, Parser)]
 #[clap(name = PROG, about = "Crucible zone management agent")]
@@ -512,7 +515,7 @@ where
             // crucible zone that both processes must share and that address is
             // what will be used by other zones. In the future this could be a
             // parameter that comes along with the region POST parameters.
-            properties.push(region::SmfProperty {
+            properties.push(SmfProperty {
                 name: "address",
                 typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
                 val: df.get_listen_addr().ip().to_string(),
@@ -521,7 +524,7 @@ where
             // If the region has a source, then it was created as a clone and
             // must be started read only.
             if r.source.is_some() {
-                properties.push(region::SmfProperty {
+                properties.push(SmfProperty {
                     name: "mode",
                     typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
                     val: "ro".to_string(),
@@ -687,7 +690,7 @@ where
                 // is what will be used by other zones. In the future this could
                 // be a parameter that comes along with the region POST
                 // parameters.
-                properties.push(region::SmfProperty {
+                properties.push(SmfProperty {
                     name: "address",
                     typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
                     val: df.get_listen_addr().ip().to_string(),
@@ -827,7 +830,7 @@ mod test {
     use crate::snapshot_interface::SnapshotInterface;
     use crate::snapshot_interface::TestSnapshotInterface;
 
-    use crucible_agent_types::region::*;
+    use crucible_agent_types::{region::*, snapshot::*};
     use slog::{o, Drain, Logger};
     use std::collections::BTreeMap;
     use tempfile::*;

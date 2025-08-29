@@ -1244,6 +1244,8 @@ dependencies = [
  "clap",
  "crucible",
  "crucible-common",
+ "crucible-pantry-api",
+ "crucible-pantry-types",
  "crucible-smf 0.0.0",
  "crucible-workspace-hack",
  "dropshot",
@@ -1269,6 +1271,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-pantry-api"
+version = "0.1.0"
+dependencies = [
+ "crucible-client-types",
+ "crucible-pantry-types",
+ "crucible-workspace-hack",
+ "dropshot",
+ "schemars",
+ "serde",
+]
+
+[[package]]
 name = "crucible-pantry-client"
 version = "0.0.1"
 dependencies = [
@@ -1282,6 +1296,15 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "crucible-pantry-types"
+version = "0.1.0"
+dependencies = [
+ "crucible-workspace-hack",
+ "schemars",
+ "serde",
 ]
 
 [[package]]

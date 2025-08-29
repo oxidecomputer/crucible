@@ -2,8 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use crucible_agent_types::region::{
-    CreateRegion, Region, RegionId, RunningSnapshot, Snapshot,
+use crucible_agent_types::{
+    region::{CreateRegion, Region, RegionId},
+    snapshot::{RunningSnapshot, Snapshot},
 };
 use dropshot::{
     HttpError, HttpResponseDeleted, HttpResponseOk, Path, RequestContext,

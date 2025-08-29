@@ -1,7 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 
 use anyhow::{anyhow, bail, Result};
-use crucible_agent_types::region::*;
+use crucible_agent_types::{region::*, snapshot::*};
 use crucible_common::write_json;
 use serde::{Deserialize, Serialize};
 use slog::{crit, error, info, Logger};
@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
+use crate::resource::Resource;
 use crate::snapshot_interface::SnapshotInterface;
 use crate::ZFSDataset;
 
