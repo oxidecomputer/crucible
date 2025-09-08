@@ -11,6 +11,8 @@ members = [
     "crudd",
     "crutest",
     "downstairs",
+    "downstairs-api",
+    "downstairs-types",
     "dsc",
     "dsc-client",
     "hammer",
@@ -142,6 +144,8 @@ crucible-control-client = { path = "./control-client" }
 # importantly, don't use features = ["zfs_snapshot"] here, this will cause
 # cleanup issues in the integration tests!
 crucible-downstairs = { path = "./downstairs" }
+crucible-downstairs-api = { path = "./downstairs-api" }
+crucible-downstairs-types = { path = "./downstairs-types" }
 crucible-pantry = { path = "./pantry" }
 crucible-pantry-api = { path = "./pantry-api" }
 crucible-pantry-client = { path = "./pantry-client" }

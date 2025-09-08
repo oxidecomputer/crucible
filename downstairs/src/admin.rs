@@ -1,125 +1,96 @@
 // Copyright 2022 Oxide Computer Company
 use super::*;
 
+use crucible_downstairs_api::*;
+use crucible_downstairs_types::RunDownstairsForRegionParams;
 use dropshot::{
-    endpoint, ApiDescription, ConfigDropshot, HttpError, HttpResponseCreated,
-    HttpServerStarter, Path, RequestContext, TypedBody,
+    ConfigDropshot, HttpError, HttpResponseCreated, HttpServerStarter, Path,
+    RequestContext, TypedBody,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
 pub struct ServerContext {
     // Region UUID -> a running Downstairs
     downstairs: Mutex<HashMap<Uuid, DownstairsHandle>>,
 }
 
-#[derive(Deserialize, JsonSchema)]
-pub struct RunDownstairsForRegionParams {
-    address: IpAddr,
-    data: PathBuf,
-    oximeter: Option<SocketAddr>,
-    lossy: bool,
-    port: u16,
-    rport: u16,
-    read_errors: bool,
-    write_errors: bool,
-    flush_errors: bool,
-    cert_pem: Option<String>,
-    key_pem: Option<String>,
-    root_cert_pem: Option<String>,
-    read_only: bool,
-}
+/// Implementation of the Crucible Downstairs Admin API.
+pub struct CrucibleDownstairsAdminImpl;
 
-#[derive(Deserialize, JsonSchema)]
-pub struct RunDownstairsforRegionPath {
-    uuid: Uuid,
-}
+impl CrucibleDownstairsAdminApi for CrucibleDownstairsAdminImpl {
+    type Context = Arc<ServerContext>;
 
-#[derive(Serialize, JsonSchema)]
-pub struct DownstairsRunningResponse {
-    uuid: Uuid,
-}
+    /// Start a downstairs instance for a specific region.
+    async fn run_downstairs_for_region(
+        rqctx: RequestContext<Self::Context>,
+        path_param: Path<RunDownstairsForRegionPath>,
+        run_params: TypedBody<RunDownstairsForRegionParams>,
+    ) -> Result<HttpResponseCreated<DownstairsRunningResponse>, HttpError> {
+        let apictx = rqctx.context();
+        let run_params = run_params.into_inner();
+        let uuid = path_param.into_inner().uuid;
 
-#[endpoint {
-    method = POST,
-    path = "/regions/{uuid}/downstairs"
-}]
-pub async fn run_downstairs_for_region(
-    rqctx: RequestContext<Arc<ServerContext>>,
-    path_param: Path<RunDownstairsforRegionPath>,
-    run_params: TypedBody<RunDownstairsForRegionParams>,
-) -> Result<HttpResponseCreated<DownstairsRunningResponse>, HttpError> {
-    let apictx = rqctx.context();
-    let run_params = run_params.into_inner();
-    let uuid = path_param.into_inner().uuid;
+        let mut downstairs = apictx.downstairs.lock().await;
 
-    let mut downstairs = apictx.downstairs.lock().await;
-
-    if downstairs.contains_key(&uuid) {
-        return Err(HttpError::for_bad_request(
-            Some(String::from("BadInput")),
-            format!("downstairs {} running already", uuid),
-        ));
-    }
-
-    let certs = match (
-        run_params.cert_pem,
-        run_params.key_pem,
-        run_params.root_cert_pem,
-    ) {
-        (Some(cert_pem), Some(key_pem), Some(root_cert_pem)) => {
-            Some(DownstairsClientCerts {
-                cert_pem,
-                key_pem,
-                root_cert_pem,
-            })
-        }
-        (None, None, None) => None,
-        _ => {
+        if downstairs.contains_key(&uuid) {
             return Err(HttpError::for_bad_request(
                 Some(String::from("BadInput")),
-                "must provide all of cert_pem, key_pem, root_cert_pem \
-                 if any are provided"
-                    .to_owned(),
-            ))
+                format!("downstairs {} running already", uuid),
+            ));
         }
-    };
 
-    let d = Downstairs::new_builder(&run_params.data, run_params.read_only)
-        .set_lossy(run_params.lossy)
-        .set_test_errors(
-            run_params.read_errors,
-            run_params.write_errors,
-            run_params.flush_errors,
+        let certs = match (
+            run_params.cert_pem,
+            run_params.key_pem,
+            run_params.root_cert_pem,
+        ) {
+            (Some(cert_pem), Some(key_pem), Some(root_cert_pem)) => {
+                Some(DownstairsClientCerts {
+                    cert_pem,
+                    key_pem,
+                    root_cert_pem,
+                })
+            }
+            (None, None, None) => None,
+            _ => {
+                return Err(HttpError::for_bad_request(
+                    Some(String::from("BadInput")),
+                    "must provide all of cert_pem, key_pem, root_cert_pem \
+                     if any are provided"
+                        .to_owned(),
+                ))
+            }
+        };
+
+        let d = Downstairs::new_builder(&run_params.data, run_params.read_only)
+            .set_lossy(run_params.lossy)
+            .set_test_errors(
+                run_params.read_errors,
+                run_params.write_errors,
+                run_params.flush_errors,
+            )
+            .build()
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+
+        let handle = d.handle();
+        let _join_handle = DownstairsClient::spawn(
+            d,
+            DownstairsClientSettings {
+                address: run_params.address,
+                oximeter: run_params.oximeter,
+                port: run_params.port,
+                rport: run_params.rport,
+                certs,
+            },
         )
-        .build()
+        .await
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
-    let handle = d.handle();
-    let _join_handle = DownstairsClient::spawn(
-        d,
-        DownstairsClientSettings {
-            address: run_params.address,
-            oximeter: run_params.oximeter,
-            port: run_params.port,
-            rport: run_params.rport,
-            certs,
-        },
-    )
-    .await
-    .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+        // past here, the downstairs has started successfully.
 
-    // past here, the downstairs has started successfully
+        downstairs.insert(uuid, handle);
 
-    downstairs.insert(uuid, handle);
-
-    Ok(HttpResponseCreated(DownstairsRunningResponse { uuid }))
-}
-
-fn register_endpoints(
-    api_description: &mut ApiDescription<Arc<ServerContext>>,
-) -> Result<(), dropshot::ApiDescriptionRegisterError> {
-    api_description.register(run_downstairs_for_region)
+        Ok(HttpResponseCreated(DownstairsRunningResponse { uuid }))
+    }
 }
 
 pub async fn run_dropshot(
@@ -131,11 +102,9 @@ pub async fn run_dropshot(
         ..Default::default()
     };
 
-    let mut api_description = ApiDescription::<Arc<ServerContext>>::new();
-
-    if let Err(s) = register_endpoints(&mut api_description) {
-        anyhow::bail!("Error from register_endpoints: {}", s);
-    }
+    let api_description = crucible_downstairs_admin_api_mod::api_description::<
+        CrucibleDownstairsAdminImpl,
+    >()?;
 
     let ctx = Arc::new(ServerContext {
         downstairs: Mutex::new(HashMap::default()),
