@@ -1,7 +1,9 @@
 [workspace]
 members = [
     "agent",
+    "agent-api",
     "agent-client",
+    "agent-types",
     "crucible-client-types",
     "common",
     "control-client",
@@ -9,6 +11,8 @@ members = [
     "crudd",
     "crutest",
     "downstairs",
+    "downstairs-api",
+    "downstairs-types",
     "dsc",
     "dsc-client",
     "hammer",
@@ -17,7 +21,9 @@ members = [
     "nbd_server",
     "package",
     "pantry",
+    "pantry-api",
     "pantry-client",
+    "pantry-types",
     "protocol",
     "repair-client",
     "smf",
@@ -129,15 +135,21 @@ oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch =
 
 # local path
 crucible = { path = "./upstairs" }
-crucible-client-types = { path = "./crucible-client-types" }
+crucible-agent-api = { path = "./agent-api" }
 crucible-agent-client = { path = "./agent-client" }
+crucible-agent-types = { path = "./agent-types" }
+crucible-client-types = { path = "./crucible-client-types" }
 crucible-common = { path = "./common" }
 crucible-control-client = { path = "./control-client" }
 # importantly, don't use features = ["zfs_snapshot"] here, this will cause
 # cleanup issues in the integration tests!
 crucible-downstairs = { path = "./downstairs" }
+crucible-downstairs-api = { path = "./downstairs-api" }
+crucible-downstairs-types = { path = "./downstairs-types" }
 crucible-pantry = { path = "./pantry" }
+crucible-pantry-api = { path = "./pantry-api" }
 crucible-pantry-client = { path = "./pantry-client" }
+crucible-pantry-types = { path = "./pantry-types" }
 crucible-protocol = { path = "./protocol" }
 crucible-smf = { path = "./smf" }
 dsc-client = { path = "./dsc-client" }
