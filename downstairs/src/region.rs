@@ -2193,7 +2193,7 @@ pub(crate) mod test {
         only_write_unwritten: bool,
     ) -> Vec<u8> {
         let total_size: usize = ddef.total_size() as usize;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
@@ -2900,7 +2900,7 @@ pub(crate) mod test {
         // Now use region_write to fill four blocks
         //
         // They're all within the same extent, so we just need one ExtentWrite
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut buffer: Vec<u8> = vec![0; total_size];
         println!("buffer size:{}", buffer.len());
         rng.fill_bytes(&mut buffer);
@@ -3305,7 +3305,7 @@ pub(crate) mod test {
                     .iter()
                     .map(|range| {
                         let n = range.clone().count();
-                        let mut rng = rand::thread_rng();
+                        let mut rng = rand::rng();
                         let mut data: Vec<u8> = vec![0; 512 * n];
                         rng.fill_bytes(&mut data);
 
@@ -3387,7 +3387,7 @@ pub(crate) mod test {
         let writes: Vec<ExtentWrite> = (0..3)
             .map(|_| {
                 let mut data = vec![0u8; 512 * EXTENT_SIZE as usize];
-                rand::thread_rng().fill_bytes(&mut data);
+                rand::rng().fill_bytes(&mut data);
                 let block_contexts = data
                     .chunks(512)
                     .map(|chunk| BlockContext {
@@ -3537,7 +3537,7 @@ pub(crate) mod test {
             ddef.extent_size().value as usize * ddef.extent_count() as usize;
 
         // Write in random data
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
@@ -3601,7 +3601,7 @@ pub(crate) mod test {
         data: &mut [u8],
     ) -> Vec<RegionWriteReq> {
         let mut writes = vec![];
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Offsets are given as blocks; we convert to extents here
         const EXTENT_SIZE: usize = 10; // hard-coded default

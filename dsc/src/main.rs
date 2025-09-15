@@ -810,7 +810,7 @@ async fn do_dsc_work(
     work: DscCmd,
     action_tx_list: &[mpsc::Sender<DownstairsAction>],
 ) {
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     match work {
         DscCmd::Start(cid) => {
@@ -834,7 +834,7 @@ async fn do_dsc_work(
                 .unwrap();
         }
         DscCmd::StopRand => {
-            let cid = rng.gen_range(0..3) as usize;
+            let cid = rng.random_range(0..3) as usize;
             println!("stop rand {}", cid);
             action_tx_list[cid]
                 .send(DownstairsAction::Stop)
@@ -979,7 +979,7 @@ async fn start_dsc(
         }
     }
 
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
     let mut timeout_deadline = Instant::now() + Duration::from_secs(5);
     let mut shutdown_sent = false;
     let mut random_restart = false;
@@ -1016,14 +1016,14 @@ async fn start_dsc(
                     }
                 } else if random_restart {
                     println!("Random restart");
-                    let cid = rng.gen_range(0..3) as usize;
+                    let cid = rng.random_range(0..3) as usize;
                     println!("stop rand {}", cid);
                     action_tx_list[cid].send(DownstairsAction::Stop).await.unwrap();
-                    Duration::from_secs(rng.gen_range(restart_min..restart_max))
+                    Duration::from_secs(rng.random_range(restart_min..restart_max))
                 } else {
                     // Set the timeout to be a random value between our
                     // min and max.
-                    Duration::from_secs(rng.gen_range(restart_min..restart_max))
+                    Duration::from_secs(rng.random_range(restart_min..restart_max))
                 };
                 timeout_deadline = Instant::now() + timeout;
             },

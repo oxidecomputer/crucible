@@ -35,17 +35,17 @@ pub fn dynamometer(
 
     // Fill test: write bytes in whole region
 
-    let mut rng = SmallRng::from_entropy();
+    let mut rng = SmallRng::from_os_rng();
 
     'outer: loop {
         let block = (0..ddef.block_size() as usize)
-            .map(|_| rng.sample(rand::distributions::Standard))
+            .map(|_| rng.sample(rand::distr::StandardUniform))
             .collect::<Vec<u8>>();
         let nonce = (0..12)
-            .map(|_| rng.sample(rand::distributions::Standard))
+            .map(|_| rng.sample(rand::distr::StandardUniform))
             .collect::<Vec<u8>>();
         let tag = (0..16)
-            .map(|_| rng.sample(rand::distributions::Standard))
+            .map(|_| rng.sample(rand::distr::StandardUniform))
             .collect::<Vec<u8>>();
 
         let hash = integrity_hash(&[&nonce, &tag, &block]);

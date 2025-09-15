@@ -260,7 +260,7 @@ async fn rand_write(
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     /*
      * Once we have our IO size, decide where the starting offset should
@@ -269,7 +269,7 @@ async fn rand_write(
      */
     let size = 1;
     let block_max = di.volume_info.total_blocks() - size + 1;
-    let block_index = rng.gen_range(0..block_max);
+    let block_index = rng.random_range(0..block_max);
 
     cli_write(volume, di, block_index, size).await
 }
@@ -350,8 +350,7 @@ async fn cli_write_unwritten(
         let mut data =
             BytesMut::with_capacity(di.volume_info.block_size as usize);
         data.extend(
-            (0..di.volume_info.block_size)
-                .map(|_| rand::thread_rng().gen::<u8>()),
+            (0..di.volume_info.block_size).map(|_| rand::random::<u8>()),
         );
         data
     };
@@ -914,10 +913,10 @@ async fn process_cli_command(
         }
         CliMessage::RandRead => {
             if let Some(di) = di_option {
-                let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+                let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
                 let size = 1;
                 let block_max = di.volume_info.total_blocks() - size + 1;
-                let offset = rng.gen_range(0..block_max);
+                let offset = rng.random_range(0..block_max);
 
                 let res = cli_read(volume, di, offset, size).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
