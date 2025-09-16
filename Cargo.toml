@@ -118,7 +118,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-opentelemetry = "0.22.0"
 tracing-subscriber = "0.3.19"
-twox-hash = "2.1.0"
+twox-hash = "2.1.2"
 usdt = "0.5.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
 
