@@ -33,4 +33,5 @@ proptest.workspace = true
 test-strategy.workspace = true
 
 [build-dependencies]
-vergen = { version = "8.3.2", features = ["cargo", "git", "git2", "rustc" ] }
+vergen = { version = "9.0.6", features = ["cargo", "rustc"] }
+vergen-git2 = "1.0.7"
