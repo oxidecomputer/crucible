@@ -25,6 +25,7 @@ crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
 digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1", features = ["use_std"] }
+form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
@@ -42,6 +43,7 @@ num-iter = { version = "0.1", default-features = false, features = ["i128", "std
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
 openapiv3 = { version = "2", default-features = false, features = ["skip_serializing_defaults"] }
+percent-encoding = { version = "2" }
 phf_shared = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
 rand_chacha = { version = "0.9" }
@@ -56,7 +58,7 @@ serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
-syn = { version = "2", features = ["extra-traits", "full", "visit", "visit-mut"] }
+syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
@@ -77,6 +79,7 @@ crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
 digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1", features = ["use_std"] }
+form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
@@ -94,6 +97,7 @@ num-iter = { version = "0.1", default-features = false, features = ["i128", "std
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
 openapiv3 = { version = "2", default-features = false, features = ["skip_serializing_defaults"] }
+percent-encoding = { version = "2" }
 phf_shared = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
@@ -106,7 +110,7 @@ serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
-syn = { version = "2", features = ["extra-traits", "full", "visit", "visit-mut"] }
+syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
