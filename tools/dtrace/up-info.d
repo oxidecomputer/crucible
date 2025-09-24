@@ -48,6 +48,7 @@ inline string short_state[string ss] =
     ss == "Offline" ? "OFL" :
     ss == "LiveRepair" ? "LR" :
     ss == "Replacing" ? "RPC" :
+    ss == "Replaced" ? "RPL" :
     ss == "Disabled" ? "DIS" :
     ss == "Deactivated" ? "DAV" :
     ss == "NegotiationFailed" ? "NF" :
