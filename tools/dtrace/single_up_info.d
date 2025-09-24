@@ -2,7 +2,7 @@
  * Display internal Upstairs status for the PID provided as $1
  */
 #pragma D option quiet
-#pragma D option strsize=1k
+#pragma D option strsize=2k
 /*
  * Print the header right away
  */

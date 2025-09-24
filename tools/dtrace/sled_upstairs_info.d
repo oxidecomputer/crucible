@@ -7,7 +7,7 @@
  * will share the PID, but have unique SESSIONs.
  */
 #pragma D option quiet
-#pragma D option strsize=1k
+#pragma D option strsize=2k
 /*
  * Print the header right away
  */

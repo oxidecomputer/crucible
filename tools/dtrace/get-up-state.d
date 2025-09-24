@@ -2,7 +2,7 @@
  * Display Upstairs status for all matching processes
  */
 #pragma D option quiet
-#pragma D option strsize=1k
+#pragma D option strsize=2k
 
 /*
  * Print the header right away

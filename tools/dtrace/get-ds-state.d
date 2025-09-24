@@ -3,7 +3,7 @@
  * Exit after 5 seconds.
  */
 #pragma D option quiet
-#pragma D option strsize=1k
+#pragma D option strsize=2k
 
 /*
  * Translate the longer state string into a shorter version

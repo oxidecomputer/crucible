@@ -1,5 +1,5 @@
 #pragma D option quiet
-#pragma D option strsize=1k
+#pragma D option strsize=2k
 
 dtrace:::BEGIN
 {

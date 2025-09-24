@@ -2,7 +2,7 @@
  * Display internal Upstairs live repair status.
  */
 #pragma D option quiet
-#pragma D option strsize=1k
+#pragma D option strsize=2k
 /*
  * Print the header right away
  */
