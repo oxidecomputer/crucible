@@ -378,7 +378,7 @@ async fn notify_task_nexus(
             }
 
             Err(e) => {
-                error!(log, "failed to notify Nexus of {s}: {e}");
+                warn!(log, "failed to notify Nexus of {s}: {e}");
 
                 // If there's a problem notifying Nexus, it could be due to
                 // Nexus being gone before the DNS was updated. If this is the
@@ -442,7 +442,7 @@ pub(crate) async fn get_nexus_client(
             }
 
             Err(e) => {
-                error!(log, "lookup Nexus address failed: {e}");
+                warn!(log, "lookup Nexus address failed: {e}");
                 return None;
             }
         };

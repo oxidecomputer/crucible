@@ -2,7 +2,7 @@
  * Display internal Upstairs status.
  */
 #pragma D option quiet
-#pragma D option strsize=1k
+#pragma D option strsize=2k
 /*
  * Print the header right away
  */
@@ -18,7 +18,7 @@ dtrace:::BEGIN
 dtrace:::BEGIN, tick-1s
 /show > 20/
 {
-    printf("%6s ", "PID");
+    printf("%6s %8s ", "PID", "SESSION");
     printf("%3s %3s %3s", "DS0", "DS1", "DS2");
     printf(" %5s %5s %10s", "UPW", "DSW", "JOBID");
     printf(" %10s", "WRITE_BO");
@@ -33,32 +33,37 @@ dtrace:::BEGIN, tick-1s
  * Translate the longer state string into a shorter version
  */
 inline string short_state[string ss] =
-    ss == "active" ? "ACT" :
-    ss == "new" ? "NEW" :
-    ss == "live_repair_ready" ? "LRR" :
-    ss == "live_repair" ? "LR" :
-    ss == "faulted" ? "FLT" :
-    ss == "offline" ? "OFL" :
-    ss == "reconcile" ? "REC" :
-    ss == "wait_quorum" ? "WQ" :
-    ss == "wait_active" ? "WA" :
-    ss == "replaced" ? "RPL" :
-    ss == "connecting" ? "CON" :
+    ss == "Active" ? "ACT" :
+    ss == "WaitQuorum" ? "WQ" :
+    ss == "Reconcile" ? "REC" :
+    ss == "LiveRepairReady" ? "LRR" :
+    ss == "New" ? "NEW" :
+    ss == "Faulted" ? "FLT" :
+    ss == "Offline" ? "OFL" :
+    ss == "LiveRepair" ? "LR" :
+    ss == "Replacing" ? "RPC" :
+    ss == "Disabled" ? "DIS" :
+    ss == "Deactivated" ? "DAV" :
+    ss == "NegotiationFailed" ? "NF" :
+    ss == "Fault" ? "FLT" :
     ss;
 
 crucible_upstairs*:::up-status
 {
     show = show + 1;
-    this->ds0state = json(copyinstr(arg1), "ok.ds_state[0].type");
+    this->ds0state = json(copyinstr(arg1), "ok.ds_state[0]");
     this->d0 = short_state[this->ds0state];
 
-    this->ds1state = json(copyinstr(arg1), "ok.ds_state[1].type");
+    this->ds1state = json(copyinstr(arg1), "ok.ds_state[1]");
     this->d1 = short_state[this->ds1state];
 
-    this->ds2state = json(copyinstr(arg1), "ok.ds_state[2].type");
+    this->ds2state = json(copyinstr(arg1), "ok.ds_state[2]");
     this->d2 = short_state[this->ds2state];
 
-    printf("%6d", pid);
+    this->full_session_id = json(copyinstr(arg1), "ok.session_id");
+    this->session_id = substr(this->full_session_id, 0, 8);
+
+    printf("%6d %8s", pid, this->session_id);
     /*
      * State for the three downstairs
      */

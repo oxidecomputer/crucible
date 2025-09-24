@@ -8,9 +8,7 @@ use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use tokio::time::{sleep, Duration};
 
-use crucible::{
-    ClientStopReason, ConnectionMode, DsState, DtraceInfo, NegotiationState,
-};
+use crucible::DtraceInfo;
 
 /// Connect to crucible control server
 #[derive(Parser, Debug)]
@@ -86,44 +84,24 @@ enum Action {
     Repair,
 }
 
-/// Translate a [`DsState`] into a three letter string for printing.
-fn short_state(dss: DsState) -> String {
+/// Translate the DsState string into a three letter string for printing.
+fn short_state(dss: &str) -> String {
     match dss {
-        DsState::Connecting {
-            state: NegotiationState::WaitQuorum,
-            ..
-        } => "WQ".to_string(),
-        DsState::Connecting {
-            state: NegotiationState::Reconcile,
-            ..
-        } => "REC".to_string(),
-        DsState::Active => "ACT".to_string(),
-        DsState::Connecting {
-            state: NegotiationState::LiveRepairReady,
-            ..
-        } => "LRR".to_string(),
-        DsState::Stopping(ClientStopReason::NegotiationFailed(..))
-        | DsState::Connecting {
-            mode: ConnectionMode::New,
-            ..
-        } => "NEW".to_string(),
-        DsState::Connecting {
-            mode: ConnectionMode::Faulted,
-            ..
-        }
-        | DsState::Stopping(ClientStopReason::Fault(..)) => "FLT".to_string(),
-        DsState::LiveRepair => "LR".to_string(),
-        DsState::Connecting {
-            mode: ConnectionMode::Offline,
-            ..
-        } => "OFL".to_string(),
-        DsState::Stopping(ClientStopReason::Deactivated) => "DAV".to_string(),
-        DsState::Stopping(ClientStopReason::Disabled) => "DIS".to_string(),
-        DsState::Stopping(ClientStopReason::Replacing)
-        | DsState::Connecting {
-            mode: ConnectionMode::Replaced,
-            ..
-        } => "RPL".to_string(),
+        "Active" => "ACT".to_string(),
+        "WaitQuorum" => "WQ".to_string(),
+        "Reconcile" => "REC".to_string(),
+        "LiveRepairReady" => "LRR".to_string(),
+        "New" => "NEW".to_string(),
+        "Faulted" => "FLT".to_string(),
+        "Offline" => "OFL".to_string(),
+        "Replaced" => "RPL".to_string(),
+        "LiveRepair" => "LR".to_string(),
+        "Replacing" => "RPC".to_string(),
+        "Disabled" => "DIS".to_string(),
+        "Deactivated" => "DAV".to_string(),
+        "NegotiationFailed" => "NF".to_string(),
+        "Fault" => "FLT".to_string(),
+        x => x.to_string(),
     }
 }
 
@@ -277,9 +255,9 @@ fn print_dtrace_row(
             DtraceDisplay::State => {
                 print!(
                     " {:>3} {:>3} {:>3}",
-                    short_state(d_out.ds_state[0]),
-                    short_state(d_out.ds_state[1]),
-                    short_state(d_out.ds_state[2]),
+                    short_state(&d_out.ds_state[0]),
+                    short_state(&d_out.ds_state[1]),
+                    short_state(&d_out.ds_state[2]),
                 );
             }
             DtraceDisplay::UpCount => {

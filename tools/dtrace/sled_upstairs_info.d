@@ -40,17 +40,19 @@ tick-1s
  * Translate the longer state string into a shorter version
  */
 inline string short_state[string ss] =
-    ss == "active" ? "ACT" :
-    ss == "new" ? "NEW" :
-    ss == "live_repair_ready" ? "LRR" :
-    ss == "live_repair" ? "LR" :
-    ss == "faulted" ? "FLT" :
-    ss == "offline" ? "OFL" :
-    ss == "reconcile" ? "REC" :
-    ss == "wait_quorum" ? "WQ" :
-    ss == "wait_active" ? "WA" :
-    ss == "replaced" ? "RPL" :
-    ss == "connecting" ? "CON" :
+    ss == "Active" ? "ACT" :
+    ss == "WaitQuorum" ? "WQ" :
+    ss == "Reconcile" ? "REC" :
+    ss == "LiveRepairReady" ? "LRR" :
+    ss == "New" ? "NEW" :
+    ss == "Faulted" ? "FLT" :
+    ss == "Offline" ? "OFL" :
+    ss == "LiveRepair" ? "LR" :
+    ss == "Replacing" ? "RPC" :
+    ss == "Disabled" ? "DIS" :
+    ss == "Deactivated" ? "DAV" :
+    ss == "NegotiationFailed" ? "NF" :
+    ss == "Fault" ? "FLT" :
     ss;
 
 crucible_upstairs*:::up-status
@@ -59,13 +61,13 @@ crucible_upstairs*:::up-status
     this->upstairs_id = json(copyinstr(arg1), "ok.upstairs_id");
     this->session_id = json(copyinstr(arg1), "ok.session_id");
 
-    this->ds0state = json(copyinstr(arg1), "ok.ds_state[0].type");
+    this->ds0state = json(copyinstr(arg1), "ok.ds_state[0]");
     this->d0 = short_state[this->ds0state];
 
-    this->ds1state = json(copyinstr(arg1), "ok.ds_state[1].type");
+    this->ds1state = json(copyinstr(arg1), "ok.ds_state[1]");
     this->d1 = short_state[this->ds1state];
 
-    this->ds2state = json(copyinstr(arg1), "ok.ds_state[2].type");
+    this->ds2state = json(copyinstr(arg1), "ok.ds_state[2]");
     this->d2 = short_state[this->ds2state];
 
 
