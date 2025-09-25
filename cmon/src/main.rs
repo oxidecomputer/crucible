@@ -84,7 +84,8 @@ enum Action {
     Repair,
 }
 
-/// Translate the DsState string into a three letter string for printing.
+/// Translate what the default DsState string is (that we are getting from DTrace)
+/// into a three letter string for printing.
 fn short_state(dss: &str) -> String {
     match dss {
         "Active" => "ACT".to_string(),

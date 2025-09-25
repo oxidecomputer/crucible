@@ -2,7 +2,7 @@
  * Example code from the 2024 DTrace.conf talk
  */
 #pragma D option quiet
-#pragma D option strsize=4k
+#pragma D option strsize=2k
 
 dtrace:::BEGIN
 {
