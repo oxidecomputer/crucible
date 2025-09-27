@@ -1,3 +1,6 @@
+[alias]
+xtask = "run --package xtask --"
+
 [build]
 # Workaround to enable this lint for all packages in the workspace
 #

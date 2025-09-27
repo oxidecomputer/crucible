@@ -1,0 +1,17 @@
+[package]
+name = "crucible-dropshot-apis"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+
+[dependencies]
+anyhow.workspace = true
+camino.workspace = true
+clap.workspace = true
+crucible-agent-api.workspace = true
+crucible-downstairs-api.workspace = true
+crucible-pantry-api.workspace = true
+dropshot-api-manager-types.workspace = true
+dropshot-api-manager.workspace = true
+semver.workspace = true
+crucible-workspace-hack.workspace = true
