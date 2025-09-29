@@ -782,7 +782,9 @@ impl Upstairs {
                 next_job_id: self.downstairs.peek_next_id(),
                 write_bytes_out: self.downstairs.write_bytes_outstanding(),
                 ds_count: self.downstairs.active_count() as u32,
-                ds_state: self.downstairs.collect_stats(|c| c.state()),
+                ds_state: self
+                    .downstairs
+                    .collect_stats(|client| format!("{}", client.state())),
                 ds_io_count: self.downstairs.io_state_count(),
                 ds_reconciled: self.downstairs.reconcile_repaired(),
                 ds_reconcile_needed: self.downstairs.reconcile_repair_needed(),
