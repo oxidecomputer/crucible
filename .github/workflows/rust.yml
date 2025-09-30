@@ -28,6 +28,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      with:
+        # Fetch all history: the Dropshot API up-to-date check requires it.
+        fetch-depth: 0
     - name: Install dependencies
       run: sudo apt-get install libsqlite3-dev
     - name: Build

@@ -805,6 +805,9 @@ where
 impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DsState::Active => {
+                write!(f, "Active")
+            }
             DsState::Connecting {
                 state: NegotiationState::WaitQuorum,
                 ..
@@ -822,9 +825,6 @@ impl std::fmt::Display for DsState {
                 ..
             } => {
                 write!(f, "LiveRepairReady")
-            }
-            DsState::Active => {
-                write!(f, "Active")
             }
             DsState::Connecting {
                 mode: ConnectionMode::New,
@@ -853,9 +853,23 @@ impl std::fmt::Display for DsState {
             DsState::LiveRepair => {
                 write!(f, "LiveRepair")
             }
-            DsState::Stopping(..) => {
-                write!(f, "Stopping")
-            }
+            DsState::Stopping(r) => match r {
+                ClientStopReason::Replacing => {
+                    write!(f, "Replacing")
+                }
+                ClientStopReason::Disabled => {
+                    write!(f, "Disabled")
+                }
+                ClientStopReason::Deactivated => {
+                    write!(f, "Deactivated")
+                }
+                ClientStopReason::NegotiationFailed(_) => {
+                    write!(f, "NegotiationFailed")
+                }
+                ClientStopReason::Fault(_) => {
+                    write!(f, "Faulted")
+                }
+            },
         }
     }
 }
@@ -1566,7 +1580,7 @@ pub struct DtraceInfo {
     /// Number of write bytes in flight
     pub write_bytes_out: u64,
     /// State of a downstairs
-    pub ds_state: [DsState; 3],
+    pub ds_state: [String; 3],
     /// Counters for each state of a downstairs job.
     pub ds_io_count: IOStateCount,
     /// Extents repaired during initial reconciliation.

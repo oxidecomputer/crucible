@@ -1803,6 +1803,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "drift"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43eb40edecda6106744f5e4f3d4dc78b3adf19d3cfb2d81cc4faa007da91e527"
+dependencies = [
+ "anyhow",
+ "indexmap 2.11.4",
+ "openapiv3",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dropshot"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1855,15 +1869,16 @@ dependencies = [
 
 [[package]]
 name = "dropshot-api-manager"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d474d07200f53202c71a43f124d00417b06ed9a230ffaadbb4eec4fb50f032a"
+checksum = "2f448e29400392b55ed2c0133c79841e1bc1bc771e6e20841cb1a5c70a77ef65"
 dependencies = [
  "anyhow",
  "atomicwrites",
  "camino",
  "clap",
  "debug-ignore",
+ "drift",
  "dropshot",
  "dropshot-api-manager-types",
  "fs-err",
@@ -1884,9 +1899,9 @@ dependencies = [
 
 [[package]]
 name = "dropshot-api-manager-types"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3c52409870cf11bd9e96b86213502ad7412e50017c9e7bd14eaf1f4791517d5"
+checksum = "1b913840b90fcccce6afbdb146acf39aa3243b8510e255a70572e53a964fc96a"
 dependencies = [
  "anyhow",
  "camino",
@@ -5365,9 +5380,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.11.1"
+version = "1.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b544ef1b4eac5dc2db33ea63606ae9ffcfac26c1416a2806ae0bf5f56b201191"
+checksum = "8b5288124840bee7b386bc413c487869b360b2b4ec421ea56425128692f2a82c"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -5377,9 +5392,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.9"
+version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "809e8dc61f6de73b46c85f4c96486310fe304c434cfa43669d7b40f711150908"
+checksum = "833eb9ce86d40ef33cb1306d8accf7bc8ec2bfea4355cbdebb3df68b40925cad"
 dependencies = [
  "aho-corasick",
  "memchr",

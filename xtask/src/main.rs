@@ -14,10 +14,11 @@ struct Xtasks {
     subcommand: XtaskCommands,
 }
 
-/// dendrite xtask support
+/// crucible xtask support
 #[derive(Debug, Subcommand)]
 #[clap(name = "xtask")]
 enum XtaskCommands {
+    /// run OpenAPI manager
     Openapi(external::External),
 }
 

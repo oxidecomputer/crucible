@@ -57,9 +57,9 @@ crucible_downstairs*:::work-done
 
 tick-4s
 {
-    printf("%5s %4s %4s %4s %4s %5s %5s %5s %5s %5s\n",
+    printf("%5s %5s %5s %5s %5s %5s %5s %5s %5s %5s\n",
         "PID", "F>", "F<", "W>", "W<", "R>", "R<", "WS", "WIP", "WD");
-    printa("%05d %@4u %@4u %@4u %@4u %@5u %@5u %@5u %@5u %@5u\n",
+    printa("%05d %@5u %@5u %@5u %@5u %@5u %@5u %@5u %@5u %@5u\n",
         @sf_start, @sf_done, @sw_start, @sw_done, @sr_start, @sr_done,
         @work_start, @work_process, @work_done
     );
