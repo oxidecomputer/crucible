@@ -1474,14 +1474,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            yolo_workload(
-                &volume,
-                &mut wtq,
-                &mut disk_info,
-                false,
-                opt.range,
-            )
-            .await?;
+            yolo_workload(&volume, &mut wtq, &mut disk_info, false, opt.range)
+                .await?;
         }
     }
 
@@ -2291,7 +2285,6 @@ async fn yolo_workload(
         // Convert offset and length to their byte values.
         let offset = BlockIndex(block_index as u64);
 
-
         if op == 0 {
             match volume.flush(None).await {
                 Ok(_) => {
@@ -2338,7 +2331,7 @@ async fn yolo_workload(
             match volume.read(offset, &mut data).await {
                 Ok(_) => {
                     reads += 1;
-                },
+                }
                 Err(e) => {
                     read_errors += 1;
                     eprintln!("read failed: {}", e);
@@ -2372,8 +2365,13 @@ async fn yolo_workload(
         if last_print.elapsed() >= Duration::from_secs(10) {
             println!(
                 "R:{} W:{} F:{} RE:{} WE:{} VE:{} FE:{}",
-                reads, writes, flushes,
-                read_errors, write_errors, verify_errors, flush_errors
+                reads,
+                writes,
+                flushes,
+                read_errors,
+                write_errors,
+                verify_errors,
+                flush_errors
             );
             last_print = Instant::now();
         }
@@ -2392,9 +2390,7 @@ async fn yolo_workload(
                     }
                     Ok(SignalAction::Verify) => {
                         println!("Verify Volume");
-                        if let Err(e) = verify_volume(
-                                volume, di, range
-                            ).await {
+                        if let Err(e) = verify_volume(volume, di, range).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }

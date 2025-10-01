@@ -1080,7 +1080,10 @@ impl Downstairs {
                     mode: ConnectionMode::Offline,
                     ..
                 } => {
-                    warn!(self.log, "Forcing offline downstairs {cid} to faulted");
+                    warn!(
+                        self.log,
+                        "Forcing offline downstairs {cid} to faulted"
+                    );
                     self.clients[cid].set_connection_mode_faulted();
                 }
                 _state => {
