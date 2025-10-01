@@ -71,7 +71,9 @@ pub(crate) struct Downstairs {
     /// Indicates whether we are eligible for replay
     ///
     /// We are only eligible for replay if all jobs since the last flush are
-    /// buffered (i.e. none have been retired by a `Barrier` operation).
+    /// buffered (i.e. none have been retired by a `Barrier` operation, or we
+    /// have not performed or started a LiveRepair while this downstairs was
+    /// offline).
     can_replay: bool,
 
     /// How many `Flush` or `Barrier` operations are pending?
@@ -1055,6 +1057,10 @@ impl Downstairs {
 
         // Can't start live-repair if we don't have a source downstairs
         let Some(source_downstairs) = source_downstairs else {
+            warn!(self.log, "No source, no Live Repair possible");
+            if repair_downstairs.len() == 3 {
+                warn!(self.log, "All three downstairs require repair");
+            }
             return;
         };
 
@@ -1064,6 +1070,23 @@ impl Downstairs {
         // to abort the repair on the troublesome clients.
         for &cid in &repair_downstairs {
             self.clients[cid].start_live_repair(up_state);
+        }
+
+        // Any offline downstairs should now be moved to faulted, as we don't
+        // or can't replay to them, so they must come back through LR
+        for cid in ClientId::iter() {
+            match self.clients[cid].state() {
+                DsState::Connecting {
+                    mode: ConnectionMode::Offline,
+                    ..
+                } => {
+                    warn!(self.log, "Forcing offline downstairs {cid} to faulted");
+                    self.clients[cid].set_connection_mode_faulted();
+                }
+                _state => {
+                    // ignore Downstairs in irrelevant states
+                }
+            }
         }
 
         // Submit the initial repair jobs, which kicks everything off
@@ -2637,6 +2660,12 @@ impl Downstairs {
             warn!(
                 self.log,
                 "downstairs became ineligible for replay while offline"
+            );
+            true
+        } else if self.live_repair_in_progress() {
+            warn!(
+                self.log,
+                "downstairs {client_id} no replay while offline because LR"
             );
             true
         } else {

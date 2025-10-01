@@ -4591,4 +4591,145 @@ pub(crate) mod test {
             }
         }
     }
+
+    /// Helper function to set a downstairs to offline state
+    fn set_downstairs_offline(up: &mut Upstairs, client_id: ClientId) {
+        // Simulate the client going offline by transitioning it to
+        // Connecting/Offline.  This mimics what happens when a client
+        // spontaneously disconnects and gets reinitialized
+        up.ds_transition(
+            client_id,
+            DsStateData::Connecting {
+                mode: ConnectionMode::Offline,
+                state: NegotiationStateData::Start,
+            },
+        );
+    }
+
+    #[test]
+    fn test_offline_becomes_faulted_when_live_repair_starts() {
+        // Start with a faulted downstairs (LiveRepairReady), an offline
+        // downstairs, and an active downstairs.
+        // When live repair starts, the offline downstairs must become faulted.
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), false);
+        up.force_active().unwrap();
+
+        // Setup initial states:
+        // Client 0: Active (will be source for live repair)
+        // Client 1: Faulted -> LiveRepairReady (needs live repair)
+        // Client 2: Offline (should become faulted when live repair starts)
+
+        // Keep client 0 active (it's already active from force_active())
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+
+        // Set client 1 to LiveRepairReady state
+        to_live_repair_ready(&mut up, ClientId::new(1));
+        assert_eq!(
+            up.ds_state(ClientId::new(1)),
+            DsState::Connecting {
+                state: NegotiationState::LiveRepairReady,
+                mode: ConnectionMode::Faulted
+            }
+        );
+
+        // Set client 2 to offline state
+        set_downstairs_offline(&mut up, ClientId::new(2));
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::Start,
+                mode: ConnectionMode::Offline
+            }
+        );
+
+        // Verify live repair hasn't started yet
+        assert!(!up.downstairs.live_repair_in_progress());
+
+        // Trigger live repair start
+        up.check_live_repair_start();
+
+        // Verify live repair has started
+        assert!(up.downstairs.live_repair_in_progress());
+
+        // Verify client 1 is now in LiveRepair state
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
+
+        // Verify client 2 (previously offline) is now faulted
+        // This is the key assertion for this test case
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::Start,
+                mode: ConnectionMode::Faulted
+            }
+        );
+
+        // Client 0 should still be active (source for live repair)
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+    }
+
+    #[test]
+    fn test_downstairs_goes_offline_during_live_repair() {
+        // Start with all three downstairs active.  Put one into live repair,
+        // then have another go offline during live repair.
+        // The offline downstairs must be immediately faulted and never
+        // replay IOs.
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), false);
+        up.force_active().unwrap();
+
+        // All three clients start active
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(2)), DsState::Active);
+
+        // Put client 1 into LiveRepairReady and start live repair
+        to_live_repair_ready(&mut up, ClientId::new(1));
+        up.check_live_repair_start();
+
+        // Verify live repair started
+        assert!(up.downstairs.live_repair_in_progress());
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
+
+        // Clients 0 and 2 should still be active
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(2)), DsState::Active);
+
+        // Now simulate client 2 spontaneously going offline during live repair
+        // This is what would happen when a connection drops unexpectedly
+        set_downstairs_offline(&mut up, ClientId::new(2));
+
+        // Verify client 2 is now offline
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::Start,
+                mode: ConnectionMode::Offline
+            }
+        );
+
+        // Call check_gone_too_long() which should mark offline downstairs as
+        // faulted because live repair is in progress
+        up.downstairs.check_gone_too_long(ClientId::new(2));
+
+        // After check_gone_too_long, client 2 should be faulted (not offline)
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::Start,
+                mode: ConnectionMode::Faulted
+            }
+        );
+    }
 }

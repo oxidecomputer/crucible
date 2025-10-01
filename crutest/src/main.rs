@@ -139,6 +139,8 @@ enum Workload {
     /// Select a random offset/length, then Write/Flush/Read that
     /// offset/length.
     WFR,
+    /// Do reads and writes, keep going if there are errors.
+    Yolo,
 }
 
 #[derive(Debug, Parser)]
@@ -204,7 +206,7 @@ pub struct Opt {
     #[clap(short, global = true, long, action, conflicts_with = "stable")]
     quit: bool,
 
-    /// For the verify test, if this option is included we will allow
+    /// For the verify and yolo tests, if this option is included we will allow
     /// the write log range of data to pass the verify_volume check.
     #[clap(long, global = true, action)]
     range: bool,
@@ -514,7 +516,12 @@ impl WriteLog {
     pub fn update_wc(&mut self, index: usize) {
         assert!(self.count_cur[index] >= self.count_min[index]);
         // TODO: handle more than u32 max writes to the same location.
-        self.count_cur[index] += 1;
+        self.count_cur[index] = self.count_cur[index].wrapping_add(1);
+    }
+    pub fn undo_update_wc(&mut self, index: usize) {
+        assert!(self.count_cur[index] >= self.count_min[index]);
+        // TODO: handle more than u32 max writes to the same location.
+        self.count_cur[index] = self.count_cur[index].wrapping_sub(1);
     }
 
     // This returns the value we should expect to find at the given index,
@@ -604,6 +611,7 @@ impl WriteLog {
             let shift = self.count_min[index] / 256;
 
             let s_value = value as u32 + (256 * shift);
+            /*
             println!(
                 "Shift {}, v:{} sv:{} min:{} cur:{}",
                 shift,
@@ -612,7 +620,7 @@ impl WriteLog {
                 self.count_min[index],
                 self.count_cur[index],
             );
-
+            */
             res = s_value >= self.count_min[index]
                 && s_value <= self.count_cur[index];
 
@@ -1455,6 +1463,26 @@ async fn main() -> Result<()> {
             let count = opt.count.unwrap_or(10);
             write_flush_read_workload(&volume, count, &mut disk_info).await?;
         }
+        Workload::Yolo => {
+            // Either we have a count, or we run until we get a signal.
+            let mut wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else {
+                    let count = opt.count.unwrap_or(500);
+                    WhenToQuit::Count { count }
+                }
+            };
+
+            yolo_workload(
+                &volume,
+                &mut wtq,
+                &mut disk_info,
+                false,
+                opt.range,
+            )
+            .await?;
+        }
     }
 
     if opt.verify_at_end {
@@ -2223,6 +2251,161 @@ async fn generic_workload(
     Ok(())
 }
 
+async fn yolo_workload(
+    volume: &Volume,
+    wtq: &mut WhenToQuit,
+    di: &mut DiskInfo,
+    read_only: bool,
+    range: bool,
+) -> Result<()> {
+    /*
+     * TODO: Allow the user to specify a seed here.
+     */
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+
+    let total_blocks = di.volume_info.total_blocks();
+
+    let max_io_size = std::cmp::min(10, total_blocks);
+
+    let mut reads = 0;
+    let mut writes = 0;
+    let mut flushes = 0;
+    let mut read_errors = 0;
+    let mut write_errors = 0;
+    let mut verify_errors = 0;
+    let mut flush_errors = 0;
+    let mut last_print = Instant::now();
+    for c in 1.. {
+        let op = rng.random_range(0..100);
+
+        // Read or Write both need this
+        // Pick a random size (in blocks) for the IO, up to max_io_size
+        let size = rng.random_range(1..=max_io_size);
+
+        // Once we have our IO size, decide where the starting offset should
+        // be, which is the total possible size minus the randomly chosen
+        // IO size.
+        let block_max = total_blocks - size + 1;
+        let block_index = rng.random_range(0..block_max);
+
+        // Convert offset and length to their byte values.
+        let offset = BlockIndex(block_index as u64);
+
+
+        if op == 0 {
+            match volume.flush(None).await {
+                Ok(_) => {
+                    flushes += 1;
+                    di.write_log.commit();
+                }
+                Err(e) => {
+                    flush_errors += 1;
+                    println!("Flush error: {:?}", e);
+                }
+            }
+        } else if !read_only && op <= 50 {
+            // Write
+            // Update the write count for all blocks we plan to write to.
+            for i in 0..size {
+                di.write_log.update_wc(block_index + i);
+            }
+            let data = fill_vec(
+                block_index,
+                size,
+                &di.write_log,
+                di.volume_info.block_size,
+            );
+            assert_eq!(data[1], di.write_log.get_seed(block_index));
+            match volume.write(offset, data).await {
+                Ok(_) => {
+                    writes += 1;
+                }
+                Err(e) => {
+                    write_errors += 1;
+                    println!("Write error: {:?}", e);
+                    for i in 0..size {
+                        di.write_log.undo_update_wc(block_index + i);
+                    }
+                }
+            }
+        } else {
+            // Read (+ verify)
+            let mut data = crucible::Buffer::repeat(
+                255,
+                size,
+                di.volume_info.block_size as usize,
+            );
+            match volume.read(offset, &mut data).await {
+                Ok(_) => {
+                    reads += 1;
+                },
+                Err(e) => {
+                    read_errors += 1;
+                    eprintln!("read failed: {}", e);
+                }
+            }
+
+            let data_len = data.len();
+            let dl = data.into_bytes();
+            match validate_vec(
+                dl,
+                block_index,
+                &mut di.write_log,
+                di.volume_info.block_size,
+                range,
+            ) {
+                ValidateStatus::Bad => {
+                    eprintln!("Verify Error at {block_index} len:{data_len}");
+                    verify_errors += 1;
+                }
+                ValidateStatus::InRange => {
+                    // If range, then it is good
+                    if !range {
+                        eprintln!(
+                            "Verify Error out of range at {block_index} len:{data_len}");
+                        verify_errors += 1;
+                    }
+                }
+                ValidateStatus::Good => {}
+            }
+        }
+        if last_print.elapsed() >= Duration::from_secs(10) {
+            println!(
+                "R:{} W:{} F:{} RE:{} WE:{} VE:{} FE:{}",
+                reads, writes, flushes,
+                read_errors, write_errors, verify_errors, flush_errors
+            );
+            last_print = Instant::now();
+        }
+
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if c > *count {
+                    break;
+                }
+            }
+            WhenToQuit::Signal { shutdown_rx } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(
+                                volume, di, range
+                            ).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {} // Ignore everything else
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
 // Make use of dsc to stop and start a downstairs while sending IO.  This
 // should trigger the replay code path.
 async fn replay_workload(
