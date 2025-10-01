@@ -116,7 +116,7 @@ tokio-test = "*"
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "0.8"
 tracing = "0.1"
-tracing-opentelemetry = "0.22.0"
+tracing-opentelemetry = "0.32.0"
 tracing-subscriber = "0.3.19"
 twox-hash = "2.1.0"
 usdt = "0.5.0"
