@@ -4,14 +4,17 @@
 
 use std::process::ExitCode;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use crucible_agent_api::*;
 use crucible_downstairs_api::*;
 use crucible_pantry_api::*;
 use dropshot_api_manager::{Environment, ManagedApiConfig, ManagedApis};
-use dropshot_api_manager_types::{ManagedApiMetadata, Versions};
+use dropshot_api_manager_types::{
+    ManagedApiMetadata, ValidationContext, Versions,
+};
+use openapiv3::OpenAPI;
 
 pub fn environment() -> anyhow::Result<Environment> {
     // The workspace root is one level up from this crate's directory.
@@ -80,8 +83,16 @@ pub fn all_apis() -> anyhow::Result<ManagedApis> {
 
     let apis = ManagedApis::new(apis)
         .context("error creating ManagedApis")?
-        .with_unknown_apis(["crucible-control", "dsc-control"]);
+        .with_unknown_apis(["crucible-control", "dsc-control"])
+        .with_validation(validate);
     Ok(apis)
+}
+
+fn validate(doc: &OpenAPI, mut cx: ValidationContext<'_>) {
+    let errors = openapi_lint::validate(doc);
+    for error in errors {
+        cx.report_error(anyhow!(error));
+    }
 }
 
 fn main() -> anyhow::Result<ExitCode> {

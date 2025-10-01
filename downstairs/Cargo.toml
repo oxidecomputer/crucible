@@ -64,8 +64,6 @@ crucible-workspace-hack.workspace = true
 
 [dev-dependencies]
 expectorate.workspace = true
-openapi-lint.workspace = true
-openapiv3.workspace = true
 rand_chacha.workspace = true
 tempfile.workspace = true
 

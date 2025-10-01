@@ -13,5 +13,7 @@ crucible-downstairs-api.workspace = true
 crucible-pantry-api.workspace = true
 dropshot-api-manager-types.workspace = true
 dropshot-api-manager.workspace = true
+openapi-lint.workspace = true
+openapiv3.workspace = true
 semver.workspace = true
 crucible-workspace-hack.workspace = true
