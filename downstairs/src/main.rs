@@ -210,7 +210,6 @@ enum Args {
         #[clap(long, default_value = "rw", action)]
         mode: Mode,
     },
-    RepairAPI,
     Serve {
         #[clap(short, long, action)]
         trace_endpoint: Option<String>,
@@ -443,7 +442,6 @@ async fn main() -> Result<()> {
 
             downstairs.wait().await.map_err(anyhow::Error::from)
         }
-        Args::RepairAPI => repair::write_openapi(&mut std::io::stdout()),
         Args::Serve {
             trace_endpoint,
             bind_addr,

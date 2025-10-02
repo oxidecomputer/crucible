@@ -17,6 +17,7 @@ publish = false
 [dependencies]
 arrayvec = { version = "0.7", default-features = false, features = ["std"] }
 bitflags = { version = "2", default-features = false, features = ["serde"] }
+bstr = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive", "env", "wrap_help"] }
@@ -48,14 +49,16 @@ phf_shared = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
 rand_chacha = { version = "0.9" }
 rand_core = { version = "0.9", default-features = false, features = ["os_rng", "std"] }
-regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "stream"] }
 schemars = { version = "0.8", features = ["bytes", "chrono", "semver", "uuid1"] }
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
+similar = { version = "2", features = ["bytes"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
@@ -67,6 +70,7 @@ tracing-core = { version = "0.1" }
 usdt = { version = "0.5" }
 usdt-impl = { version = "0.5", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+winnow = { version = "0.7" }
 
 [build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde"] }
@@ -100,13 +104,14 @@ openapiv3 = { version = "2", default-features = false, features = ["skip_seriali
 percent-encoding = { version = "2" }
 phf_shared = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
-regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "stream"] }
 schemars = { version = "0.8", features = ["bytes", "chrono", "semver", "uuid1"] }
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
@@ -120,6 +125,7 @@ tracing-core = { version = "0.1" }
 usdt = { version = "0.5" }
 usdt-impl = { version = "0.5", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+winnow = { version = "0.7" }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }

@@ -4,10 +4,8 @@ use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use crucible_agent_types::smf::SmfProperty;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
-use semver::Version;
 use slog::{debug, error, info, o, Logger};
 use std::collections::HashSet;
-use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,10 +52,6 @@ use crate::resource::Resource;
 #[derive(Debug, Parser)]
 #[clap(name = PROG, about = "Crucible zone management agent")]
 enum Args {
-    OpenApi {
-        #[clap(short = 'o', action)]
-        output: PathBuf,
-    },
     Run {
         // zfs dataset to be used by the crucible agent
         #[clap(long, action)]
@@ -240,14 +234,6 @@ async fn main() -> Result<()> {
     let args = Args::try_parse()?;
 
     match args {
-        Args::OpenApi { output } => {
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(output)?;
-            write_openapi(&mut f)
-        }
         Args::Run {
             dataset,
             listen,
@@ -342,15 +328,6 @@ async fn main() -> Result<()> {
             server::run_server(&log, listen, df).await
         }
     }
-}
-
-fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
-    // TODO: Switch to OpenAPI manager once available
-    let api =
-        crucible_agent_api::crucible_agent_api_mod::stub_api_description()?;
-    api.openapi("Crucible Agent", Version::new(0, 0, 1))
-        .write(f)?;
-    Ok(())
 }
 
 fn apply_smf(
@@ -1979,28 +1956,4 @@ fn worker_region_destroy(
     region_dataset.destroy(&log)?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use openapiv3::OpenAPI;
-
-    use crate::write_openapi;
-
-    #[test]
-    fn test_crucible_agent_openapi() {
-        let mut raw = Vec::new();
-        write_openapi(&mut raw).unwrap();
-        let actual = String::from_utf8(raw).unwrap();
-
-        // Make sure the result parses as a valid OpenAPI spec.
-        let spec = serde_json::from_str::<OpenAPI>(&actual)
-            .expect("output was not valid OpenAPI");
-
-        // Check for lint errors.
-        let errors = openapi_lint::validate(&spec);
-        assert!(errors.is_empty(), "{}", errors.join("\n\n"));
-
-        expectorate::assert_contents("../openapi/crucible-agent.json", &actual);
-    }
 }

@@ -9,7 +9,6 @@ use dropshot::{
     HttpServerStarter, Path, RequestContext,
 };
 use hyper::{Response, StatusCode};
-use semver::Version;
 
 use super::*;
 use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
@@ -22,13 +21,6 @@ pub struct FileServerContext {
     read_only: bool,
     region_definition: RegionDefinition,
     downstairs: DownstairsHandle,
-}
-
-pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
-    let api = crucible_downstairs_repair_api_mod::stub_api_description()?;
-    api.openapi("Downstairs Repair", Version::new(0, 0, 1))
-        .write(f)?;
-    Ok(())
 }
 
 /// Returns Ok(listen address) if everything launched ok, Err otherwise
@@ -283,7 +275,6 @@ fn extent_file_list(
 #[cfg(test)]
 mod test {
     use super::*;
-    use openapiv3::OpenAPI;
     use tempfile::tempdir;
 
     fn new_region_options() -> crucible_common::RegionOptions {
@@ -368,25 +359,5 @@ mod test {
         assert!(extent_file_list(extent_dir, eid).is_err());
 
         Ok(())
-    }
-
-    #[test]
-    fn test_crucible_repair_openapi() {
-        let mut raw = Vec::new();
-        write_openapi(&mut raw).unwrap();
-        let actual = String::from_utf8(raw).unwrap();
-
-        // Make sure the result parses as a valid OpenAPI spec.
-        let spec = serde_json::from_str::<OpenAPI>(&actual)
-            .expect("output was not valid OpenAPI");
-
-        // Check for lint errors.
-        let errors = openapi_lint::validate(&spec);
-        assert!(errors.is_empty(), "{}", errors.join("\n\n"));
-
-        expectorate::assert_contents(
-            "../openapi/downstairs-repair.json",
-            &actual,
-        );
     }
 }
