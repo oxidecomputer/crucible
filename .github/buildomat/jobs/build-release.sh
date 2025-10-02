@@ -69,7 +69,7 @@ pfexec coreadm -i /tmp/core.%f.%p \
  -e global-setid
  
 banner prerequisites
-ptime -m ./tools/install_builder_prerequisites.sh
+ptime -m ./tools/install_builder_prerequisites.sh -y
 
 banner rbuild
 ptime -m cargo build --verbose --release --all-features
