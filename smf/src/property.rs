@@ -54,11 +54,11 @@ impl<'a> Property<'a> {
      * scf_property_get_value(3SCF)
      */
 
-    pub fn values(&self) -> Result<Values> {
+    pub fn values(&self) -> Result<Values<'_>> {
         Values::new(self)
     }
 
-    pub fn value(&self) -> Result<Option<Value>> {
+    pub fn value(&self) -> Result<Option<Value<'_>>> {
         let mut values = Values::new(self)?.collect::<Result<Vec<_>>>()?;
         match values.len() {
             0 => Ok(None),

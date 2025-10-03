@@ -40,11 +40,11 @@ impl<'a> Snapshot<'a> {
         str_from(&mut buf, ret)
     }
 
-    pub fn pgs(&self) -> Result<PropertyGroups> {
+    pub fn pgs(&self) -> Result<PropertyGroups<'_>> {
         PropertyGroups::new_composed(self.instance, self)
     }
 
-    pub fn get_pg(&self, name: &str) -> Result<Option<PropertyGroup>> {
+    pub fn get_pg(&self, name: &str) -> Result<Option<PropertyGroup<'_>>> {
         let name = CString::new(name).unwrap();
         let pg = PropertyGroup::new(self.instance.scf)?;
 

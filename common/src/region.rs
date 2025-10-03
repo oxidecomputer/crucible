@@ -279,7 +279,7 @@ impl RegionDefinition {
 
     /// Checks whether the byte length is valid
     pub fn is_valid_byte_size(&self, bytelen: usize) -> bool {
-        bytelen % (self.block_size as usize) == 0
+        bytelen.is_multiple_of(self.block_size as usize)
     }
 }
 

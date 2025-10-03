@@ -470,7 +470,7 @@ impl Upstairs {
         while !self.done() {
             let action = self.select().await;
             self.counters.apply += 1;
-            cdt::up__apply!(|| (self.counters.apply));
+            cdt::up__apply!(|| self.counters.apply);
             self.apply(action)
         }
     }
@@ -546,14 +546,12 @@ impl Upstairs {
         match action {
             UpstairsAction::Downstairs(d) => {
                 self.counters.action_downstairs += 1;
-                cdt::up__action_downstairs!(|| (self
-                    .counters
-                    .action_downstairs));
+                cdt::up__action_downstairs!(|| self.counters.action_downstairs);
                 self.apply_downstairs_action(d)
             }
             UpstairsAction::Guest(b) => {
                 self.counters.action_guest += 1;
-                cdt::up__action_guest!(|| (self.counters.action_guest));
+                cdt::up__action_guest!(|| self.counters.action_guest);
                 self.defer_guest_request(b);
             }
             UpstairsAction::GuestDropped => {
@@ -561,24 +559,24 @@ impl Upstairs {
             }
             UpstairsAction::DeferredBlockOp(req) => {
                 self.counters.action_deferred_block += 1;
-                cdt::up__action_deferred_block!(|| (self
+                cdt::up__action_deferred_block!(|| self
                     .counters
-                    .action_deferred_block));
+                    .action_deferred_block);
                 self.apply_guest_request(req);
             }
             UpstairsAction::DeferredMessage(m) => {
                 self.counters.action_deferred_message += 1;
-                cdt::up__action_deferred_message!(|| (self
+                cdt::up__action_deferred_message!(|| self
                     .counters
-                    .action_deferred_message));
+                    .action_deferred_message);
                 self.on_client_message(m);
             }
             UpstairsAction::FlushCheck => {
                 if !has_jobs {
                     self.counters.action_flush_check += 1;
-                    cdt::up__action_flush_check!(|| (self
+                    cdt::up__action_flush_check!(|| self
                         .counters
-                        .action_flush_check));
+                        .action_flush_check);
                     if self.need_flush {
                         let io_guard = self.try_acquire_io(0);
                         self.submit_flush(None, None, io_guard);
@@ -599,22 +597,20 @@ impl Upstairs {
             }
             UpstairsAction::StatUpdate => {
                 self.counters.action_stat_check += 1;
-                cdt::up__action_stat_check!(|| (self
-                    .counters
-                    .action_stat_check));
+                cdt::up__action_stat_check!(|| self.counters.action_stat_check);
                 self.on_stat_update();
                 self.stat_deadline = Instant::now() + STAT_INTERVAL;
             }
             UpstairsAction::Control(c) => {
                 self.counters.action_control_check += 1;
-                cdt::up__action_control_check!(|| (self
+                cdt::up__action_control_check!(|| self
                     .counters
-                    .action_control_check));
+                    .action_control_check);
                 self.on_control_req(c);
             }
             UpstairsAction::NoOp => {
                 self.counters.action_noop += 1;
-                cdt::up__action_noop!(|| (self.counters.action_noop));
+                cdt::up__action_noop!(|| self.counters.action_noop);
             }
         }
 
@@ -1331,7 +1327,7 @@ impl Upstairs {
             self.downstairs
                 .submit_flush(snapshot_details, res, io_guard);
 
-        cdt::up__to__ds__flush__start!(|| (ds_id.0));
+        cdt::up__to__ds__flush__start!(|| ds_id.0);
     }
 
     fn submit_barrier(&mut self) {
@@ -1341,7 +1337,7 @@ impl Upstairs {
         // call it!
         let ds_id = self.downstairs.submit_barrier();
 
-        cdt::up__to__ds__barrier__start!(|| (ds_id.0));
+        cdt::up__to__ds__barrier__start!(|| ds_id.0);
     }
 
     /// Submits a read job to the downstairs
@@ -1415,7 +1411,7 @@ impl Upstairs {
             self.downstairs
                 .submit_read(impacted_blocks, data, res, io_guard);
 
-        cdt::up__to__ds__read__start!(|| (ds_id.0));
+        cdt::up__to__ds__read__start!(|| ds_id.0);
     }
 
     /// Submits a dummy write (without an associated `BlockOp`)
@@ -1558,9 +1554,9 @@ impl Upstairs {
         );
 
         if write.is_write_unwritten {
-            cdt::up__to__ds__write__unwritten__start!(|| (ds_id.0));
+            cdt::up__to__ds__write__unwritten__start!(|| ds_id.0);
         } else {
-            cdt::up__to__ds__write__start!(|| (ds_id.0));
+            cdt::up__to__ds__write__start!(|| ds_id.0);
         }
     }
 

@@ -714,6 +714,7 @@ mod integration_tests {
             self.downstairs3.address()
         }
 
+        #[cfg_attr(not(target_os = "illumos"), expect(unused))]
         pub fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
             Ok(self.downstairs1.snapshot_exists(snapshot_name)?
                 && self.downstairs2.snapshot_exists(snapshot_name)?

@@ -115,7 +115,7 @@ impl ActiveJobs {
     #[inline]
     pub fn keys(
         &self,
-    ) -> std::collections::btree_map::Keys<JobId, DownstairsIO> {
+    ) -> std::collections::btree_map::Keys<'_, JobId, DownstairsIO> {
         self.jobs.keys()
     }
 

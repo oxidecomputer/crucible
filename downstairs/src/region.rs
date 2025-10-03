@@ -2094,7 +2094,7 @@ pub(crate) mod test {
         /*
          * Build the Vec for our region dir
          */
-        let dvec = vec![dir.into_path()];
+        let dvec = vec![dir.keep()];
 
         /*
          * Dump the region
@@ -2121,9 +2121,9 @@ pub(crate) mod test {
          * Build the Vec for our region dirs
          */
         let mut dvec = Vec::new();
-        let pdir = dir.into_path();
+        let pdir = dir.keep();
         dvec.push(pdir);
-        let pdir = dir2.into_path();
+        let pdir = dir2.keep();
         dvec.push(pdir);
 
         /*
@@ -2152,9 +2152,9 @@ pub(crate) mod test {
          * Build the Vec for our region dirs
          */
         let mut dvec = Vec::new();
-        let pdir = dir.into_path();
+        let pdir = dir.keep();
         dvec.push(pdir);
-        let pdir = dir2.into_path();
+        let pdir = dir2.keep();
         dvec.push(pdir);
 
         /*

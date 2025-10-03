@@ -275,7 +275,9 @@ async fn notify_task_nexus(
                         .iter()
                         .map(|(region_uuid, target_addr)| {
                             DownstairsUnderRepair {
-                                region_uuid: (*region_uuid).into(),
+                                region_uuid: TypedUuid::from_untyped_uuid(
+                                    *region_uuid,
+                                ),
                                 target_addr: target_addr.to_string(),
                             }
                         })
@@ -355,7 +357,9 @@ async fn notify_task_nexus(
                         .iter()
                         .map(|(region_uuid, target_addr)| {
                             DownstairsUnderRepair {
-                                region_uuid: (*region_uuid).into(),
+                                region_uuid: TypedUuid::from_untyped_uuid(
+                                    *region_uuid,
+                                ),
                                 target_addr: target_addr.to_string(),
                             }
                         })

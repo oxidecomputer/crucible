@@ -172,7 +172,7 @@ impl From<std::io::Error> for CrucibleError {
 
 impl From<CrucibleError> for std::io::Error {
     fn from(e: CrucibleError) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Other, e)
+        std::io::Error::other(e)
     }
 }
 

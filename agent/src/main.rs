@@ -8,7 +8,6 @@ use slog::{debug, error, info, o, Logger};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 const PROG: &str = "crucible-agent";
@@ -800,6 +799,394 @@ where
     Ok(())
 }
 
+/**
+ * For region with state Tombstoned, destroy the region.
+ *
+ * For region with state Requested, create the region.
+ */
+fn worker(
+    log: Logger,
+    df: Arc<datafile::DataFile>,
+    regions_dataset: ZFSDataset,
+    downstairs_program: PathBuf,
+    downstairs_prefix: String,
+    snapshot_prefix: String,
+) {
+    let regions_dataset_path = match regions_dataset.path() {
+        Ok(regions_dataset_path) => regions_dataset_path,
+        Err(e) => {
+            panic!(
+                "Cannot get regions_dataset_path for {:?}: {}",
+                regions_dataset, e,
+            );
+        }
+    };
+
+    loop {
+        /*
+         * This loop fires whenever there's work to do. This work may be:
+         *
+         * - create a region
+         * - delete a region
+         * - create a running snapshot
+         * - delete a running snapshot
+         *
+         * We use first_in_states to both get the next available Resource enum,
+         * which wraps either a Region or RegionSnapshot that has changed.
+         * Otherwise, first_in_states will wait on the condvar.
+         */
+        let work = df.first_in_states(&[State::Tombstoned, State::Requested]);
+
+        match work {
+            Resource::Region(r) => {
+                /*
+                 * If the region is State::Requested, we create that region
+                 * then run the apply_smf().
+                 *
+                 * If the region is State:Tombstoned, we apply_smf() first,
+                 * then we finish up destroying the region.
+                 */
+                match &r.state {
+                    State::Requested => 'requested: {
+                        /*
+                         * Compute the actual size required for a full region,
+                         * then add our metadata overhead to that.
+                         */
+                        let region_size = r.block_size
+                            * r.extent_size
+                            * r.extent_count as u64;
+                        let reservation =
+                            (region_size as f64 * RESERVATION_FACTOR).round()
+                                as u64;
+                        let quota = region_size * QUOTA_FACTOR;
+
+                        info!(
+                            log,
+                            "Region size:{} reservation:{} quota:{}",
+                            region_size,
+                            reservation,
+                            quota,
+                        );
+
+                        // If regions need to be created, do that before
+                        // apply_smf.
+                        let region_dataset = match regions_dataset
+                            .ensure_child_dataset(
+                                &r.id.0,
+                                Some(reservation),
+                                Some(quota),
+                                &log,
+                            ) {
+                            Ok(region_dataset) => region_dataset,
+                            Err(e) => {
+                                error!(
+                                    log,
+                                    "Dataset {} creation failed: {}",
+                                    &r.id.0,
+                                    e,
+                                );
+                                df.fail(&r.id);
+                                break 'requested;
+                            }
+                        };
+
+                        let dataset_path = match region_dataset.path() {
+                            Ok(dataset_path) => dataset_path,
+                            Err(e) => {
+                                error!(
+                                    log,
+                                    "Failed to find path for dataset {}: {}",
+                                    &r.id.0,
+                                    e,
+                                );
+                                df.fail(&r.id);
+                                break 'requested;
+                            }
+                        };
+
+                        // It's important that a region transition to "Created"
+                        // only after it has been created as a dataset:
+                        // after the crucible agent restarts, `apply_smf` will
+                        // only start downstairs services for those in
+                        // "Created". If the `df.created` is moved to after this
+                        // function's `apply_smf` call, and there is a crash
+                        // before that moved `df.created` is set, then the agent
+                        // will not start a downstairs service for this region
+                        // when rebooted.
+                        let res = worker_region_create(
+                            &log,
+                            &downstairs_program,
+                            &r,
+                            &dataset_path,
+                        )
+                        .and_then(|_| df.created(&r.id));
+
+                        if let Err(e) = res {
+                            error!(
+                                log,
+                                "region {:?} create failed: {:?}", r.id.0, e
+                            );
+                            df.fail(&r.id);
+                            break 'requested;
+                        }
+
+                        info!(log, "applying SMF actions post create...");
+                        let result = apply_smf(
+                            &log,
+                            &df,
+                            regions_dataset_path.clone(),
+                            &downstairs_prefix,
+                            &snapshot_prefix,
+                        );
+
+                        if let Err(e) = result {
+                            error!(log, "SMF application failure: {:?}", e);
+                        } else {
+                            info!(log, "SMF ok!");
+                        }
+                    }
+
+                    State::Tombstoned => 'tombstoned: {
+                        info!(log, "applying SMF actions before removal...");
+                        let result = apply_smf(
+                            &log,
+                            &df,
+                            regions_dataset_path.clone(),
+                            &downstairs_prefix,
+                            &snapshot_prefix,
+                        );
+
+                        if let Err(e) = result {
+                            error!(log, "SMF application failure: {:?}", e);
+                        } else {
+                            info!(log, "SMF ok!");
+                        }
+
+                        // After SMF successfully shuts off downstairs, remove
+                        // zfs dataset.
+                        let region_dataset =
+                            match regions_dataset.from_child_dataset(&r.id.0) {
+                                Ok(region_dataset) => region_dataset,
+                                Err(e) => {
+                                    error!(
+                                        log,
+                                        "Cannot find region {:?} to remove: {}",
+                                        r.id.0,
+                                        e,
+                                    );
+                                    let _ = df.destroyed(&r.id);
+                                    break 'tombstoned;
+                                }
+                            };
+                        let res =
+                            worker_region_destroy(&log, &r, region_dataset)
+                                .and_then(|_| df.destroyed(&r.id));
+
+                        if let Err(e) = res {
+                            error!(
+                                log,
+                                "region {:?} destroy failed: {:?}", r.id.0, e
+                            );
+                            df.fail(&r.id);
+                        }
+                    }
+                    _ => {
+                        error!(
+                            log,
+                            "worker got unexpected region state: {:?}", r
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            Resource::RunningSnapshot(region_id, snapshot_name, rs) => {
+                /*
+                 * No matter what the state is, we run apply_smf(). Creating and
+                 * deleting running snapshots only requires us to create and
+                 * delete services. The snapshots are not created by us.
+                 *
+                 * If the running snapshot is Requested, we apply_smf() first,
+                 * then set the state to Created. This is a little different
+                 * from how Regions are handled.
+                 *
+                 * If the running snapshot is Tombstoned, we apply_smf() first,
+                 * then we set the state to Destroyed
+                 */
+                info!(
+                    log,
+                    "applying SMF actions for region {} running snapshot {} (state {:?})...",
+                    rs.id.0,
+                    rs.name,
+                    rs.state,
+                );
+
+                let result = apply_smf(
+                    &log,
+                    &df,
+                    regions_dataset_path.clone(),
+                    &downstairs_prefix,
+                    &snapshot_prefix,
+                );
+
+                if let Err(e) = result {
+                    error!(log, "SMF application failure: {:?}", e);
+
+                    // There's no fail_rs here: a future `apply_smf` should
+                    // attempt to start the service again.
+                } else {
+                    info!(log, "SMF ok!");
+
+                    // `apply_smf` returned Ok, so the desired state transition
+                    // succeeded: update the datafile.
+                    let res = match &rs.state {
+                        State::Requested => {
+                            df.created_rs(&region_id, &snapshot_name)
+                        }
+
+                        State::Tombstoned => {
+                            df.destroyed_rs(&region_id, &snapshot_name)
+                        }
+
+                        _ => {
+                            error!(
+                                log,
+                                "worker got unexpected running snapshot state: {:?}",
+                                rs,
+                            );
+                            std::process::exit(1);
+                        }
+                    };
+
+                    if let Err(e) = res {
+                        error!(
+                            log,
+                            "running snapshot {} state change failed: {:?}",
+                            rs.id.0,
+                            e
+                        );
+
+                        df.fail_rs(&region_id, &snapshot_name);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn worker_region_create(
+    log: &Logger,
+    prog: &Path,
+    region: &region::Region,
+    dir: &Path,
+) -> Result<()> {
+    let log = log.new(o!("region" => region.id.0.to_string()));
+
+    /*
+     * We may have crashed half way through a previous provision. To make
+     * this idempotent, clean out the target data directory and try
+     * again.
+     */
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if entry.file_type()?.is_dir() {
+            info!(log, "removing existing directory {:?}", path);
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            info!(log, "removing existing file {:?}", path);
+            std::fs::remove_file(&path)?;
+        }
+    }
+
+    /*
+     * Run the downstairs program in the mode where it will create the data
+     * files (note region starts blank).
+     */
+    info!(log, "creating region {:?} at {:?}", region, dir);
+
+    let mut binding = std::process::Command::new(prog);
+    let mut cmd = binding
+        .env_clear()
+        .arg("create")
+        .arg("--uuid")
+        .arg(region.id.0.clone())
+        .arg("--data")
+        .arg(dir)
+        .arg("--block-size")
+        .arg(region.block_size.to_string())
+        .arg("--extent-size")
+        .arg(region.extent_size.to_string())
+        .arg("--extent-count")
+        .arg(region.extent_count.to_string());
+
+    if region.encrypted {
+        cmd = cmd.arg("--encrypted");
+    }
+
+    if let Some(source) = region.source {
+        cmd = cmd.arg("--clone-source").arg(source.to_string());
+    }
+
+    info!(log, "downstairs create with: {:?}", cmd);
+    let cmd = cmd.output()?;
+
+    if cmd.status.success() {
+        info!(log, "region files created ok");
+    } else {
+        let err = String::from_utf8_lossy(&cmd.stderr);
+        let out = String::from_utf8_lossy(&cmd.stdout);
+        error!(log, "downstairs create failed: out {:?} err {:?}", out, err);
+        bail!("region files create failure");
+    }
+
+    /*
+     * If there are X509 files, write those out to the same directory.
+     */
+    if let Some(cert_pem) = &region.cert_pem {
+        let mut path = dir.to_path_buf();
+        path.push("cert.pem");
+        std::fs::write(path, cert_pem)?;
+    }
+
+    if let Some(key_pem) = &region.key_pem {
+        let mut path = dir.to_path_buf();
+        path.push("key.pem");
+        std::fs::write(path, key_pem)?;
+    }
+
+    if let Some(root_pem) = &region.root_pem {
+        let mut path = dir.to_path_buf();
+        path.push("root.pem");
+        std::fs::write(path, root_pem)?;
+    }
+
+    /*
+     * `apply_smf` will then create the appropriate instance
+     */
+
+    Ok(())
+}
+
+fn worker_region_destroy(
+    log: &Logger,
+    region: &region::Region,
+    region_dataset: ZFSDataset,
+) -> Result<()> {
+    let log = log.new(o!("region" => region.id.0.to_string()));
+
+    let region_dataset_name = region_dataset.dataset();
+
+    info!(log, "deleting zfs dataset {:?}", region_dataset_name);
+
+    // Note: zfs destroy will fail if snapshots exist, but previous steps should
+    // prevent that scenario.
+    region_dataset.destroy(&log)?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -863,8 +1250,8 @@ mod test {
         let expected_snapshot_instances: Vec<String> = running_snapshots
             .iter()
             .flat_map(|(_, n)| {
-                n.iter()
-                    .map(|(_, s)| {
+                n.values()
+                    .map(|s| {
                         format!("{}-{}-{}", snapshot_prefix, s.id.0, s.name)
                     })
                     .collect::<Vec<String>>()
@@ -1568,392 +1955,4 @@ mod test {
 
         Ok(())
     }
-}
-
-/**
- * For region with state Tombstoned, destroy the region.
- *
- * For region with state Requested, create the region.
- */
-fn worker(
-    log: Logger,
-    df: Arc<datafile::DataFile>,
-    regions_dataset: ZFSDataset,
-    downstairs_program: PathBuf,
-    downstairs_prefix: String,
-    snapshot_prefix: String,
-) {
-    let regions_dataset_path = match regions_dataset.path() {
-        Ok(regions_dataset_path) => regions_dataset_path,
-        Err(e) => {
-            panic!(
-                "Cannot get regions_dataset_path for {:?}: {}",
-                regions_dataset, e,
-            );
-        }
-    };
-
-    loop {
-        /*
-         * This loop fires whenever there's work to do. This work may be:
-         *
-         * - create a region
-         * - delete a region
-         * - create a running snapshot
-         * - delete a running snapshot
-         *
-         * We use first_in_states to both get the next available Resource enum,
-         * which wraps either a Region or RegionSnapshot that has changed.
-         * Otherwise, first_in_states will wait on the condvar.
-         */
-        let work = df.first_in_states(&[State::Tombstoned, State::Requested]);
-
-        match work {
-            Resource::Region(r) => {
-                /*
-                 * If the region is State::Requested, we create that region
-                 * then run the apply_smf().
-                 *
-                 * If the region is State:Tombstoned, we apply_smf() first,
-                 * then we finish up destroying the region.
-                 */
-                match &r.state {
-                    State::Requested => 'requested: {
-                        /*
-                         * Compute the actual size required for a full region,
-                         * then add our metadata overhead to that.
-                         */
-                        let region_size = r.block_size
-                            * r.extent_size
-                            * r.extent_count as u64;
-                        let reservation =
-                            (region_size as f64 * RESERVATION_FACTOR).round()
-                                as u64;
-                        let quota = region_size * QUOTA_FACTOR;
-
-                        info!(
-                            log,
-                            "Region size:{} reservation:{} quota:{}",
-                            region_size,
-                            reservation,
-                            quota,
-                        );
-
-                        // If regions need to be created, do that before
-                        // apply_smf.
-                        let region_dataset = match regions_dataset
-                            .ensure_child_dataset(
-                                &r.id.0,
-                                Some(reservation),
-                                Some(quota),
-                                &log,
-                            ) {
-                            Ok(region_dataset) => region_dataset,
-                            Err(e) => {
-                                error!(
-                                    log,
-                                    "Dataset {} creation failed: {}",
-                                    &r.id.0,
-                                    e,
-                                );
-                                df.fail(&r.id);
-                                break 'requested;
-                            }
-                        };
-
-                        let dataset_path = match region_dataset.path() {
-                            Ok(dataset_path) => dataset_path,
-                            Err(e) => {
-                                error!(
-                                    log,
-                                    "Failed to find path for dataset {}: {}",
-                                    &r.id.0,
-                                    e,
-                                );
-                                df.fail(&r.id);
-                                break 'requested;
-                            }
-                        };
-
-                        // It's important that a region transition to "Created"
-                        // only after it has been created as a dataset:
-                        // after the crucible agent restarts, `apply_smf` will
-                        // only start downstairs services for those in
-                        // "Created". If the `df.created` is moved to after this
-                        // function's `apply_smf` call, and there is a crash
-                        // before that moved `df.created` is set, then the agent
-                        // will not start a downstairs service for this region
-                        // when rebooted.
-                        let res = worker_region_create(
-                            &log,
-                            &downstairs_program,
-                            &r,
-                            &dataset_path,
-                        )
-                        .and_then(|_| df.created(&r.id));
-
-                        if let Err(e) = res {
-                            error!(
-                                log,
-                                "region {:?} create failed: {:?}", r.id.0, e
-                            );
-                            df.fail(&r.id);
-                            break 'requested;
-                        }
-
-                        info!(log, "applying SMF actions post create...");
-                        let result = apply_smf(
-                            &log,
-                            &df,
-                            regions_dataset_path.clone(),
-                            &downstairs_prefix,
-                            &snapshot_prefix,
-                        );
-
-                        if let Err(e) = result {
-                            error!(log, "SMF application failure: {:?}", e);
-                        } else {
-                            info!(log, "SMF ok!");
-                        }
-                    }
-
-                    State::Tombstoned => 'tombstoned: {
-                        info!(log, "applying SMF actions before removal...");
-                        let result = apply_smf(
-                            &log,
-                            &df,
-                            regions_dataset_path.clone(),
-                            &downstairs_prefix,
-                            &snapshot_prefix,
-                        );
-
-                        if let Err(e) = result {
-                            error!(log, "SMF application failure: {:?}", e);
-                        } else {
-                            info!(log, "SMF ok!");
-                        }
-
-                        // After SMF successfully shuts off downstairs, remove
-                        // zfs dataset.
-                        let region_dataset =
-                            match regions_dataset.from_child_dataset(&r.id.0) {
-                                Ok(region_dataset) => region_dataset,
-                                Err(e) => {
-                                    error!(
-                                        log,
-                                        "Cannot find region {:?} to remove: {}",
-                                        r.id.0,
-                                        e,
-                                    );
-                                    let _ = df.destroyed(&r.id);
-                                    break 'tombstoned;
-                                }
-                            };
-                        let res =
-                            worker_region_destroy(&log, &r, region_dataset)
-                                .and_then(|_| df.destroyed(&r.id));
-
-                        if let Err(e) = res {
-                            error!(
-                                log,
-                                "region {:?} destroy failed: {:?}", r.id.0, e
-                            );
-                            df.fail(&r.id);
-                        }
-                    }
-                    _ => {
-                        error!(
-                            log,
-                            "worker got unexpected region state: {:?}", r
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
-
-            Resource::RunningSnapshot(region_id, snapshot_name, rs) => {
-                /*
-                 * No matter what the state is, we run apply_smf(). Creating and
-                 * deleting running snapshots only requires us to create and
-                 * delete services. The snapshots are not created by us.
-                 *
-                 * If the running snapshot is Requested, we apply_smf() first,
-                 * then set the state to Created. This is a little different
-                 * from how Regions are handled.
-                 *
-                 * If the running snapshot is Tombstoned, we apply_smf() first,
-                 * then we set the state to Destroyed
-                 */
-                info!(
-                    log,
-                    "applying SMF actions for region {} running snapshot {} (state {:?})...",
-                    rs.id.0,
-                    rs.name,
-                    rs.state,
-                );
-
-                let result = apply_smf(
-                    &log,
-                    &df,
-                    regions_dataset_path.clone(),
-                    &downstairs_prefix,
-                    &snapshot_prefix,
-                );
-
-                if let Err(e) = result {
-                    error!(log, "SMF application failure: {:?}", e);
-
-                    // There's no fail_rs here: a future `apply_smf` should
-                    // attempt to start the service again.
-                } else {
-                    info!(log, "SMF ok!");
-
-                    // `apply_smf` returned Ok, so the desired state transition
-                    // succeeded: update the datafile.
-                    let res = match &rs.state {
-                        State::Requested => {
-                            df.created_rs(&region_id, &snapshot_name)
-                        }
-
-                        State::Tombstoned => {
-                            df.destroyed_rs(&region_id, &snapshot_name)
-                        }
-
-                        _ => {
-                            error!(
-                                log,
-                                "worker got unexpected running snapshot state: {:?}",
-                                rs,
-                            );
-                            std::process::exit(1);
-                        }
-                    };
-
-                    if let Err(e) = res {
-                        error!(
-                            log,
-                            "running snapshot {} state change failed: {:?}",
-                            rs.id.0,
-                            e
-                        );
-
-                        df.fail_rs(&region_id, &snapshot_name);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn worker_region_create(
-    log: &Logger,
-    prog: &Path,
-    region: &region::Region,
-    dir: &Path,
-) -> Result<()> {
-    let log = log.new(o!("region" => region.id.0.to_string()));
-
-    /*
-     * We may have crashed half way through a previous provision. To make
-     * this idempotent, clean out the target data directory and try
-     * again.
-     */
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if entry.file_type()?.is_dir() {
-            info!(log, "removing existing directory {:?}", path);
-            std::fs::remove_dir_all(&path)?;
-        } else {
-            info!(log, "removing existing file {:?}", path);
-            std::fs::remove_file(&path)?;
-        }
-    }
-
-    /*
-     * Run the downstairs program in the mode where it will create the data
-     * files (note region starts blank).
-     */
-    info!(log, "creating region {:?} at {:?}", region, dir);
-
-    let mut binding = Command::new(prog);
-    let mut cmd = binding
-        .env_clear()
-        .arg("create")
-        .arg("--uuid")
-        .arg(region.id.0.clone())
-        .arg("--data")
-        .arg(dir)
-        .arg("--block-size")
-        .arg(region.block_size.to_string())
-        .arg("--extent-size")
-        .arg(region.extent_size.to_string())
-        .arg("--extent-count")
-        .arg(region.extent_count.to_string());
-
-    if region.encrypted {
-        cmd = cmd.arg("--encrypted");
-    }
-
-    if let Some(source) = region.source {
-        cmd = cmd.arg("--clone-source").arg(source.to_string());
-    }
-
-    info!(log, "downstairs create with: {:?}", cmd);
-    let cmd = cmd.output()?;
-
-    if cmd.status.success() {
-        info!(log, "region files created ok");
-    } else {
-        let err = String::from_utf8_lossy(&cmd.stderr);
-        let out = String::from_utf8_lossy(&cmd.stdout);
-        error!(log, "downstairs create failed: out {:?} err {:?}", out, err);
-        bail!("region files create failure");
-    }
-
-    /*
-     * If there are X509 files, write those out to the same directory.
-     */
-    if let Some(cert_pem) = &region.cert_pem {
-        let mut path = dir.to_path_buf();
-        path.push("cert.pem");
-        std::fs::write(path, cert_pem)?;
-    }
-
-    if let Some(key_pem) = &region.key_pem {
-        let mut path = dir.to_path_buf();
-        path.push("key.pem");
-        std::fs::write(path, key_pem)?;
-    }
-
-    if let Some(root_pem) = &region.root_pem {
-        let mut path = dir.to_path_buf();
-        path.push("root.pem");
-        std::fs::write(path, root_pem)?;
-    }
-
-    /*
-     * `apply_smf` will then create the appropriate instance
-     */
-
-    Ok(())
-}
-
-fn worker_region_destroy(
-    log: &Logger,
-    region: &region::Region,
-    region_dataset: ZFSDataset,
-) -> Result<()> {
-    let log = log.new(o!("region" => region.id.0.to_string()));
-
-    let region_dataset_name = region_dataset.dataset();
-
-    info!(log, "deleting zfs dataset {:?}", region_dataset_name);
-
-    // Note: zfs destroy will fail if snapshots exist, but previous steps should
-    // prevent that scenario.
-    region_dataset.destroy(&log)?;
-
-    Ok(())
 }

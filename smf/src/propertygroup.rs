@@ -54,11 +54,11 @@ impl<'a> PropertyGroup<'a> {
         str_from(&mut buf, ret)
     }
 
-    pub fn properties(&self) -> Result<Properties> {
+    pub fn properties(&self) -> Result<Properties<'_>> {
         Properties::new(self)
     }
 
-    pub fn get_property(&self, name: &str) -> Result<Option<Property>> {
+    pub fn get_property(&self, name: &str) -> Result<Option<Property<'_>>> {
         let name = CString::new(name).unwrap();
         let prop = Property::new(self.scf)?;
 
@@ -100,7 +100,7 @@ impl<'a> PropertyGroup<'a> {
         }
     }
 
-    pub fn transaction(&self) -> Result<Transaction> {
+    pub fn transaction(&self) -> Result<Transaction<'_>> {
         let tx = Transaction::new(self)?;
         Ok(tx)
     }

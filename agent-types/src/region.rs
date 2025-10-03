@@ -64,7 +64,7 @@ impl Region {
      * Given a root directory, return a list of SMF properties to ensure for
      * the corresponding running instance.
      */
-    pub fn get_smf_properties(&self, dir: &Path) -> Vec<SmfProperty> {
+    pub fn get_smf_properties(&self, dir: &Path) -> Vec<SmfProperty<'_>> {
         let mut results = vec![
             SmfProperty {
                 name: "directory",
