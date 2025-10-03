@@ -597,9 +597,7 @@ impl Upstairs {
             }
             UpstairsAction::StatUpdate => {
                 self.counters.action_stat_check += 1;
-                cdt::up__action_stat_check!(|| self
-                    .counters
-                    .action_stat_check);
+                cdt::up__action_stat_check!(|| self.counters.action_stat_check);
                 self.on_stat_update();
                 self.stat_deadline = Instant::now() + STAT_INTERVAL;
             }

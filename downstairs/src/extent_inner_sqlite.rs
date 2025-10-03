@@ -898,9 +898,7 @@ impl SqliteMoreInner {
 
             // write out
             metadb.close().map_err(|e| {
-                std::io::Error::other(
-                    format!("metadb.close() failed! {}", e.1),
-                )
+                std::io::Error::other(format!("metadb.close() failed! {}", e.1))
             })?;
 
             // Save it as DB seed

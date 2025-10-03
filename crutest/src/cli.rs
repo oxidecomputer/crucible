@@ -605,7 +605,10 @@ impl Prompt for CliPrompt {
         Cow::Owned(String::from(""))
     }
 
-    fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<'_, str> {
+    fn render_prompt_indicator(
+        &self,
+        _edit_mode: PromptEditMode,
+    ) -> Cow<'_, str> {
         Cow::Owned(String::from(""))
     }
 
