@@ -1030,8 +1030,8 @@ impl ActiveConnection {
     fn reply(
         &self,
         msg: Message,
-    ) -> Result<(), mpsc::error::SendError<Message>> {
-        self.data.reply_channel_tx.send(msg)
+    ) -> Result<(), Box<mpsc::error::SendError<Message>>> {
+        self.data.reply_channel_tx.send(msg).map_err(Box::new)
     }
 
     async fn handle_frame(
@@ -1908,8 +1908,8 @@ impl ConnectionState {
     fn reply(
         &self,
         msg: Message,
-    ) -> Result<(), mpsc::error::SendError<Message>> {
-        self.data().reply_channel_tx.send(msg)
+    ) -> Result<(), Box<mpsc::error::SendError<Message>>> {
+        self.data().reply_channel_tx.send(msg).map_err(Box::new)
     }
 
     fn upstairs_connection(&self) -> Option<UpstairsConnection> {

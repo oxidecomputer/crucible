@@ -244,8 +244,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
 impl<T: BlockIO> Read for CruciblePseudoFile<T> {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
         if !self.active {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 CrucibleError::UpstairsInactive,
             ));
         }
@@ -260,8 +259,7 @@ impl<T: BlockIO> Read for CruciblePseudoFile<T> {
 impl<T: BlockIO> Write for CruciblePseudoFile<T> {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
         if !self.active {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 CrucibleError::UpstairsInactive,
             ));
         }
@@ -274,8 +272,7 @@ impl<T: BlockIO> Write for CruciblePseudoFile<T> {
 
     fn flush(&mut self) -> IOResult<()> {
         if !self.active {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 CrucibleError::UpstairsInactive,
             ));
         }
@@ -306,8 +303,7 @@ impl<T: BlockIO> Seek for CruciblePseudoFile<T> {
         }
 
         if offset < 0 {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(std::io::Error::other(
                 "offset is negative!",
             ))
         } else {

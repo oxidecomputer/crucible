@@ -898,8 +898,7 @@ impl SqliteMoreInner {
 
             // write out
             metadb.close().map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                std::io::Error::other(
                     format!("metadb.close() failed! {}", e.1),
                 )
             })?;

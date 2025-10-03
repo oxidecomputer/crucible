@@ -133,8 +133,8 @@ impl DownstairsHandle {
     fn send(
         &mut self,
         m: Message,
-    ) -> Result<(), mpsc::error::SendError<Message>> {
-        self.tx.send(m)
+    ) -> Result<(), Box<mpsc::error::SendError<Message>>> {
+        self.tx.send(m).map_err(Box::new)
     }
 
     pub async fn negotiate_start(&mut self) {

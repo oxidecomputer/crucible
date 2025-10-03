@@ -1627,7 +1627,7 @@ impl DownstairsClient {
                 ..
             } => {
                 assert!(!dest_clients.is_empty());
-                if dest_clients.iter().any(|d| *d == self.client_id) {
+                if dest_clients.contains(&self.client_id) {
                     info!(self.log, "sending reconcile request {repair_id:?}");
                     self.send(job.op.clone());
                 } else {

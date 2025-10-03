@@ -611,24 +611,24 @@ impl Downstairs {
     ) {
         match work {
             IOop::Read { .. } => {
-                cdt::gw__read__done!(|| (ds_id.0));
+                cdt::gw__read__done!(|| ds_id.0);
                 stats.add_read(io_size as i64);
             }
             IOop::Write { .. } => {
-                cdt::gw__write__done!(|| (ds_id.0));
+                cdt::gw__write__done!(|| ds_id.0);
                 // We already updated metrics right after the fast ack.
             }
             IOop::WriteUnwritten { .. } => {
-                cdt::gw__write__unwritten__done!(|| (ds_id.0));
+                cdt::gw__write__unwritten__done!(|| ds_id.0);
                 // We don't include WriteUnwritten operation in the
                 // metrics for this guest.
             }
             IOop::Flush { .. } => {
-                cdt::gw__flush__done!(|| (ds_id.0));
+                cdt::gw__flush__done!(|| ds_id.0);
                 stats.add_flush();
             }
             IOop::Barrier { .. } => {
-                cdt::gw__barrier__done!(|| (ds_id.0));
+                cdt::gw__barrier__done!(|| ds_id.0);
                 stats.add_barrier();
             }
             IOop::ExtentFlushClose { extent, .. } => {
@@ -640,7 +640,7 @@ impl Downstairs {
                 stats.add_extent_repair();
             }
             IOop::ExtentLiveNoOp { .. } => {
-                cdt::gw__noop__done!(|| (ds_id.0));
+                cdt::gw__noop__done!(|| ds_id.0);
                 stats.add_extent_noop();
             }
             IOop::ExtentLiveReopen { extent, .. } => {
@@ -1239,7 +1239,7 @@ impl Downstairs {
                     let flush_id = self.submit_flush(None, None, None);
 
                     info!(self.log, "LiveRepair final flush submitted");
-                    cdt::up__to__ds__flush__start!(|| (flush_id.0));
+                    cdt::up__to__ds__flush__start!(|| flush_id.0);
 
                     // The borrow was dropped earlier, so reborrow `self.repair`
                     self.repair.as_mut().unwrap().state =
@@ -1278,7 +1278,7 @@ impl Downstairs {
     fn create_and_enqueue_noop_io(&mut self, deps: Vec<JobId>, noop_id: JobId) {
         let nio = IOop::ExtentLiveNoOp { dependencies: deps };
 
-        cdt::gw__noop__start!(|| (noop_id.0));
+        cdt::gw__noop__start!(|| noop_id.0);
         self.enqueue(noop_id, nio, None, None)
     }
 
@@ -1559,9 +1559,9 @@ impl Downstairs {
     ) -> JobId {
         let ds_id = self.next_id();
         if is_write_unwritten {
-            cdt::gw__write__unwritten__start!(|| (ds_id.0));
+            cdt::gw__write__unwritten__start!(|| ds_id.0);
         } else {
-            cdt::gw__write__start!(|| (ds_id.0));
+            cdt::gw__write__start!(|| ds_id.0);
         }
 
         let dependencies = self.ds_active.deps_for_write(ds_id, blocks);
@@ -1988,7 +1988,7 @@ impl Downstairs {
         io_guard: Option<IOLimitGuard>,
     ) -> JobId {
         let next_id = self.next_id();
-        cdt::gw__flush__start!(|| (next_id.0));
+        cdt::gw__flush__start!(|| next_id.0);
 
         let flush_id = self.next_flush_id();
         let dep = self.ds_active.deps_for_flush(next_id);
@@ -2062,7 +2062,7 @@ impl Downstairs {
 
     pub(crate) fn submit_barrier(&mut self) -> JobId {
         let next_id = self.next_id();
-        cdt::gw__barrier__start!(|| (next_id.0));
+        cdt::gw__barrier__start!(|| next_id.0);
 
         // A barrier has the same deps as a flush (namely, it depends on all
         // previous jobs and acts as the only dependency for all subsequent

@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
     let total_blocks: u64 = guest.total_size().await? / bsz;
 
     let io_size = if let Some(io_size_in_bytes) = opt.io_size_in_bytes {
-        if io_size_in_bytes as u64 % bsz != 0 {
+        if !(io_size_in_bytes as u64).is_multiple_of(bsz) {
             bail!(
                 "invalid io size: {io_size_in_bytes} is not divisible by {bsz}"
             );
