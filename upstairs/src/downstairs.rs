@@ -680,7 +680,8 @@ impl Downstairs {
 
         // Restart the IO task for that specific client, transitioning to a new
         // state.
-        self.clients[client_id].reinitialize(up_state, self.can_replay);
+        let can_replay = self.can_replay && !self.live_repair_in_progress();
+        self.clients[client_id].reinitialize(up_state, can_replay);
 
         // If the IO task stops on its own, then under certain circumstances,
         // we want to skip all of its jobs.  (If we requested that the IO task
@@ -2663,12 +2664,6 @@ impl Downstairs {
             warn!(
                 self.log,
                 "downstairs became ineligible for replay while offline"
-            );
-            true
-        } else if self.live_repair_in_progress() {
-            warn!(
-                self.log,
-                "downstairs {client_id} no replay while offline because LR"
             );
             true
         } else {
