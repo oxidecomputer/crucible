@@ -376,6 +376,14 @@ impl RandReadWriteConfig {
     }
 }
 
+/// For tests that need to pick an operation to do.
+#[derive(Debug, Copy, Clone)]
+enum Op {
+    Flush,
+    Read,
+    Write,
+}
+
 /// Configuration for `bufferbloat_workload`
 #[derive(Copy, Clone, Debug)]
 struct BufferbloatConfig {
@@ -611,16 +619,6 @@ impl WriteLog {
             let shift = self.count_min[index] / 256;
 
             let s_value = value as u32 + (256 * shift);
-            /*
-            println!(
-                "Shift {}, v:{} sv:{} min:{} cur:{}",
-                shift,
-                value,
-                s_value,
-                self.count_min[index],
-                self.count_cur[index],
-            );
-            */
             res = s_value >= self.count_min[index]
                 && s_value <= self.count_cur[index];
 
@@ -2252,9 +2250,7 @@ async fn yolo_workload(
     read_only: bool,
     range: bool,
 ) -> Result<()> {
-    /*
-     * TODO: Allow the user to specify a seed here.
-     */
+    // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
 
     let total_blocks = di.volume_info.total_blocks();
@@ -2270,8 +2266,6 @@ async fn yolo_workload(
     let mut flush_errors = 0;
     let mut last_print = Instant::now();
     for c in 1.. {
-        let op = rng.random_range(0..100);
-
         // Read or Write both need this
         // Pick a random size (in blocks) for the IO, up to max_io_size
         let size = rng.random_range(1..=max_io_size);
@@ -2285,81 +2279,94 @@ async fn yolo_workload(
         // Convert offset and length to their byte values.
         let offset = BlockIndex(block_index as u64);
 
-        if op == 0 {
-            match volume.flush(None).await {
+        // Select our next operation.
+        let choices = [
+            (Op::Flush, 1),
+            (Op::Read, 49),
+            (Op::Write, if read_only { 0 } else { 50 }),
+        ];
+        match choices.choose_weighted(&mut rng, |item| item.1).unwrap().0 {
+            Op::Flush => match volume.flush(None).await {
                 Ok(_) => {
                     flushes += 1;
                     di.write_log.commit();
                 }
                 Err(e) => {
                     flush_errors += 1;
-                    println!("Flush error: {:?}", e);
+                    eprintln!("Flush error: {:?}", e);
                 }
-            }
-        } else if !read_only && op <= 50 {
-            // Write
-            // Update the write count for all blocks we plan to write to.
-            for i in 0..size {
-                di.write_log.update_wc(block_index + i);
-            }
-            let data = fill_vec(
-                block_index,
-                size,
-                &di.write_log,
-                di.volume_info.block_size,
-            );
-            assert_eq!(data[1], di.write_log.get_seed(block_index));
-            match volume.write(offset, data).await {
-                Ok(_) => {
-                    writes += 1;
+            },
+            Op::Write => {
+                // Write
+                // Update the write count for all blocks we plan to write to.
+                for i in 0..size {
+                    di.write_log.update_wc(block_index + i);
                 }
-                Err(e) => {
-                    write_errors += 1;
-                    println!("Write error: {:?}", e);
-                    for i in 0..size {
-                        di.write_log.undo_update_wc(block_index + i);
+                let data = fill_vec(
+                    block_index,
+                    size,
+                    &di.write_log,
+                    di.volume_info.block_size,
+                );
+                assert_eq!(data[1], di.write_log.get_seed(block_index));
+                match volume.write(offset, data).await {
+                    Ok(_) => {
+                        writes += 1;
+                    }
+                    Err(e) => {
+                        write_errors += 1;
+                        eprintln!("Write error: {:?}", e);
+                        for i in 0..size {
+                            di.write_log.undo_update_wc(block_index + i);
+                        }
                     }
                 }
             }
-        } else {
-            // Read (+ verify)
-            let mut data = crucible::Buffer::repeat(
-                255,
-                size,
-                di.volume_info.block_size as usize,
-            );
-            match volume.read(offset, &mut data).await {
-                Ok(_) => {
-                    reads += 1;
+            Op::Read => {
+                // Read (+ verify)
+                let mut data = crucible::Buffer::repeat(
+                    255,
+                    size,
+                    di.volume_info.block_size as usize,
+                );
+                match volume.read(offset, &mut data).await {
+                    Ok(_) => {
+                        reads += 1;
+                    }
+                    Err(e) => {
+                        read_errors += 1;
+                        eprintln!("read failed: {}", e);
+                    }
                 }
-                Err(e) => {
-                    read_errors += 1;
-                    eprintln!("read failed: {}", e);
-                }
-            }
 
-            let data_len = data.len();
-            let dl = data.into_bytes();
-            match validate_vec(
-                dl,
-                block_index,
-                &mut di.write_log,
-                di.volume_info.block_size,
-                range,
-            ) {
-                ValidateStatus::Bad => {
-                    eprintln!("Verify Error at {block_index} len:{data_len}");
-                    verify_errors += 1;
-                }
-                ValidateStatus::InRange => {
-                    // If range, then it is good
-                    if !range {
+                let data_len = data.len();
+                let dl = data.into_bytes();
+                match validate_vec(
+                    dl,
+                    block_index,
+                    &mut di.write_log,
+                    di.volume_info.block_size,
+                    range,
+                ) {
+                    ValidateStatus::Bad => {
                         eprintln!(
-                            "Verify Error out of range at {block_index} len:{data_len}");
+                            "Verify Error at {block_index} len:{data_len}"
+                        );
                         verify_errors += 1;
                     }
+                    ValidateStatus::InRange => {
+                        // If the caller is okay with the expected value being
+                        // in the range since the last commit, then this is
+                        // not an error.  If the caller does not want this
+                        // (range is false) then this is an error.
+                        if !range {
+                            eprintln!(
+                                "Verify Error out of range at {block_index} len:{data_len}");
+                            verify_errors += 1;
+                        }
+                    }
+                    ValidateStatus::Good => {}
                 }
-                ValidateStatus::Good => {}
             }
         }
         if last_print.elapsed() >= Duration::from_secs(10) {
@@ -2402,6 +2409,7 @@ async fn yolo_workload(
 
     Ok(())
 }
+
 // Make use of dsc to stop and start a downstairs while sending IO.  This
 // should trigger the replay code path.
 async fn replay_workload(

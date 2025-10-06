@@ -71,9 +71,9 @@ pub(crate) struct Downstairs {
     /// Indicates whether we are eligible for replay
     ///
     /// We are only eligible for replay if all jobs since the last flush are
-    /// buffered (i.e. none have been retired by a `Barrier` operation, or we
+    /// buffered (i.e. none have been retired by a `Barrier` operation), or we
     /// have not performed or started a LiveRepair while this downstairs was
-    /// offline).
+    /// offline.
     can_replay: bool,
 
     /// How many `Flush` or `Barrier` operations are pending?
