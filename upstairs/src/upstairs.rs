@@ -2285,7 +2285,7 @@ pub(crate) mod test {
     }
 
     /// Helper function to legally move the given client to live-repair ready
-    fn to_live_repair_ready(up: &mut Upstairs, to_repair: ClientId) {
+    pub(crate) fn to_live_repair_ready(up: &mut Upstairs, to_repair: ClientId) {
         up.downstairs.fault_client(
             to_repair,
             &UpstairsState::Active,
