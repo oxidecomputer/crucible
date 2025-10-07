@@ -157,7 +157,7 @@ impl Scf {
         }
     }
 
-    pub fn scope_local(&self) -> Result<Scope> {
+    pub fn scope_local(&self) -> Result<Scope<'_>> {
         let scope = Scope::new(self)?;
 
         if unsafe {
@@ -174,7 +174,7 @@ impl Scf {
         Ok(scope)
     }
 
-    pub fn scopes(&self) -> Result<Scopes> {
+    pub fn scopes(&self) -> Result<Scopes<'_>> {
         Scopes::new(self)
     }
 

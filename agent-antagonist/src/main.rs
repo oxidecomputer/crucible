@@ -718,6 +718,10 @@ async fn signal_thread(log: Logger, stop_flag: Arc<AtomicBool>) {
     }
 }
 
+#[allow(
+    clippy::disallowed_macros,
+    reason = "using `#[tokio::main]` in tests is fine"
+)]
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::try_parse()?;

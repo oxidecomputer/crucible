@@ -22,7 +22,7 @@ enum XtaskCommands {
     Openapi(external::External),
 }
 
-#[expect(
+#[allow(
     clippy::disallowed_macros,
     reason = "using `#[tokio::main]` in xtasks is fine, as they are not \
      deployed in production"

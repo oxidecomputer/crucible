@@ -352,7 +352,7 @@ impl PantryEntry {
             size_to_validate.unwrap_or(self.volume.total_size().await?);
 
         let block_size = self.volume.get_block_size().await?;
-        if (size_to_validate % block_size) != 0 {
+        if !size_to_validate.is_multiple_of(block_size) {
             crucible_bail!(
                 InvalidNumberOfBlocks,
                 "size to validate {} not divisible by block size {}!",
@@ -588,13 +588,7 @@ impl Pantry {
     }
 
     pub async fn status(&self) -> Result<PantryStatus, HttpError> {
-        let volumes = self
-            .entries
-            .lock()
-            .await
-            .iter()
-            .map(|(k, _)| k.clone())
-            .collect();
+        let volumes = self.entries.lock().await.keys().cloned().collect();
 
         let num_job_handles = self.jobs.lock().await.total_job_handles();
 

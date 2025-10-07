@@ -147,7 +147,7 @@ impl<'a> Instance<'a> {
         Ok((state, next_state))
     }
 
-    pub fn snapshots(&self) -> Result<Snapshots> {
+    pub fn snapshots(&self) -> Result<Snapshots<'_>> {
         Snapshots::new(self)
     }
 
@@ -161,12 +161,12 @@ impl<'a> Instance<'a> {
      * `running` snapshot. May return other errors if querying for the running
      * snapshot fails.
      */
-    pub fn get_running_snapshot(&self) -> Result<Snapshot> {
+    pub fn get_running_snapshot(&self) -> Result<Snapshot<'_>> {
         let maybe_snapshot = self.get_snapshot("running")?;
         maybe_snapshot.ok_or(ScfError::NoRunningSnapshot)
     }
 
-    pub fn get_snapshot(&self, name: &str) -> Result<Option<Snapshot>> {
+    pub fn get_snapshot(&self, name: &str) -> Result<Option<Snapshot<'_>>> {
         let name = CString::new(name).unwrap();
         let snap = Snapshot::new(self)?;
 
@@ -188,11 +188,11 @@ impl<'a> Instance<'a> {
         }
     }
 
-    pub fn pgs(&self) -> Result<PropertyGroups> {
+    pub fn pgs(&self) -> Result<PropertyGroups<'_>> {
         PropertyGroups::new_instance(self)
     }
 
-    pub fn get_pg(&self, name: &str) -> Result<Option<PropertyGroup>> {
+    pub fn get_pg(&self, name: &str) -> Result<Option<PropertyGroup<'_>>> {
         let name = CString::new(name).unwrap();
         let pg = PropertyGroup::new(self.scf)?;
 
@@ -214,7 +214,11 @@ impl<'a> Instance<'a> {
         }
     }
 
-    pub fn add_pg(&self, name: &str, pgtype: &str) -> Result<PropertyGroup> {
+    pub fn add_pg(
+        &self,
+        name: &str,
+        pgtype: &str,
+    ) -> Result<PropertyGroup<'_>> {
         let name = CString::new(name).unwrap();
         let pgtype = CString::new(pgtype).unwrap();
         let pg = PropertyGroup::new(self.scf)?;
