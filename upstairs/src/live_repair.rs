@@ -89,7 +89,9 @@ pub mod repair_test {
         client::ClientAction,
         downstairs::DownstairsAction,
         upstairs::{
-            test::{create_test_upstairs, start_up_and_repair},
+            test::{
+                create_test_upstairs, start_up_and_repair, to_live_repair_ready,
+            },
             Upstairs, UpstairsAction,
         },
     };
@@ -1108,26 +1110,9 @@ pub mod repair_test {
         assert_eq!(up.downstairs.last_repair_extent(), None);
         assert!(up.downstairs.repair().is_none());
 
-        // Start the LiveRepair, manually walking through states
-        let client = ClientId::new(1);
-        up.downstairs.fault_client(
-            client,
-            &up.state,
-            ClientFaultReason::RequestedFault,
-        );
-        let mode = ConnectionMode::Faulted;
-        for state in [
-            NegotiationStateData::Start,
-            NegotiationStateData::WaitForPromote,
-            NegotiationStateData::WaitForRegionInfo,
-            NegotiationStateData::GetExtentVersions,
-            NegotiationStateData::LiveRepairReady,
-        ] {
-            up.downstairs.clients[client].checked_state_transition(
-                &up.state,
-                DsStateData::Connecting { state, mode },
-            );
-        }
+        // Fault and start live-repair for client 1
+        to_live_repair_ready(&mut up, ClientId::new(1));
+
         up.check_live_repair_start();
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.downstairs.last_repair_extent(), Some(ExtentId(0)));
