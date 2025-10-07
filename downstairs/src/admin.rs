@@ -6,8 +6,7 @@ use crucible_downstairs_api::*;
 use crucible_downstairs_types::RunDownstairsForRegionParams;
 use dropshot::{
     ClientSpecifiesVersionInHeader, ConfigDropshot, HttpError,
-    HttpResponseCreated, HttpServerStarter, Path, RequestContext, TypedBody,
-    VersionPolicy,
+    HttpResponseCreated, Path, RequestContext, TypedBody, VersionPolicy,
 };
 
 pub struct ServerContext {
