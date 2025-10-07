@@ -5300,6 +5300,12 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn test_snapshot_exists() {
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
+        assert!(tds.snapshot_exists("foo").is_err());
+    }
+
+    #[tokio::test]
     async fn test_pantry_scrub() {
         // Test scrubbing the OVMF image from a URL
         // XXX httptest::Server does not support range requests, otherwise that
