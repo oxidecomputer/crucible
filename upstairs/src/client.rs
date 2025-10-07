@@ -446,8 +446,20 @@ impl DownstairsClient {
                 self.client_id
             );
         };
-        assert_eq!(state.discriminant(), NegotiationState::WaitQuorum);
-        assert_eq!(mode, &ConnectionMode::New);
+        // There are two cases where reconciliation is allowed: either from a
+        // new connection, or if all three Downstairs need live-repair
+        // simultaneously.
+        match (state.discriminant(), &mode) {
+            (NegotiationState::WaitQuorum, ConnectionMode::New) => {
+                // This is fine.
+            }
+            (NegotiationState::LiveRepairReady, ConnectionMode::Faulted) => {
+                // This is also fine, but we need to tweak our connection mode
+                // because we're no longer doing live-repair.
+                *mode = ConnectionMode::New;
+            }
+            s => panic!("invalid (state, mode) tuple: ({s:?}"),
+        }
         *state = NegotiationStateData::Reconcile;
     }
 
@@ -894,6 +906,20 @@ impl DownstairsClient {
                 },
             ) => true,
 
+            // Special case: LiveRepairReady is allowed to jump sideways into
+            // reconciliation if all three downstairs require live-repair
+            // (because otherwise we have no-one to repair from)
+            (
+                DsStateData::Connecting {
+                    state: NegotiationStateData::LiveRepairReady(..),
+                    mode: ConnectionMode::Faulted,
+                },
+                DsStateData::Connecting {
+                    state: NegotiationStateData::Reconcile,
+                    mode: ConnectionMode::New,
+                },
+            ) => true,
+
             // Check normal negotiation path
             (
                 DsStateData::Connecting {
@@ -926,7 +952,7 @@ impl DownstairsClient {
                         ConnectionMode::Offline
                     ) | (NegotiationStateData::Reconcile, ConnectionMode::New)
                         | (
-                            NegotiationStateData::LiveRepairReady,
+                            NegotiationStateData::LiveRepairReady(..),
                             ConnectionMode::Faulted | ConnectionMode::Replaced
                         )
                 )
@@ -938,7 +964,7 @@ impl DownstairsClient {
                 matches!(
                     (state, mode),
                     (
-                        NegotiationStateData::LiveRepairReady,
+                        NegotiationStateData::LiveRepairReady(..),
                         ConnectionMode::Faulted | ConnectionMode::Replaced
                     )
                 )
@@ -1212,7 +1238,7 @@ impl DownstairsClient {
         let DsStateData::Connecting { state, .. } = &self.state else {
             return;
         };
-        if matches!(state, NegotiationStateData::LiveRepairReady) {
+        if matches!(state, NegotiationStateData::LiveRepairReady(..)) {
             assert!(self.cfg.read_only);
 
             // TODO: could we do this transition early, by automatically
@@ -1230,7 +1256,7 @@ impl DownstairsClient {
         let DsStateData::Connecting { state, .. } = &self.state else {
             panic!("invalid state");
         };
-        assert!(matches!(state, NegotiationStateData::LiveRepairReady));
+        assert!(matches!(state, NegotiationStateData::LiveRepairReady(..)));
         self.checked_state_transition(up_state, DsStateData::LiveRepair);
     }
 
@@ -1574,7 +1600,7 @@ impl DownstairsClient {
                     }
 
                     ConnectionMode::Faulted | ConnectionMode::Replaced => {
-                        *state = NegotiationStateData::LiveRepairReady;
+                        *state = NegotiationStateData::LiveRepairReady(dsr);
                         NegotiationResult::LiveRepair
                     }
                     ConnectionMode::Offline => {
@@ -1756,10 +1782,10 @@ impl DownstairsClient {
 ///            │           │ New         │ Faulted / Replaced
 ///            │    ┌──────▼───┐    ┌────▼──────────┐
 ///            │    │WaitQuorum│    │LiveRepairReady│
-///            │    └────┬─────┘    └────┬──────────┘
-///            │         │               │
-///            │    ┌────▼────┐          │
-///            │    │Reconcile│          │
+///            │    └────┬─────┘    └─┬──┬──────────┘
+///            │         │            │  │
+///            │    ┌────▼────┐       │  │
+///            │    │Reconcile◄───────┘  │
 ///            │    └────┬────┘          │
 ///            │         │               │
 ///            │     ┌───▼──┐            │
@@ -1803,7 +1829,9 @@ pub enum NegotiationStateData {
     Reconcile,
 
     /// Waiting for live-repair to begin
-    LiveRepairReady,
+    // This state includes [`RegionMetadata`], because if all three Downstairs
+    // end up in `LiveRepairReady`, we have to perform reconciliation instead.
+    LiveRepairReady(RegionMetadata),
 }
 
 impl NegotiationStateData {
@@ -1842,7 +1870,7 @@ impl NegotiationStateData {
                 ConnectionMode::New
             ) | (
                 NegotiationStateData::GetExtentVersions,
-                NegotiationStateData::LiveRepairReady,
+                NegotiationStateData::LiveRepairReady(..),
                 ConnectionMode::Faulted | ConnectionMode::Replaced,
             )
         )

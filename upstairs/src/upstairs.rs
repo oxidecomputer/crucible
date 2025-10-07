@@ -11,7 +11,7 @@ use crate::{
         DeferredBlockOp, DeferredMessage, DeferredQueue, DeferredRead,
         DeferredWrite, EncryptedWrite,
     },
-    downstairs::{Downstairs, DownstairsAction},
+    downstairs::{Downstairs, DownstairsAction, LiveRepairStart},
     extent_from_offset,
     io_limits::IOLimitGuard,
     stats::UpStatOuter,
@@ -906,6 +906,9 @@ impl Upstairs {
     /// any Downstairs from
     /// `DsStateData::Connecting { state:  NegotiationStateData::LiveRepairReady, .. }`
     /// back to [DsStateData::Active] without actually performing any repair.
+    ///
+    /// If all Downstairs are in `LiveRepairReady`, we instead begin
+    /// reconciliation.
     pub(crate) fn check_live_repair_start(&mut self) {
         if !matches!(self.state, UpstairsState::Active) {
             return;
@@ -922,7 +925,25 @@ impl Upstairs {
         }
 
         // Try to start live-repair
-        self.downstairs.check_live_repair_start(&self.state);
+        match self.downstairs.check_live_repair_start(&self.state) {
+            LiveRepairStart::AllNeedRepair => {
+                info!(
+                    self.log,
+                    "all Downstairs need live-repair; doing reconciliation"
+                );
+                if self.downstairs.reconcile_from_live_repair_ready() {
+                    self.downstairs.send_next_reconciliation_req();
+                } else {
+                    self.on_reconciliation_done(false);
+                }
+            }
+            LiveRepairStart::Started
+            | LiveRepairStart::AlreadyRunning
+            | LiveRepairStart::NotNeeded
+            | LiveRepairStart::NoSource => {
+                // We don't need any special handling of these cases
+            }
+        }
     }
 
     /// Returns `true` if we're ready to accept guest IO
@@ -2231,7 +2252,7 @@ pub(crate) mod test {
         client::{ClientFaultReason, ClientStopReason},
         test::{make_encrypted_upstairs, make_upstairs},
         Block, BlockOp, BlockOpWaiter, DsStateData, JobId,
-        NegotiationStateData,
+        NegotiationStateData, RegionMetadata,
     };
     use bytes::BytesMut;
     use crucible_common::integrity_hash;
@@ -2282,6 +2303,11 @@ pub(crate) mod test {
 
     /// Helper function to legally move the given client to live-repair ready
     pub(crate) fn to_live_repair_ready(up: &mut Upstairs, to_repair: ClientId) {
+        active_to_faulted(up, to_repair);
+        faulted_to_live_repair_ready(up, to_repair);
+    }
+
+    fn active_to_faulted(up: &mut Upstairs, to_repair: ClientId) {
         up.downstairs.fault_client(
             to_repair,
             &UpstairsState::Active,
@@ -2292,12 +2318,23 @@ pub(crate) mod test {
             client_id: to_repair,
             action: ClientAction::TaskStopped(ClientRunResult::RequestedStop),
         }));
+    }
+
+    fn faulted_to_live_repair_ready(up: &mut Upstairs, to_repair: ClientId) {
+        faulted_to_live_repair_ready_with(up, to_repair, Default::default());
+    }
+
+    fn faulted_to_live_repair_ready_with(
+        up: &mut Upstairs,
+        to_repair: ClientId,
+        meta: RegionMetadata,
+    ) {
         let mode = ConnectionMode::Faulted;
         for state in [
             NegotiationStateData::WaitForPromote,
             NegotiationStateData::WaitForRegionInfo,
             NegotiationStateData::GetExtentVersions,
-            NegotiationStateData::LiveRepairReady,
+            NegotiationStateData::LiveRepairReady(meta),
         ] {
             up.downstairs.clients[to_repair].checked_state_transition(
                 &up.state,
@@ -4717,5 +4754,69 @@ pub(crate) mod test {
                 mode: ConnectionMode::Faulted
             }
         );
+    }
+
+    #[test]
+    fn test_downstairs_three_live_repair() {
+        // Start with all three downstairs active.  Put all three into
+        // live-repair (oh no), then see what happens.
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), false);
+        up.force_active().unwrap();
+
+        // All three clients start active
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(2)), DsState::Active);
+
+        // Put all clients in live-repair.  For the purposes of this test, we
+        // fault each downstairs first, so that live-repair doesn't start midway
+        // through the faulting.
+        for id in ClientId::iter() {
+            active_to_faulted(&mut up, id);
+        }
+
+        // Set up our region metadata to indicate that one client is dirty
+        // This doesn't trigger anything, because we're poking the state machine
+        // internals (instead of sending it events).
+        for id in ClientId::iter() {
+            faulted_to_live_repair_ready_with(
+                &mut up,
+                id,
+                RegionMetadata::new(
+                    &[1; 12],                      // generation
+                    &[1; 12],                      // flush
+                    &[id == ClientId::new(0); 12], // dirty
+                ),
+            );
+            up.downstairs.clients[id].repair_addr =
+                Some("0.0.0.0:1".parse().unwrap());
+        }
+
+        // Send it an event, which should trigger the beginning of
+        // reconciliation (because it will now notice that all three downstairs
+        // are in live-repair)
+        up.apply(UpstairsAction::NoOp);
+
+        // Check that we're doing reconciliation
+        for id in ClientId::iter() {
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    state: NegotiationState::Reconcile,
+                }
+            );
+        }
+        // Each extent has 4 associated repair jobs
+        let expected_repairs = ddef.extent_count() as usize
+            * ddef.extent_size().value as usize
+            * 4;
+        assert_eq!(up.downstairs.reconcile_repair_needed(), expected_repairs);
     }
 }
