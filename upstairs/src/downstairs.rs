@@ -71,9 +71,7 @@ pub(crate) struct Downstairs {
     /// Indicates whether we are eligible for replay
     ///
     /// We are only eligible for replay if all jobs since the last flush are
-    /// buffered (i.e. none have been retired by a `Barrier` operation), or we
-    /// have not performed or started a LiveRepair while this downstairs was
-    /// offline.
+    /// buffered (i.e. none have been retired by a `Barrier` operation).
     can_replay: bool,
 
     /// How many `Flush` or `Barrier` operations are pending?
@@ -679,7 +677,9 @@ impl Downstairs {
         );
 
         // Restart the IO task for that specific client, transitioning to a new
-        // state.
+        // state.  We can replay as long as all jobs since the last flush are
+        // buffered (indicated by `self.can_replay`), and there's no live-repair
+        // in progress.
         let can_replay = self.can_replay && !self.live_repair_in_progress();
         self.clients[client_id].reinitialize(up_state, can_replay);
 
@@ -846,6 +846,7 @@ impl Downstairs {
         self.ds_active.for_each(|ds_id, job| {
             // We don't need to send anything before our last good flush
             if lf.is_some_and(|lf| *ds_id <= lf) {
+                // ZZZ This assert fired, new changes?
                 assert_eq!(IOState::Done, job.state[client_id]);
                 return;
             }
