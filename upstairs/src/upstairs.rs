@@ -4708,20 +4708,10 @@ pub(crate) mod test {
 
         // Now simulate client 2 spontaneously going offline during live repair
         // This is what would happen when a connection drops unexpectedly
-        set_downstairs_offline(&mut up, ClientId::new(2));
-
-        // Verify client 2 is now offline
-        assert_eq!(
-            up.ds_state(ClientId::new(2)),
-            DsState::Connecting {
-                state: NegotiationState::Start,
-                mode: ConnectionMode::Offline
-            }
+        up.apply_client_action(
+            ClientId::new(2),
+            ClientAction::TaskStopped(ClientRunResult::Timeout),
         );
-
-        // Call check_gone_too_long() which should mark offline downstairs as
-        // faulted because live repair is in progress
-        up.downstairs.check_gone_too_long(ClientId::new(2));
 
         // After check_gone_too_long, client 2 should be faulted (not offline)
         assert_eq!(
