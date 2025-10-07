@@ -2332,40 +2332,40 @@ async fn yolo_workload(
                 match volume.read(offset, &mut data).await {
                     Ok(_) => {
                         reads += 1;
+                        let data_len = data.len();
+                        let dl = data.into_bytes();
+                        match validate_vec(
+                            dl,
+                            block_index,
+                            &mut di.write_log,
+                            di.volume_info.block_size,
+                            range,
+                        ) {
+                            ValidateStatus::Bad => {
+                                eprintln!(
+                                    "Verify Error at {block_index} len:{data_len}"
+                                );
+                                verify_errors += 1;
+                            }
+                            ValidateStatus::InRange => {
+                                // If the caller is okay with the expected value
+                                // being in the range since the last commit,
+                                // then this is not an error.  If the caller
+                                // does not want this (range is false) then
+                                // this is an error.
+                                if !range {
+                                    eprintln!(
+                                        "Verify Error out of range at {block_index} len:{data_len}");
+                                    verify_errors += 1;
+                                }
+                            }
+                            ValidateStatus::Good => {}
+                        }
                     }
                     Err(e) => {
                         read_errors += 1;
                         eprintln!("read failed: {}", e);
                     }
-                }
-
-                let data_len = data.len();
-                let dl = data.into_bytes();
-                match validate_vec(
-                    dl,
-                    block_index,
-                    &mut di.write_log,
-                    di.volume_info.block_size,
-                    range,
-                ) {
-                    ValidateStatus::Bad => {
-                        eprintln!(
-                            "Verify Error at {block_index} len:{data_len}"
-                        );
-                        verify_errors += 1;
-                    }
-                    ValidateStatus::InRange => {
-                        // If the caller is okay with the expected value being
-                        // in the range since the last commit, then this is
-                        // not an error.  If the caller does not want this
-                        // (range is false) then this is an error.
-                        if !range {
-                            eprintln!(
-                                "Verify Error out of range at {block_index} len:{data_len}");
-                            verify_errors += 1;
-                        }
-                    }
-                    ValidateStatus::Good => {}
                 }
             }
         }
