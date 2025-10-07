@@ -10,6 +10,7 @@ crucible-common.workspace = true
 crucible-downstairs-types.workspace = true
 crucible-workspace-hack.workspace = true
 dropshot.workspace = true
+dropshot-api-manager-types.workspace = true
 hyper.workspace = true
 schemars.workspace = true
 serde.workspace = true

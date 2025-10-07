@@ -9,5 +9,6 @@ crucible-client-types.workspace = true
 crucible-pantry-types.workspace = true
 crucible-workspace-hack.workspace = true
 dropshot.workspace = true
+dropshot-api-manager-types.workspace = true
 schemars.workspace = true
 serde.workspace = true

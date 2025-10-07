@@ -9,8 +9,9 @@ use base64::{engine, Engine};
 use crucible_pantry_api::*;
 use crucible_pantry_types::*;
 use dropshot::{
-    HandlerTaskMode, HttpError, HttpResponseDeleted, HttpResponseOk,
-    HttpResponseUpdatedNoContent, Path as TypedPath, RequestContext, TypedBody,
+    ClientSpecifiesVersionInHeader, HandlerTaskMode, HttpError,
+    HttpResponseDeleted, HttpResponseOk, HttpResponseUpdatedNoContent,
+    Path as TypedPath, RequestContext, TypedBody, VersionPolicy,
 };
 use slog::{info, o, Logger};
 use std::result::Result as SResult;
@@ -248,20 +249,27 @@ pub fn run_server(
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<Result<(), String>>)> {
     let api = crucible_pantry_api_mod::api_description::<CruciblePantryImpl>()?;
 
-    let server = dropshot::HttpServerStarter::new(
-        &dropshot::ConfigDropshot {
-            bind_address,
-            // max import, multiplied by worst case base64 overhead, plus room
-            // for metadata
-            default_request_body_max_bytes: 1024
-                + crate::pantry::PantryEntry::MAX_CHUNK_SIZE * 2,
-            default_handler_task_mode: HandlerTaskMode::Detached,
-            log_headers: vec![],
-        },
+    let server = dropshot::ServerBuilder::new(
         api,
         df.clone(),
-        &log.new(o!("component" => "dropshot")),
+        log.new(o!("component" => "dropshot")),
     )
+    .config(dropshot::ConfigDropshot {
+        bind_address,
+        // max import, multiplied by worst case base64 overhead, plus room
+        // for metadata
+        default_request_body_max_bytes: 1024
+            + crate::pantry::PantryEntry::MAX_CHUNK_SIZE * 2,
+        default_handler_task_mode: HandlerTaskMode::Detached,
+        log_headers: vec![],
+    })
+    .version_policy(VersionPolicy::Dynamic(Box::new(
+        ClientSpecifiesVersionInHeader::new(
+            omicron_common::api::VERSION_HEADER,
+            crucible_pantry_api::latest_version(),
+        ),
+    )))
+    .build_starter()
     .map_err(|e| anyhow!("creating server: {:?}", e))?
     .start();
 

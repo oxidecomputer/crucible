@@ -1,11 +1,13 @@
 // Copyright 2022 Oxide Computer Company
 use super::*;
 
+use anyhow::anyhow;
 use crucible_downstairs_api::*;
 use crucible_downstairs_types::RunDownstairsForRegionParams;
 use dropshot::{
-    ConfigDropshot, HttpError, HttpResponseCreated, HttpServerStarter, Path,
-    RequestContext, TypedBody,
+    ClientSpecifiesVersionInHeader, ConfigDropshot, HttpError,
+    HttpResponseCreated, HttpServerStarter, Path, RequestContext, TypedBody,
+    VersionPolicy,
 };
 
 pub struct ServerContext {
@@ -110,14 +112,22 @@ pub async fn run_dropshot(
         downstairs: Mutex::new(HashMap::default()),
     });
 
-    let http_server =
-        HttpServerStarter::new(&config, api_description, Arc::clone(&ctx), log);
+    let server = dropshot::ServerBuilder::new(
+        api_description,
+        ctx,
+        log.new(o!("component" => "dropshot")),
+    )
+    .config(config)
+    .version_policy(VersionPolicy::Dynamic(Box::new(
+        ClientSpecifiesVersionInHeader::new(
+            omicron_common::api::VERSION_HEADER,
+            crucible_downstairs_api::latest_version(),
+        ),
+    )))
+    .build_starter()
+    .map_err(|e| anyhow!("Error from HttpServerStarter::new: {:?}", e))?;
 
-    if let Err(e) = http_server {
-        anyhow::bail!("Error from HttpServerStarter::new: {:?}", e);
-    }
-
-    if let Err(s) = http_server.unwrap().start().await {
+    if let Err(s) = server.start().await {
         anyhow::bail!("Error from start(): {}", s);
     }
 
