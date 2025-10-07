@@ -1113,7 +1113,7 @@ pub mod repair_test {
         // Fault and start live-repair for client 1
         to_live_repair_ready(&mut up, ClientId::new(1));
 
-        up.check_live_repair_start();
+        up.ensure_downstairs_consistency();
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.downstairs.last_repair_extent(), Some(ExtentId(0)));
 
