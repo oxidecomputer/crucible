@@ -1269,11 +1269,26 @@ impl Downstairs {
                     info!(self.log, "LiveRepair final flush submitted");
                     cdt::up__to__ds__flush__start!(|| flush_id.0);
 
+                    // If all downstairs are inactive, then the flush will be
+                    // immediately skipped by `submit_flush`.  We have to
+                    // manually set that result in the `PendingJob`; otherwise,
+                    // the live-repair will never be resolved.  We detect this
+                    // case when the flush is absent from `ds_active` (because
+                    // it immediately retired itself upon submission).
+                    let mut flush_job = PendingJob::new(flush_id);
+                    if self.ds_active.get(&flush_id).is_none() {
+                        info!(
+                            self.log,
+                            "LiveRepair final flush was skipped everywhere"
+                        );
+                        flush_job.result = Some(Err(CrucibleError::IoError(
+                            "job was skipped on all downstairs".to_owned(),
+                        )));
+                    }
+
                     // The borrow was dropped earlier, so reborrow `self.repair`
                     self.repair.as_mut().unwrap().state =
-                        LiveRepairState::FinalFlush {
-                            flush_job: PendingJob::new(flush_id),
-                        }
+                        LiveRepairState::FinalFlush { flush_job }
                 } else {
                     let repair_id = repair.id;
                     self.notify_live_repair_progress(repair_id, next_extent);
