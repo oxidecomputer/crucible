@@ -4,8 +4,9 @@ use anyhow::{anyhow, Result};
 use crucible_agent_api::*;
 use crucible_agent_types::{region, snapshot};
 use dropshot::{
-    HandlerTaskMode, HttpError, HttpResponseDeleted, HttpResponseOk,
-    Path as TypedPath, RequestContext, TypedBody,
+    ClientSpecifiesVersionInHeader, HandlerTaskMode, HttpError,
+    HttpResponseDeleted, HttpResponseOk, Path as TypedPath, RequestContext,
+    TypedBody, VersionPolicy,
 };
 use slog::{o, Logger};
 use std::net::SocketAddr;
@@ -271,17 +272,24 @@ pub async fn run_server(
 ) -> Result<()> {
     let api = crucible_agent_api_mod::api_description::<CrucibleAgentImpl>()?;
 
-    let server = dropshot::HttpServerStarter::new(
-        &dropshot::ConfigDropshot {
-            bind_address,
-            default_request_body_max_bytes: 1024 * 10,
-            default_handler_task_mode: HandlerTaskMode::Detached,
-            log_headers: vec![],
-        },
+    let server = dropshot::ServerBuilder::new(
         api,
         df,
-        &log.new(o!("component" => "dropshot")),
+        log.new(o!("component" => "dropshot")),
     )
+    .config(dropshot::ConfigDropshot {
+        bind_address,
+        default_request_body_max_bytes: 1024 * 10,
+        default_handler_task_mode: HandlerTaskMode::Detached,
+        log_headers: vec![],
+    })
+    .version_policy(VersionPolicy::Dynamic(Box::new(
+        ClientSpecifiesVersionInHeader::new(
+            omicron_common::api::VERSION_HEADER,
+            crucible_agent_api::latest_version(),
+        ),
+    )))
+    .build_starter()
     .map_err(|e| anyhow!("creating server: {:?}", e))?
     .start();
 

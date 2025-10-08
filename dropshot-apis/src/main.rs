@@ -38,8 +38,8 @@ pub fn all_apis() -> anyhow::Result<ManagedApis> {
     let apis = vec![
         ManagedApiConfig {
             ident: "crucible-agent",
-            versions: Versions::Lockstep {
-                version: semver::Version::new(0, 0, 1),
+            versions: Versions::Versioned {
+                supported_versions: crucible_agent_api::supported_versions(),
             },
             title: "Crucible Agent",
             metadata: ManagedApiMetadata {
@@ -52,8 +52,8 @@ pub fn all_apis() -> anyhow::Result<ManagedApis> {
         },
         ManagedApiConfig {
             ident: "crucible-pantry",
-            versions: Versions::Lockstep {
-                version: semver::Version::new(0, 0, 1),
+            versions: Versions::Versioned {
+                supported_versions: crucible_pantry_api::supported_versions(),
             },
             title: "Crucible Pantry",
             metadata: ManagedApiMetadata {
@@ -66,8 +66,9 @@ pub fn all_apis() -> anyhow::Result<ManagedApis> {
         },
         ManagedApiConfig {
             ident: "downstairs-repair",
-            versions: Versions::Lockstep {
-                version: semver::Version::new(0, 0, 1),
+            versions: Versions::Versioned {
+                supported_versions: crucible_downstairs_api::supported_versions(
+                ),
             },
             title: "Downstairs Repair",
             metadata: ManagedApiMetadata {
