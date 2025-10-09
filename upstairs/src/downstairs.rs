@@ -677,8 +677,11 @@ impl Downstairs {
         );
 
         // Restart the IO task for that specific client, transitioning to a new
-        // state.
-        self.clients[client_id].reinitialize(up_state, self.can_replay);
+        // state.  We can replay as long as all jobs since the last flush are
+        // buffered (indicated by `self.can_replay`), and there's no live-repair
+        // in progress.
+        let can_replay = self.can_replay && !self.live_repair_in_progress();
+        self.clients[client_id].reinitialize(up_state, can_replay);
 
         // If the IO task stops on its own, then under certain circumstances,
         // we want to skip all of its jobs.  (If we requested that the IO task
@@ -843,6 +846,7 @@ impl Downstairs {
         self.ds_active.for_each(|ds_id, job| {
             // We don't need to send anything before our last good flush
             if lf.is_some_and(|lf| *ds_id <= lf) {
+                // ZZZ This assert fired, new changes?
                 assert_eq!(IOState::Done, job.state[client_id]);
                 return;
             }
@@ -1055,6 +1059,10 @@ impl Downstairs {
 
         // Can't start live-repair if we don't have a source downstairs
         let Some(source_downstairs) = source_downstairs else {
+            warn!(self.log, "No source, no Live Repair possible");
+            if repair_downstairs.len() == 3 {
+                warn!(self.log, "All three downstairs require repair");
+            }
             return;
         };
 
@@ -1064,6 +1072,26 @@ impl Downstairs {
         // to abort the repair on the troublesome clients.
         for &cid in &repair_downstairs {
             self.clients[cid].start_live_repair(up_state);
+        }
+
+        // Any offline downstairs should now be moved to faulted, as we don't
+        // or can't replay to them, so they must come back through LR
+        for cid in ClientId::iter() {
+            match self.clients[cid].state() {
+                DsState::Connecting {
+                    mode: ConnectionMode::Offline,
+                    ..
+                } => {
+                    warn!(
+                        self.log,
+                        "Forcing offline downstairs {cid} to faulted"
+                    );
+                    self.clients[cid].set_connection_mode_faulted();
+                }
+                _state => {
+                    // ignore Downstairs in irrelevant states
+                }
+            }
         }
 
         // Submit the initial repair jobs, which kicks everything off
