@@ -37,7 +37,7 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
-hashbrown = { version = "0.15" }
+hashbrown = { version = "0.16", default-features = false, features = ["allocator-api2", "inline-more"] }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
@@ -103,7 +103,7 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
-hashbrown = { version = "0.15" }
+hashbrown = { version = "0.16", default-features = false, features = ["allocator-api2", "inline-more"] }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
