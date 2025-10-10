@@ -4,10 +4,10 @@ set -o pipefail
 
 filename='/tmp/get-up-state.out'
 final='/tmp/get-up-state.final'
-rm -f $final
+echo "" > $final
 
 # Gather our output first.
-dtrace -s /opt/oxide/crucible_dtrace/get-up-state.d | awk 'NF' > "$filename"
+dtrace -Z -s /opt/oxide/crucible_dtrace/get-up-state.d | awk 'NF' > "$filename"
 if [[ $? -ne 0 ]]; then
     exit 1
 fi
