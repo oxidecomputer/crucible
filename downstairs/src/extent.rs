@@ -251,7 +251,22 @@ pub fn extent_dir<P: AsRef<Path>>(dir: P, number: ExtentId) -> PathBuf {
  * anchored under "dir".
  */
 pub fn extent_path<P: AsRef<Path>>(dir: P, number: ExtentId) -> PathBuf {
-    extent_dir(dir, number).join(extent_file_name(number, ExtentType::Data))
+    let e = extent_file_name(number, ExtentType::Data);
+
+    // XXX terrible hack: if someone has already provided a full directory tree
+    // ending in `.copy`, then just append the extent file name.  This lets us
+    // open individual extent files during live-repair.
+    if dir
+        .as_ref()
+        .iter()
+        .next_back()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.ends_with(".copy"))
+    {
+        dir.as_ref().join(e)
+    } else {
+        extent_dir(dir, number).join(e)
+    }
 }
 
 /**

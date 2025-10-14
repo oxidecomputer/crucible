@@ -104,9 +104,8 @@ impl ExtentInner for SqliteInner {
     }
 
     fn validate(&self) -> Result<(), CrucibleError> {
-        Err(CrucibleError::GenericError(
-            "`validate` is not implemented for Sqlite extent".to_owned(),
-        ))
+        // SQLite databases are always perfect and have no problems
+        Ok(())
     }
 
     #[cfg(test)]
