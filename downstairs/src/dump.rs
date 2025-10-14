@@ -488,7 +488,11 @@ fn show_extent(
     println!();
     println!();
 
-    // Display file layout information for raw extents
+    // Collect active slot information and display file layout for raw extents
+    let mut active_slots_per_dir: Vec<
+        Option<Vec<crate::extent_inner_raw::ActiveSlot>>,
+    > = vec![None; dir_count];
+
     for (dir_index, dir) in region_dir.iter().enumerate() {
         let region = Region::open(dir, false, true, &log)?;
 
@@ -496,6 +500,10 @@ fn show_extent(
             region.extents.get(cmp_extent.0 as usize)
         {
             if let Some(dump_info) = e.get_raw_dump_info() {
+                // Store active slots for this directory
+                active_slots_per_dir[dir_index] =
+                    Some(dump_info.active_slots.clone());
+
                 println!("Directory {} File Layout:", dir_index);
 
                 // Calculate offsets based on the sizes
@@ -567,6 +575,10 @@ fn show_extent(
     print!(" ");
     for (index, _) in region_dir.iter().enumerate() {
         print!(" {0:^2}", format!("C{}", index));
+    }
+    print!(" ");
+    for (index, _) in region_dir.iter().enumerate() {
+        print!(" {0:^2}", format!("S{}", index));
     }
     if !only_show_differences {
         print!(" {0:^5}", "DIFF");
@@ -652,6 +664,18 @@ fn show_extent(
             print!(" ");
             for column in block_context_columns.iter().take(dir_count) {
                 print!("  {}", column);
+            }
+            print!(" ");
+            for slots_opt in active_slots_per_dir.iter().take(dir_count) {
+                if let Some(ref slots) = slots_opt {
+                    let slot_char = match slots[block as usize] {
+                        crate::extent_inner_raw::ActiveSlot::A => "A",
+                        crate::extent_inner_raw::ActiveSlot::B => "B",
+                    };
+                    print!("  {}", slot_char);
+                } else {
+                    print!("  -");
+                }
             }
 
             if !only_show_differences {

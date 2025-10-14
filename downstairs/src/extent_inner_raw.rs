@@ -64,6 +64,15 @@ pub struct RawInnerDumpInfo {
     pub extra_syscall_count: u64,
     /// Total number of operations (denominator for fragmentation ratio)
     pub extra_syscall_denominator: u64,
+    /// Active context slots for each block (A or B)
+    pub active_slots: Vec<ActiveSlot>,
+}
+
+/// Represents which context slot is active for a block
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveSlot {
+    A,
+    B,
 }
 
 /// `RawInner` is a wrapper around a [`std::fs::File`] representing an extent
@@ -630,6 +639,16 @@ impl ExtentInner for RawInner {
         let block_size = self.extent_size.block_size_in_bytes() as u64;
         let context_slot_size = block_count * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
 
+        // Collect active slots for all blocks
+        let active_slots: Vec<ActiveSlot> = self
+            .active_context
+            .iter()
+            .map(|slot| match slot {
+                ContextSlot::A => ActiveSlot::A,
+                ContextSlot::B => ActiveSlot::B,
+            })
+            .collect();
+
         Some(RawInnerDumpInfo {
             file_size: self.layout.file_size(),
             block_data_size: block_count * block_size,
@@ -639,6 +658,7 @@ impl ExtentInner for RawInner {
             metadata_size: BLOCK_META_SIZE_BYTES,
             extra_syscall_count: self.extra_syscall_count,
             extra_syscall_denominator: self.extra_syscall_denominator,
+            active_slots,
         })
     }
 }
