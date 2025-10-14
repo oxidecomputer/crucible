@@ -115,6 +115,16 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         &mut self,
         block_context: &DownstairsBlockContext,
     ) -> Result<(), CrucibleError>;
+
+    /// Returns implementation-specific dump information for debugging
+    ///
+    /// This is used by the dump tool to display internal extent metadata.
+    /// Returns `None` if the implementation doesn't provide dump information.
+    fn get_raw_dump_info(
+        &self,
+    ) -> Option<crate::extent_inner_raw::RawInnerDumpInfo> {
+        None
+    }
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash
@@ -680,6 +690,13 @@ impl Extent {
             flush_number: self.inner.flush_number().unwrap(),
             dirty: self.inner.dirty().unwrap(),
         }
+    }
+
+    /// Returns implementation-specific dump information for debugging
+    pub fn get_raw_dump_info(
+        &self,
+    ) -> Option<crate::extent_inner_raw::RawInnerDumpInfo> {
+        self.inner.get_raw_dump_info()
     }
 
     /// Sets the dirty flag and a single block context

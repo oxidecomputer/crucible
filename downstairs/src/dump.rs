@@ -487,6 +487,72 @@ fn show_extent(
     }
     println!();
     println!();
+
+    // Display file layout information for raw extents
+    for (dir_index, dir) in region_dir.iter().enumerate() {
+        let region = Region::open(dir, false, true, &log)?;
+
+        if let Some(extent::ExtentState::Opened(e)) =
+            region.extents.get(cmp_extent.0 as usize)
+        {
+            if let Some(dump_info) = e.get_raw_dump_info() {
+                println!("Directory {} File Layout:", dir_index);
+
+                // Calculate offsets based on the sizes
+                let block_data_end = dump_info.block_data_size;
+                let context_a_start = block_data_end;
+                let context_a_end = context_a_start + dump_info.context_size_a;
+                let context_b_start = context_a_end;
+                let context_b_end = context_b_start + dump_info.context_size_b;
+                let active_context_start = context_b_end;
+                let active_context_end =
+                    active_context_start + dump_info.active_context_size;
+                let metadata_start = active_context_end;
+                let metadata_end = metadata_start + dump_info.metadata_size;
+
+                println!(
+                    "  File Size:       {} bytes (0x{:X})",
+                    dump_info.file_size, dump_info.file_size
+                );
+                println!(
+                    "  Block Data:      0x{:08X} - 0x{:08X} ({} bytes)",
+                    0, block_data_end, dump_info.block_data_size
+                );
+                println!(
+                    "  Context Slot A:  0x{:08X} - 0x{:08X} ({} bytes)",
+                    context_a_start, context_a_end, dump_info.context_size_a
+                );
+                println!(
+                    "  Context Slot B:  0x{:08X} - 0x{:08X} ({} bytes)",
+                    context_b_start, context_b_end, dump_info.context_size_b
+                );
+                println!(
+                    "  Active Context:  0x{:08X} - 0x{:08X} ({} bytes)",
+                    active_context_start,
+                    active_context_end,
+                    dump_info.active_context_size
+                );
+                println!(
+                    "  Metadata:        0x{:08X} - 0x{:08X} ({} bytes)",
+                    metadata_start, metadata_end, dump_info.metadata_size
+                );
+
+                if dump_info.extra_syscall_denominator > 0 {
+                    let frag_pct = (dump_info.extra_syscall_count as f64
+                        / dump_info.extra_syscall_denominator as f64)
+                        * 100.0;
+                    println!(
+                        "  Fragmentation:   {}/{} operations ({:.2}%)",
+                        dump_info.extra_syscall_count,
+                        dump_info.extra_syscall_denominator,
+                        frag_pct
+                    );
+                }
+                println!();
+            }
+        }
+    }
+
     // Width for BLOCKS column
     let max_block =
         blocks_per_extent * cmp_extent.0 as u64 + blocks_per_extent - 1;

@@ -42,6 +42,30 @@ const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
 /// Number of extra syscalls per read / write that triggers defragmentation
 const DEFRAGMENT_THRESHOLD: u64 = 3;
 
+/// Dump information for a RawInner extent
+///
+/// This structure contains file layout information useful for debugging
+/// and diagnostic purposes.
+#[derive(Debug, Clone)]
+pub struct RawInnerDumpInfo {
+    /// Total size of the extent file in bytes
+    pub file_size: u64,
+    /// Size of the block data section in bytes
+    pub block_data_size: u64,
+    /// Size of context slot A section in bytes
+    pub context_size_a: u64,
+    /// Size of context slot B section in bytes
+    pub context_size_b: u64,
+    /// Size of the active context bitarray in bytes
+    pub active_context_size: u64,
+    /// Size of the metadata section in bytes
+    pub metadata_size: u64,
+    /// Number of operations that required extra syscalls due to fragmentation
+    pub extra_syscall_count: u64,
+    /// Total number of operations (denominator for fragmentation ratio)
+    pub extra_syscall_denominator: u64,
+}
+
 /// `RawInner` is a wrapper around a [`std::fs::File`] representing an extent
 ///
 /// The file is structured as follows:
@@ -599,6 +623,23 @@ impl ExtentInner for RawInner {
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
         RawInner::get_block_contexts(self, block, count)
+    }
+
+    fn get_raw_dump_info(&self) -> Option<RawInnerDumpInfo> {
+        let block_count = self.extent_size.value;
+        let block_size = self.extent_size.block_size_in_bytes() as u64;
+        let context_slot_size = block_count * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
+
+        Some(RawInnerDumpInfo {
+            file_size: self.layout.file_size(),
+            block_data_size: block_count * block_size,
+            context_size_a: context_slot_size,
+            context_size_b: context_slot_size,
+            active_context_size: self.layout.active_context_size(),
+            metadata_size: BLOCK_META_SIZE_BYTES,
+            extra_syscall_count: self.extra_syscall_count,
+            extra_syscall_denominator: self.extra_syscall_denominator,
+        })
     }
 }
 
