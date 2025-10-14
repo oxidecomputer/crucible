@@ -581,6 +581,59 @@ impl ExtentInner for RawInner {
         r
     }
 
+    fn validate(&self) -> Result<(), CrucibleError> {
+        let block_size = self.extent_size.block_size_in_bytes() as u64;
+        for block in 0..self.extent_size.value {
+            // Read the block data itself:
+            let mut buf = vec![0; block_size as usize];
+            pread_all(self.file.as_fd(), &mut buf, (block_size * block) as i64)
+                .map_err(|e| {
+                    CrucibleError::IoError(format!(
+                        "extent {}: reading block {block} data failed: {e}",
+                        self.extent_number
+                    ))
+                })?;
+            let hash = integrity_hash(&[&buf]);
+
+            // Then, read the slot data and decide if either slot
+            // (1) is present and
+            // (2) has a matching hash
+            let mut matching_slot = None;
+            let mut empty_slot = None;
+            for slot in [ContextSlot::A, ContextSlot::B] {
+                // Read a single context slot, which is by definition contiguous
+                let mut context = self.layout.read_context_slots_contiguous(
+                    &self.file, block, 1, slot,
+                )?;
+                assert_eq!(context.len(), 1);
+                let context = context.pop().unwrap();
+
+                if let Some(context) = context {
+                    if context.on_disk_hash == hash {
+                        matching_slot = Some(slot);
+                    }
+                } else if empty_slot.is_none() {
+                    empty_slot = Some(slot);
+                }
+            }
+            if matching_slot.is_some() {
+                // great work, everyone
+            } else if empty_slot.is_some() {
+                if !buf.iter().all(|v| *v == 0u8) {
+                    return Err(CrucibleError::GenericError(format!(
+                        "block {block} has no matching slot, \
+                         and has a empty slot but has none-zero data"
+                    )));
+                }
+            } else {
+                return Err(CrucibleError::GenericError(format!(
+                    "block {block} has both slots mismatched"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn set_dirty_and_block_context(
         &mut self,
