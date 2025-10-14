@@ -135,6 +135,10 @@ enum Args {
         /// No color output
         #[clap(long, action)]
         no_color: bool,
+
+        /// Verify the block checksums
+        #[clap(long)]
+        verify: bool,
     },
     Export {
         /*
@@ -354,6 +358,7 @@ async fn main() -> Result<()> {
             block,
             only_show_differences,
             no_color,
+            verify,
         } => {
             if data.is_empty() {
                 bail!("Need at least one data directory to dump");
@@ -364,6 +369,7 @@ async fn main() -> Result<()> {
                 block,
                 only_show_differences,
                 no_color,
+                verify,
                 log,
             )
         }

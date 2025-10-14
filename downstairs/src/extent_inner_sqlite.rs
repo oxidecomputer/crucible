@@ -103,6 +103,12 @@ impl ExtentInner for SqliteInner {
         Ok(bc)
     }
 
+    fn validate(&self) -> Result<(), CrucibleError> {
+        Err(CrucibleError::GenericError(
+            "`validate` is not implemented for Sqlite extent".to_owned(),
+        ))
+    }
+
     #[cfg(test)]
     fn set_dirty_and_block_context(
         &mut self,

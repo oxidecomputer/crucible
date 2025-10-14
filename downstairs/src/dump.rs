@@ -24,6 +24,7 @@ pub fn dump_region(
     block: Option<u64>,
     only_show_differences: bool,
     nc: bool,
+    verify: bool,
     log: Logger,
 ) -> Result<()> {
     if cmp_extent.is_some() && block.is_some() {
@@ -95,6 +96,15 @@ pub fn dump_region(
             }
 
             let extent_info = e.get_meta_info();
+
+            if verify {
+                if let Err(err) = e.validate() {
+                    println!(
+                        "validation failed for extent {}: {:?}",
+                        e.number, err
+                    );
+                }
+            }
 
             /*
              * If we have an entry already, then add this at our directory

@@ -682,6 +682,28 @@ impl Region {
             );
         }
 
+        // Validate the extent that we just received, before copying it over
+        {
+            let new_extent = match Extent::open(
+                &copy_dir,
+                &self.def(),
+                eid,
+                true, // read-only
+                &self.log.clone(),
+            ) {
+                Ok(e) => e,
+                Err(e) => {
+                    panic!(
+                        "Failed to open live-repair extent {eid} in \
+                         {copy_dir:?}: {e:?}"
+                    );
+                }
+            };
+            if let Err(e) = new_extent.validate() {
+                panic!("Failed to validate live-repair extent {eid}: {e:?}");
+            }
+        }
+
         // After we have all files: move the repair dir.
         info!(
             self.log,
@@ -2099,7 +2121,7 @@ pub(crate) mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None, None, false, false, csl()).unwrap();
+        dump_region(dvec, None, None, false, false, false, csl()).unwrap();
     }
 
     fn dump_two_region(backend: Backend) {
@@ -2129,7 +2151,7 @@ pub(crate) mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, None, None, false, false, csl()).unwrap();
+        dump_region(dvec, None, None, false, false, false, csl()).unwrap();
     }
 
     fn dump_extent(backend: Backend) {
@@ -2160,7 +2182,7 @@ pub(crate) mod test {
         /*
          * Dump the region
          */
-        dump_region(dvec, Some(ExtentId(2)), None, false, false, csl())
+        dump_region(dvec, Some(ExtentId(2)), None, false, false, false, csl())
             .unwrap();
     }
 
