@@ -595,40 +595,32 @@ impl ExtentInner for RawInner {
                 })?;
             let hash = integrity_hash(&[&buf]);
 
-            // Then, read the slot data and decide if either slot
-            // (1) is present and
-            // (2) has a matching hash
-            let mut matching_slot = None;
-            let mut empty_slot = None;
-            for slot in [ContextSlot::A, ContextSlot::B] {
-                // Read a single context slot, which is by definition contiguous
-                let mut context = self.layout.read_context_slots_contiguous(
-                    &self.file, block, 1, slot,
-                )?;
-                assert_eq!(context.len(), 1);
-                let context = context.pop().unwrap();
+            // Read the active context slot, which is by definition contiguous
+            let slot = self.active_context[block];
+            let mut context = self
+                .layout
+                .read_context_slots_contiguous(&self.file, block, 1, slot)?;
+            assert_eq!(context.len(), 1);
+            let context = context.pop().unwrap();
 
-                if let Some(context) = context {
-                    if context.on_disk_hash == hash {
-                        matching_slot = Some(slot);
-                    }
-                } else if empty_slot.is_none() {
-                    empty_slot = Some(slot);
-                }
-            }
-            if matching_slot.is_some() {
-                // great work, everyone
-            } else if empty_slot.is_some() {
-                if !buf.iter().all(|v| *v == 0u8) {
+            if let Some(context) = context {
+                if context.on_disk_hash == hash {
+                    // great work, everyone
+                } else {
                     return Err(CrucibleError::GenericError(format!(
-                        "block {block} has no matching slot, \
-                         and has a empty slot but has none-zero data"
+                        "block {block} has an active slot with mismatched hash"
                     )));
                 }
             } else {
-                return Err(CrucibleError::GenericError(format!(
-                    "block {block} has both slots mismatched"
-                )));
+                // context slot is empty, hopefully data is as well!
+                if buf.iter().all(|v| *v == 0u8) {
+                    // great work, everyone
+                } else {
+                    return Err(CrucibleError::GenericError(format!(
+                        "block {block} has an empty active slot, \
+                         but contains none-zero data"
+                    )));
+                }
             }
         }
         Ok(())
