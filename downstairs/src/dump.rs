@@ -565,7 +565,7 @@ fn show_extent(
     let max_block =
         blocks_per_extent * cmp_extent.0 as u64 + blocks_per_extent - 1;
     // Get the max possible width for a single block
-    let block_width = std::cmp::max(3, max_block.to_string().len());
+    let block_width = std::cmp::max(5, max_block.to_string().len());
 
     // Print the header
     print!("{:>0width$} ", "BLOCK", width = block_width);
