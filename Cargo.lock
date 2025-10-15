@@ -58,13 +58,16 @@ name = "agent-antagonist"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "camino-tempfile",
  "clap",
  "crucible-agent-client",
  "crucible-common",
+ "crucible-downstairs",
  "crucible-workspace-hack",
  "futures",
  "futures-core",
  "rand 0.9.2",
+ "repair-client",
  "reqwest",
  "serde",
  "signal-hook",
