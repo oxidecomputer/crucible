@@ -582,8 +582,9 @@ impl ExtentInner for RawInner {
     }
 
     fn validate(&self) -> Result<(), CrucibleError> {
-        let block_size = self.extent_size.block_size_in_bytes() as u64;
+        let block_size = self.extent_size.block_size_in_bytes() as usize;
 
+        // Read context data to local arrays
         let ctx_a = self.layout.read_context_slots_contiguous(
             &self.file,
             0,
@@ -597,41 +598,57 @@ impl ExtentInner for RawInner {
             ContextSlot::B,
         )?;
 
-        for block in 0..self.extent_size.value {
+        // Read blocks in bulk, 128 KiB at a time
+        let nblocks = 128 * 1024 / block_size;
+        let mut buf = vec![0; block_size * nblocks];
+        for start_block in (0..self.extent_size.value).step_by(nblocks) {
+            let num_blocks =
+                ((self.extent_size.value - start_block) as usize).min(nblocks);
+
             // Read the block data itself:
-            let mut buf = vec![0; block_size as usize];
-            pread_all(self.file.as_fd(), &mut buf, (block_size * block) as i64)
-                .map_err(|e| {
-                    CrucibleError::IoError(format!(
-                        "extent {}: reading block {block} data failed: {e}",
-                        self.extent_number
-                    ))
-                })?;
-            let hash = integrity_hash(&[&buf]);
+            buf.resize(num_blocks * block_size, 0u8);
+            pread_all(
+                self.file.as_fd(),
+                &mut buf,
+                block_size as i64 * start_block as i64,
+            )
+            .map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "extent {}: reading block {start_block} data failed: {e}",
+                    self.extent_number
+                ))
+            })?;
 
-            // Read the active context slot, which is by definition contiguous
-            let context = match self.active_context[block] {
-                ContextSlot::A => &ctx_a,
-                ContextSlot::B => &ctx_b,
-            }[block as usize];
+            // Hash and check individual blocks against context slots
+            for (i, data) in buf.chunks_exact(block_size).enumerate() {
+                let block = start_block as usize + i;
+                let hash = integrity_hash(&[data]);
 
-            if let Some(context) = context {
-                if context.on_disk_hash == hash {
-                    // great work, everyone
+                // Pick out the active context slot
+                let context = match self.active_context[block as u64] {
+                    ContextSlot::A => &ctx_a,
+                    ContextSlot::B => &ctx_b,
+                }[block];
+
+                if let Some(context) = context {
+                    if context.on_disk_hash == hash {
+                        // great work, everyone
+                    } else {
+                        return Err(CrucibleError::GenericError(format!(
+                            "block {block} has an active slot \
+                             with mismatched hash"
+                        )));
+                    }
                 } else {
-                    return Err(CrucibleError::GenericError(format!(
-                        "block {block} has an active slot with mismatched hash"
-                    )));
-                }
-            } else {
-                // context slot is empty, hopefully data is as well!
-                if buf.iter().all(|v| *v == 0u8) {
-                    // great work, everyone
-                } else {
-                    return Err(CrucibleError::GenericError(format!(
-                        "block {block} has an empty active slot, \
-                         but contains none-zero data"
-                    )));
+                    // context slot is empty, hopefully data is as well!
+                    if data.iter().all(|v| *v == 0u8) {
+                        // great work, everyone
+                    } else {
+                        return Err(CrucibleError::GenericError(format!(
+                            "block {block} has an empty active slot, \
+                             but contains none-zero data",
+                        )));
+                    }
                 }
             }
         }
