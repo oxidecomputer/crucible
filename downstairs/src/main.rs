@@ -222,6 +222,12 @@ enum Args {
         #[clap(long, default_value = "127.0.0.1:4567", action)]
         bind_addr: SocketAddr,
     },
+    /// Verify region
+    Verify {
+        /// Directory containing a region.
+        #[clap(short, long, value_name = "DIRECTORY", action)]
+        data: PathBuf,
+    },
     Version,
     /// Measure an isolated downstairs' disk usage
     Dynamometer {
@@ -470,6 +476,11 @@ async fn main() -> Result<()> {
             }
 
             run_dropshot(bind_addr, &log).await
+        }
+        Args::Verify {
+            data,
+        } => {
+            verify_region(data, log)
         }
         Args::Version => {
             let info = crucible_common::BuildInfo::default();
