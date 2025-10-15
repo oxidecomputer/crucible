@@ -52,7 +52,7 @@ use extent::ExtentState;
 use region::Region;
 
 pub use admin::run_dropshot;
-pub use dump::{verify_region, dump_region};
+pub use dump::{dump_region, verify_region};
 pub use dynamometer::*;
 pub use stats::{DsCountStat, DsStatOuter};
 
