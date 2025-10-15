@@ -10,6 +10,33 @@ struct ExtInfo {
     ei_hm: HashMap<u32, ExtentMeta>,
 }
 
+pub fn verify_region(
+    region_dir: PathBuf,
+    log: Logger,
+) -> Result<()> {
+
+    let mut verify_error = false;
+    let region = Region::open(region_dir, false, true, &log)?;
+
+    for e in &region.extents {
+        let e = match e {
+            extent::ExtentState::Opened(extent) => extent,
+            extent::ExtentState::Closed => panic!("dump on closed extent!"),
+        };
+
+        if let Err(err) = e.validate() {
+            println!(
+                "validation failed for extent {}: {:?}",
+                e.number, err
+            );
+            verify_error = true;
+        }
+    }
+    if verify_error {
+        bail!("Region failed to verify");
+    }
+    Ok(())
+}
 /*
  * Dump the metadata for one or more region directories.
  *
