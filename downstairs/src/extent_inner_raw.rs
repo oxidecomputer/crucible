@@ -581,6 +581,80 @@ impl ExtentInner for RawInner {
         r
     }
 
+    fn validate(&self) -> Result<(), CrucibleError> {
+        let block_size = self.extent_size.block_size_in_bytes() as usize;
+
+        // Read context data to local arrays
+        let ctx_a = self.layout.read_context_slots_contiguous(
+            &self.file,
+            0,
+            self.layout.block_count(),
+            ContextSlot::A,
+        )?;
+        let ctx_b = self.layout.read_context_slots_contiguous(
+            &self.file,
+            0,
+            self.layout.block_count(),
+            ContextSlot::B,
+        )?;
+
+        // Read blocks in bulk, 128 KiB at a time
+        let nblocks = 128 * 1024 / block_size;
+        let mut buf = vec![0; block_size * nblocks];
+        for start_block in (0..self.extent_size.value).step_by(nblocks) {
+            let num_blocks =
+                ((self.extent_size.value - start_block) as usize).min(nblocks);
+
+            // Read the block data itself:
+            buf.resize(num_blocks * block_size, 0u8);
+            pread_all(
+                self.file.as_fd(),
+                &mut buf,
+                block_size as i64 * start_block as i64,
+            )
+            .map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "extent {}: reading block {start_block} data failed: {e}",
+                    self.extent_number
+                ))
+            })?;
+
+            // Hash and check individual blocks against context slots
+            for (i, data) in buf.chunks_exact(block_size).enumerate() {
+                let block = start_block as usize + i;
+                let hash = integrity_hash(&[data]);
+
+                // Pick out the active context slot
+                let context = match self.active_context[block as u64] {
+                    ContextSlot::A => &ctx_a,
+                    ContextSlot::B => &ctx_b,
+                }[block];
+
+                if let Some(context) = context {
+                    if context.on_disk_hash == hash {
+                        // great work, everyone
+                    } else {
+                        return Err(CrucibleError::GenericError(format!(
+                            "block {block} has an active slot \
+                             with mismatched hash"
+                        )));
+                    }
+                } else {
+                    // context slot is empty, hopefully data is as well!
+                    if data.iter().all(|v| *v == 0u8) {
+                        // great work, everyone
+                    } else {
+                        return Err(CrucibleError::GenericError(format!(
+                            "block {block} has an empty active slot, \
+                             but contains non-zero data",
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn set_dirty_and_block_context(
         &mut self,

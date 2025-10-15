@@ -1,6 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
 use crate::extent::ExtentMeta;
+use rayon::prelude::*;
 use std::convert::TryInto;
 
 use sha2::{Digest, Sha256};
@@ -10,6 +11,33 @@ struct ExtInfo {
     ei_hm: HashMap<u32, ExtentMeta>,
 }
 
+pub fn verify_region(region_dir: PathBuf, log: Logger) -> Result<()> {
+    let region = Region::open(region_dir, false, true, &log)?;
+    let errors: Vec<_> = region
+        .extents
+        .par_iter()
+        .filter_map(|e| {
+            let extent = match e {
+                extent::ExtentState::Opened(extent) => extent,
+                extent::ExtentState::Closed => panic!("dump on closed extent!"),
+            };
+
+            if let Err(err) = extent.validate() {
+                Some((extent.number, err))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !errors.is_empty() {
+        for (number, err) in &errors {
+            println!("validation failed for extent {}: {:?}", number, err);
+        }
+        bail!("Region failed to verify");
+    }
+    Ok(())
+}
 /*
  * Dump the metadata for one or more region directories.
  *
