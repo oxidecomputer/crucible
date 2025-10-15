@@ -471,11 +471,7 @@ async fn main() -> Result<()> {
 
             run_dropshot(bind_addr, &log).await
         }
-        Args::Verify {
-            data,
-        } => {
-            verify_region(data, log)
-        }
+        Args::Verify { data } => verify_region(data, log),
         Args::Version => {
             let info = crucible_common::BuildInfo::default();
             println!("Crucible Version: {}", info);
