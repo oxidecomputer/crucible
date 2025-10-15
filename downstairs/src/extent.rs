@@ -35,6 +35,7 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
     fn gen_number(&self) -> Result<u64, CrucibleError>;
     fn flush_number(&self) -> Result<u64, CrucibleError>;
     fn dirty(&self) -> Result<bool, CrucibleError>;
+    fn validate(&self) -> Result<(), CrucibleError>;
 
     /// Performs any metadata updates needed before a flush
     fn pre_flush(
@@ -519,6 +520,11 @@ impl Extent {
         let dirty = self.inner.dirty().unwrap();
 
         Ok((gen, flush, dirty))
+    }
+
+    /// Validates the extent data
+    pub fn validate(&self) -> Result<(), CrucibleError> {
+        self.inner.validate()
     }
 
     /**
