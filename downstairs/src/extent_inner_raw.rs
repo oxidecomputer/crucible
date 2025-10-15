@@ -583,6 +583,20 @@ impl ExtentInner for RawInner {
 
     fn validate(&self) -> Result<(), CrucibleError> {
         let block_size = self.extent_size.block_size_in_bytes() as u64;
+
+        let ctx_a = self.layout.read_context_slots_contiguous(
+            &self.file,
+            0,
+            self.layout.block_count(),
+            ContextSlot::A,
+        )?;
+        let ctx_b = self.layout.read_context_slots_contiguous(
+            &self.file,
+            0,
+            self.layout.block_count(),
+            ContextSlot::B,
+        )?;
+
         for block in 0..self.extent_size.value {
             // Read the block data itself:
             let mut buf = vec![0; block_size as usize];
@@ -596,12 +610,10 @@ impl ExtentInner for RawInner {
             let hash = integrity_hash(&[&buf]);
 
             // Read the active context slot, which is by definition contiguous
-            let slot = self.active_context[block];
-            let mut context = self
-                .layout
-                .read_context_slots_contiguous(&self.file, block, 1, slot)?;
-            assert_eq!(context.len(), 1);
-            let context = context.pop().unwrap();
+            let context = match self.active_context[block] {
+                ContextSlot::A => &ctx_a,
+                ContextSlot::B => &ctx_b,
+            }[block as usize];
 
             if let Some(context) = context {
                 if context.on_disk_hash == hash {
