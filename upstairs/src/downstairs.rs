@@ -25,8 +25,8 @@ use crate::{
     DownstairsIO, DownstairsMend, DsState, DsStateData, ExtentFix,
     ExtentRepairIDs, IOState, IOStateCount, IOop, ImpactedBlocks, JobId,
     Message, NegotiationState, RawReadResponse, RawWrite, ReconcileIO,
-    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    WorkSummary,
+    ReconciliationId, RegionDefinition, RegionMetadata, ReplaceResult,
+    SnapshotDetails, WorkSummary,
 };
 use crucible_common::{BlockIndex, ExtentId, NegotiationError};
 use crucible_protocol::WriteHeader;
@@ -163,6 +163,20 @@ pub(crate) enum LiveRepairState {
     FinalFlush {
         flush_job: PendingJob,
     },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum LiveRepairStart {
+    /// Live-repair has started
+    Started,
+    /// Live-repair is already running
+    AlreadyRunning,
+    /// No downstairs is in `LiveRepairReady`
+    NotNeeded,
+    /// All three downstairs need live-repair (oh no)
+    AllNeedRepair,
+    /// There is no source downstairs available
+    NoSource,
 }
 
 impl LiveRepairState {
@@ -874,7 +888,16 @@ impl Downstairs {
     /// Returns `true` if repair is needed, `false` otherwise
     pub(crate) fn collate(&mut self) -> Result<bool, NegotiationError> {
         let r = self.check_region_metadata()?;
-        Ok(self.start_reconciliation(r))
+        Ok(self.start_reconciliation(r, |data| {
+            let DsStateData::Connecting {
+                state: NegotiationStateData::WaitQuorum(r),
+                ..
+            } = data
+            else {
+                panic!("client is not in WaitQuorum");
+            };
+            r
+        }))
     }
 
     /// Checks that region metadata is valid
@@ -963,9 +986,46 @@ impl Downstairs {
         Ok(CollateData { max_flush, max_gen })
     }
 
+    /// Begins reconciliation from all downstairs in `LiveRepairReady`
+    ///
+    /// # Panics
+    /// If any of the downstairs is not in `LiveRepairReady`
+    #[must_use]
+    pub(crate) fn reconcile_from_live_repair_ready(&mut self) -> bool {
+        let mut max_flush = 0;
+        let mut max_gen = 0;
+        for client in self.clients.iter_mut() {
+            let DsStateData::Connecting {
+                state: NegotiationStateData::LiveRepairReady(data),
+                ..
+            } = client.state_data()
+            else {
+                panic!("got invalid client state");
+            };
+            for m in data.iter() {
+                max_flush = max_flush.max(m.flush + 1);
+                max_gen = max_gen.max(m.gen + 1);
+            }
+        }
+        self.start_reconciliation(CollateData { max_gen, max_flush }, |data| {
+            let DsStateData::Connecting {
+                state: NegotiationStateData::LiveRepairReady(r),
+                ..
+            } = data
+            else {
+                panic!("client is not in LiveRepairReady");
+            };
+            r
+        })
+    }
+
     /// Begins reconciliation, using the given collation data
     #[must_use]
-    fn start_reconciliation(&mut self, data: CollateData) -> bool {
+    fn start_reconciliation<G: Fn(&DsStateData) -> &RegionMetadata>(
+        &mut self,
+        data: CollateData,
+        getter: G,
+    ) -> bool {
         let CollateData { max_flush, max_gen } = data;
 
         /*
@@ -978,7 +1038,7 @@ impl Downstairs {
          * Determine what extents don't match and what to do
          * about that
          */
-        if let Some(reconcile_list) = self.mismatch_list() {
+        if let Some(reconcile_list) = self.mismatch_list(getter) {
             for c in self.clients.iter_mut() {
                 c.begin_reconcile();
             }
@@ -1026,10 +1086,14 @@ impl Downstairs {
     ///
     /// This function is idempotent; it returns without doing anything if
     /// live-repair either can't be started or is already running.
-    pub(crate) fn check_live_repair_start(&mut self, up_state: &UpstairsState) {
+    #[must_use]
+    pub(crate) fn check_live_repair_start(
+        &mut self,
+        up_state: &UpstairsState,
+    ) -> LiveRepairStart {
         // If we're already doing live-repair, then we can't start live-repair
         if self.live_repair_in_progress() {
-            return;
+            return LiveRepairStart::AlreadyRunning;
         }
 
         // Begin setting up live-repair state
@@ -1054,16 +1118,15 @@ impl Downstairs {
 
         // Can't start live-repair if no one is LiveRepairReady
         if repair_downstairs.is_empty() {
-            return;
+            return LiveRepairStart::NotNeeded;
+        } else if repair_downstairs.len() == 3 {
+            warn!(self.log, "All three downstairs require repair");
+            return LiveRepairStart::AllNeedRepair;
         }
 
         // Can't start live-repair if we don't have a source downstairs
         let Some(source_downstairs) = source_downstairs else {
-            warn!(self.log, "No source, no Live Repair possible");
-            if repair_downstairs.len() == 3 {
-                warn!(self.log, "All three downstairs require repair");
-            }
-            return;
+            return LiveRepairStart::NoSource;
         };
 
         // Move the upstairs that were LiveRepairReady to LiveRepair
@@ -1105,6 +1168,8 @@ impl Downstairs {
 
         let repair = self.repair.as_ref().unwrap();
         self.notify_live_repair_start(repair);
+
+        LiveRepairStart::Started
     }
 
     /// Checks whether live-repair can continue
@@ -2008,18 +2073,14 @@ impl Downstairs {
     }
 
     /// Compares region metadata from all three clients and builds a mend list
-    fn mismatch_list(&self) -> Option<DownstairsMend> {
+    fn mismatch_list<G: Fn(&DsStateData) -> &RegionMetadata>(
+        &self,
+        getter: G,
+    ) -> Option<DownstairsMend> {
         let log = self.log.new(o!("" => "mend".to_string()));
         let mut meta = ClientMap::new();
         for i in ClientId::iter() {
-            let DsStateData::Connecting {
-                state: NegotiationStateData::WaitQuorum(r),
-                ..
-            } = self.clients[i].state_data()
-            else {
-                panic!("client {i} is not in WaitQuorum");
-            };
-            meta.insert(i, r);
+            meta.insert(i, getter(self.clients[i].state_data()));
         }
         DownstairsMend::new(&meta, log)
     }
@@ -4006,7 +4067,8 @@ struct DownstairsBackpressureConfig {
 pub(crate) mod test {
     use super::{
         ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
-        ConnectionMode, Downstairs, DsState, NegotiationStateData, PendingJob,
+        ConnectionMode, Downstairs, DsState, LiveRepairStart,
+        NegotiationStateData, PendingJob,
     };
     use crate::{
         downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
@@ -4081,7 +4143,7 @@ pub(crate) mod test {
             NegotiationStateData::WaitForPromote,
             NegotiationStateData::WaitForRegionInfo,
             NegotiationStateData::GetExtentVersions,
-            NegotiationStateData::LiveRepairReady,
+            NegotiationStateData::LiveRepairReady(Default::default()),
         ] {
             ds.clients[to_repair].checked_state_transition(
                 &UpstairsState::Active,
@@ -9613,7 +9675,8 @@ pub(crate) mod test {
 
         // Start the repair normally. This enqueues the close & reopen jobs, and
         // reserves Job IDs for the repair/noop
-        ds.check_live_repair_start(&UpstairsState::Active);
+        let r = ds.check_live_repair_start(&UpstairsState::Active);
+        assert_eq!(r, LiveRepairStart::Started);
         assert!(ds.live_repair_in_progress());
 
         // Submit a write.
