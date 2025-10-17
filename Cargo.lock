@@ -1547,6 +1547,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-verify-raw"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "clap",
+ "crucible-common",
+ "crucible-protocol",
+ "serde",
+]
+
+[[package]]
 name = "crucible-workspace-hack"
 version = "0.1.0"
 dependencies = [
