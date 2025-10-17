@@ -108,33 +108,29 @@ enum Args {
      * With -b, you can dump a single block to see a detailed comparison.
      */
     Dump {
-        /*
-         * Directories containing a region.
-         */
+        /// Detailed view for a block
+        #[clap(short, long, action, conflicts_with = "extent")]
+        block: Option<u64>,
+
+        /// Directories containing a region.
         #[clap(short, long, value_name = "DIRECTORY", action)]
         data: Vec<PathBuf>,
 
-        /*
-         * Just dump this extent number
-         */
-        #[clap(short, long, action)]
+        /// Just dump this extent number
+        #[clap(short, long, action, conflicts_with = "block")]
         extent: Option<u32>,
 
-        /*
-         * Detailed view for a block
-         */
+        /// Show extent file layout
         #[clap(short, long, action)]
-        block: Option<u64>,
-
-        /*
-         * Only show differences
-         */
-        #[clap(short, long, action)]
-        only_show_differences: bool,
+        layout: bool,
 
         /// No color output
         #[clap(long, action)]
         no_color: bool,
+
+        /// Only show differences
+        #[clap(short, long, action)]
+        only_show_differences: bool,
     },
     Export {
         /*
@@ -355,11 +351,12 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Args::Dump {
+            block,
             data,
             extent,
-            block,
-            only_show_differences,
+            layout,
             no_color,
+            only_show_differences,
         } => {
             if data.is_empty() {
                 bail!("Need at least one data directory to dump");

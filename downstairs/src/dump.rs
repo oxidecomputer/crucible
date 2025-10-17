@@ -52,11 +52,9 @@ pub fn dump_region(
     block: Option<u64>,
     only_show_differences: bool,
     nc: bool,
+    layout: bool,
     log: Logger,
 ) -> Result<()> {
-    if cmp_extent.is_some() && block.is_some() {
-        bail!("Either a specific block, or a specific extent, not both");
-    }
     /*
      * We are building a two level hashmap.
      * The first level index is the extent number.
@@ -483,7 +481,7 @@ fn show_extent(
     print!("GEN      ");
     for dir_index in 0..dir_count {
         if let Some(em) = ei_hm.get(&(dir_index as u32)) {
-            print!("{:8} ", em.gen_number);
+            print!("{:10} ", em.gen_number);
         } else {
             print!("- ");
         }
@@ -493,7 +491,7 @@ fn show_extent(
     print!("FLUSH_ID ");
     for dir_index in 0..dir_count {
         if let Some(em) = ei_hm.get(&(dir_index as u32)) {
-            print!("{:8} ", em.flush_number);
+            print!("{:10} ", em.flush_number);
         } else {
             print!("-");
         }
@@ -508,9 +506,9 @@ fn show_extent(
             } else {
                 " ".to_string()
             };
-            print!("{:>8} ", dirty);
+            print!("{:>10} ", dirty);
         } else {
-            print!("- ");
+            print!("{:>10} ", "-");
         }
     }
     println!();
