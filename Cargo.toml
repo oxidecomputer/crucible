@@ -32,6 +32,7 @@ members = [
     "workspace-hack",
     "xtask",
     "agent-antagonist",
+    "verify-raw",
 ]
 resolver = "2"
 

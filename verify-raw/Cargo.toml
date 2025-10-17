@@ -1,0 +1,12 @@
+[package]
+name = "crucible-verify-raw"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+bincode.workspace = true
+clap.workspace = true
+crucible-protocol.workspace = true
+crucible-common.workspace = true
+serde.workspace = true
