@@ -32,7 +32,10 @@ pub fn verify_region(region_dir: PathBuf, log: Logger) -> Result<()> {
 
     if !errors.is_empty() {
         for (number, err) in &errors {
-            println!("validation failed for extent {}: {:?}", number, err);
+            println!(
+                "validation failed for extent {} 0x{:03X} : {:?}",
+                number, number.0, err
+            );
         }
         bail!("Region failed to verify");
     }
