@@ -10,3 +10,4 @@ clap.workspace = true
 crucible-protocol.workspace = true
 crucible-common.workspace = true
 serde.workspace = true
+crucible-workspace-hack.workspace = true

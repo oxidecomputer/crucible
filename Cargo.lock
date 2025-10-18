@@ -1555,6 +1555,7 @@ dependencies = [
  "clap",
  "crucible-common",
  "crucible-protocol",
+ "crucible-workspace-hack",
  "serde",
 ]
 
