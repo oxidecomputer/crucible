@@ -56,9 +56,11 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
                 );
             }
         })?;
-    println!("Block size:  {block_size}  bytes");
-    println!("Block count: {block_count} blocks");
-    println!("Meta: {meta:#?}");
+    print!("bs:{block_size} bytes  bc:{block_count:>6}");
+    println!(
+        "  dirty:{:>5} gen:{} flush_number:{:>6} ext_ver:{}",
+        meta.dirty, meta.gen_number, meta.flush_number, meta.ext_version
+    );
 
     let slot_selected = if !meta.dirty {
         let mut selected = vec![];
@@ -95,12 +97,12 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
             let ctx = if s { ctx_a[i] } else { ctx_b[i] };
             if let Err(e) = check_block(chunk, hash, ctx) {
                 failed = true;
-                println!("Error at block {i}:");
-                println!(
+                print!("Error at block {:>6}:", i);
+                print!(
                     "  slot {} (selected): {e:?}",
                     if s { "A" } else { "B" }
                 );
-                println!(
+                print!(
                     "  slot {} (deselected): {:?}",
                     if s { "B" } else { "A" },
                     check_block(
@@ -110,20 +112,22 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
                     )
                 );
                 if chunk.iter().all(|b| *b == 0u8) {
-                    println!("  Block is all zeros");
+                    print!("  Block is all zeros");
                 }
+                println!("");
             }
         } else if let Err(ea) = check_block(chunk, hash, ctx_a[i])
             && let Err(eb) = check_block(chunk, hash, ctx_b[i])
         {
             // Otherwise, check both context slots to see if either is valid
             failed = true;
-            println!("Error at block {i}:");
-            println!("  slot A: {ea:?}");
-            println!("  slot B: {eb:?}");
+            print!("Error at block {i}:");
+            print!("  slot A: {ea:?}");
+            print!("  slot B: {eb:?}");
             if chunk.iter().all(|b| *b == 0u8) {
-                println!("  Block is all zeros");
+                print!("  Block is all zeros");
             }
+            println!("");
         }
     }
 
