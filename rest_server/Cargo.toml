@@ -1,0 +1,24 @@
+[package]
+name = "crucible-rest-server"
+version = "0.1.0"
+authors = ["Justin Azoff <justin.azoff@oxide.computer>"]
+license = "MPL-2.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+crucible-common.workspace = true
+crucible-protocol.workspace = true
+crucible.workspace = true
+futures-core.workspace = true
+futures.workspace = true
+dropshot.workspace = true
+ringbuffer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+toml.workspace = true
+crucible-workspace-hack.workspace = true

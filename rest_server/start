@@ -1,0 +1,1 @@
+cargo run --bin crucible-rest-server -- --target 192.168.5.185:3810 --target 192.168.5.230:3810 --target 192.168.5.224:3810 -g 1
