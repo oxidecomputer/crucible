@@ -7,6 +7,7 @@ use clap::Parser;
 
 use crucible::*;
 use std::io::Read;
+use std::io::Write;
 use std::io::Seek;
 use std::io::SeekFrom;
 
@@ -208,19 +209,23 @@ async fn crucible_api_get_bytes(
 }]
 async fn crucible_api_put_bytes(
     rqctx: RequestContext<CrucibleContext>,
-    update: TypedBody<WriteRequest>,
+    req: TypedBody<WriteRequest>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
-    let _api_context = rqctx.context();
-    let _updated_value = update.into_inner();
+    let api_context = rqctx.context();
+    let req = req.into_inner();
 
-    /*
-    if updated_value.counter == 10 {
-        Err(HttpError::for_bad_request(
-            Some(String::from("BadInput")),
-            format!("do not like the number {}", updated_value.counter),
+    let mut cpf = api_context.cpf.lock().unwrap();
+
+    match cpf.seek(SeekFrom::Start(req.offset)) {
+        Ok(_) => {},
+        Err(e) => return Err(HttpError::for_internal_error(
+            format!("seek failed: {e}")
         ))
-    } else {
-        api_context.counter.store(updated_value.counter, Ordering::SeqCst);
-    */
-    Ok(HttpResponseUpdatedNoContent())
+    };
+    match cpf.write(&mut req.bytes.as_bytes()) {
+        Ok(bytes_written) => Ok(HttpResponseUpdatedNoContent()),
+        Err(e) => return Err(HttpError::for_internal_error(
+            format!("write failed: {e}")
+        ))
+    }
 }
