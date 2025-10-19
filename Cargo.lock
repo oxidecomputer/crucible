@@ -1538,6 +1538,7 @@ dependencies = [
  "futures",
  "futures-core",
  "ringbuffer",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",
