@@ -1524,6 +1524,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-rest-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "crucible",
+ "crucible-common",
+ "crucible-protocol",
+ "crucible-workspace-hack",
+ "dropshot",
+ "futures",
+ "futures-core",
+ "ringbuffer",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "crucible-smf"
 version = "0.0.0"
 dependencies = [
