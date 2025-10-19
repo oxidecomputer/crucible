@@ -1,15 +1,20 @@
 // Copyright 2021 Oxide Computer Company
+use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 
 use crucible::*;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 
 use dropshot::endpoint;
 use dropshot::ApiDescription;
 use dropshot::ConfigLogging;
 use dropshot::ConfigLoggingLevel;
+use dropshot::HandlerTaskMode;
 use dropshot::HttpError;
 use dropshot::HttpResponseOk;
 use dropshot::HttpResponseUpdatedNoContent;
@@ -23,6 +28,9 @@ use serde::Serialize;
 #[derive(Debug, Parser)]
 #[clap(about = "volume-side storage component")]
 pub struct Opt {
+    #[clap(short, long, default_value = "127.0.0.1:9999", action)]
+    listen: SocketAddr,
+
     #[clap(short, long, default_value = "127.0.0.1:9000", action)]
     target: Vec<SocketAddr>,
 
@@ -115,7 +123,14 @@ async fn main() -> Result<()> {
     // always available and won't expose this server outside the host.  It also
     // uses port 0, which allows the operating system to pick any available
     // port.
+
+
     let server = ServerBuilder::new(api, api_context, log)
+        .config(dropshot::ConfigDropshot {
+                bind_address: opt.listen,
+                default_request_body_max_bytes: 8 * 1024,
+                default_handler_task_mode: HandlerTaskMode::Detached,
+                log_headers: vec![]})
         .start()
         .context("failed to create server")?;
 
@@ -127,14 +142,13 @@ async fn main() -> Result<()> {
 
 /// Application-specific example context (state shared by handler functions)
 struct CrucibleContext {
-    /// counter that can be manipulated by requests to the HTTP API
-    cpf: CruciblePseudoFile<crucible::Guest>,
+    cpf: Arc<Mutex<CruciblePseudoFile<crucible::Guest>>>,
 }
 
 impl CrucibleContext {
     /// Return a new CrucibleContext.
     pub fn new(cpf: CruciblePseudoFile<crucible::Guest>) -> CrucibleContext {
-        CrucibleContext { cpf: cpf }
+        CrucibleContext { cpf: Arc::new(Mutex::new(cpf)) }
     }
 }
 
@@ -166,10 +180,25 @@ async fn crucible_api_get_bytes(
     req: TypedBody<ReadRequest>,
 ) -> Result<HttpResponseOk<ReadResponse>, HttpError> {
     let api_context = rqctx.context();
+    let req = req.into_inner();
 
-    Ok(HttpResponseOk(ReadResponse {
-        bytes: "hello world".to_string(),
-    }))
+    let mut cpf = api_context.cpf.lock().unwrap();
+
+    match cpf.seek(SeekFrom::Start(req.offset)) {
+        Ok(_) => {},
+        Err(e) => return Err(HttpError::for_internal_error(
+            format!("seek failed: {e}")
+        ))
+    };
+    let mut buffer = vec![0u8; req.len.try_into().unwrap()];
+    match cpf.read(&mut buffer) {
+        Ok(bytes_read) => Ok(HttpResponseOk(ReadResponse {
+            bytes: String::from_utf8_lossy(&buffer[..bytes_read]).to_string()
+        })),
+        Err(e) => Err(HttpError::for_internal_error(
+            format!("read failed: {e}")
+        ))
+    }
 }
 
 /// Write bytes
@@ -181,8 +210,8 @@ async fn crucible_api_put_bytes(
     rqctx: RequestContext<CrucibleContext>,
     update: TypedBody<WriteRequest>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
-    let api_context = rqctx.context();
-    let updated_value = update.into_inner();
+    let _api_context = rqctx.context();
+    let _updated_value = update.into_inner();
 
     /*
     if updated_value.counter == 10 {
