@@ -25,7 +25,7 @@ impl RegionMetadata {
                 .iter()
                 .enumerate()
                 .map(|(i, g)| ExtentMetadata {
-                    gen: *g,
+                    generation: *g,
                     flush: flush_numbers[i],
                     dirty: dirty[i],
                 })
@@ -56,7 +56,7 @@ impl RegionMetadata {
 /// works to pick the highest-priority extent.
 #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub(crate) struct ExtentMetadata {
-    pub gen: u64,
+    pub generation: u64,
     pub flush: u64,
     pub dirty: bool,
 }
@@ -123,11 +123,7 @@ impl DownstairsMend {
             }
         }
 
-        if dsm.mend.is_empty() {
-            None
-        } else {
-            Some(dsm)
-        }
+        if dsm.mend.is_empty() { None } else { Some(dsm) }
     }
 }
 
@@ -1156,7 +1152,7 @@ mod test {
         // first and second rows with a 1 in the third row.
         // Generation and dirty bits are the same for all downstairs.
 
-        let gen = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+        let gens = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
 
         // Extent --------  0  1  2  3  4  5  6  7  8
         let flush0 = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
@@ -1167,9 +1163,9 @@ mod test {
             false, false, false, false, false, false, false, false, false,
         ];
 
-        let d0 = RegionMetadata::new(&gen, &flush0, &dirty);
-        let d1 = RegionMetadata::new(&gen, &flush1, &dirty);
-        let d2 = RegionMetadata::new(&gen, &flush2, &dirty);
+        let d0 = RegionMetadata::new(&gens, &flush0, &dirty);
+        let d1 = RegionMetadata::new(&gens, &flush1, &dirty);
+        let d2 = RegionMetadata::new(&gens, &flush2, &dirty);
 
         let mut meta = ClientMap::new();
         meta.insert(ClientId::new(0), &d0);
@@ -1248,7 +1244,7 @@ mod test {
         // first and second rows with a 2 in the third row.
         // Generation and dirty bits are the same for all downstairs.
 
-        let gen = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+        let gens = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
         // Extent --------- 0  1  2  3  4  5  6  7  8
         let flush0 = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
         let flush1 = vec![1, 1, 1, 2, 2, 2, 3, 3, 3];
@@ -1258,9 +1254,9 @@ mod test {
             false, false, false, false, false, false, false, false, false,
         ];
 
-        let d0 = RegionMetadata::new(&gen, &flush0, &dirty);
-        let d1 = RegionMetadata::new(&gen, &flush1, &dirty);
-        let d2 = RegionMetadata::new(&gen, &flush2, &dirty);
+        let d0 = RegionMetadata::new(&gens, &flush0, &dirty);
+        let d1 = RegionMetadata::new(&gens, &flush1, &dirty);
+        let d2 = RegionMetadata::new(&gens, &flush2, &dirty);
 
         let mut meta = ClientMap::new();
         meta.insert(ClientId::new(0), &d0);
@@ -1339,7 +1335,7 @@ mod test {
         // first and second rows with 3 in the third row.
         // Generation and dirty bits are the same for all downstairs.
 
-        let gen = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+        let gens = vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
 
         // Extent --------- 0  1  2  3  4  5  6  7  8
         let flush0 = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
@@ -1350,9 +1346,9 @@ mod test {
             false, false, false, false, false, false, false, false, false,
         ];
 
-        let d0 = RegionMetadata::new(&gen, &flush0, &dirty);
-        let d1 = RegionMetadata::new(&gen, &flush1, &dirty);
-        let d2 = RegionMetadata::new(&gen, &flush2, &dirty);
+        let d0 = RegionMetadata::new(&gens, &flush0, &dirty);
+        let d1 = RegionMetadata::new(&gens, &flush1, &dirty);
+        let d2 = RegionMetadata::new(&gens, &flush2, &dirty);
 
         let mut meta = ClientMap::new();
         meta.insert(ClientId::new(0), &d0);

@@ -248,7 +248,7 @@ pub enum Message {
         // The unique UUID just for this running upstairs session
         session_id: Uuid,
         // Generation number (IGNORED)
-        gen: u64,
+        generation: u64,
         // If we expect the region to be read-only.
         read_only: bool,
         // If we expect the region to be  encrypted.
@@ -291,12 +291,12 @@ pub enum Message {
     PromoteToActive {
         upstairs_id: Uuid,
         session_id: Uuid,
-        gen: u64,
+        generation: u64,
     },
     YouAreNowActive {
         upstairs_id: Uuid,
         session_id: Uuid,
-        gen: u64,
+        generation: u64,
     },
     YouAreNoLongerActive {
         new_upstairs_id: Uuid,
@@ -1142,7 +1142,7 @@ mod tests {
             version: 2,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 123,
+            generation: 123,
             read_only: false,
             encrypted: true,
             alternate_versions: Vec::new(),
@@ -1213,7 +1213,7 @@ mod tests {
             version: 0,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 23849183,
+            generation: 23849183,
             read_only: true,
             encrypted: false,
             alternate_versions: Vec::new(),
@@ -1285,7 +1285,7 @@ mod tests {
             version: 123,
             upstairs_id,
             session_id,
-            gen: 567,
+            generation: 567,
             read_only: true,
             encrypted: false,
             alternate_versions: vec![8, 9],

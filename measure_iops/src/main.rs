@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use rand::Rng;
 use tokio::time::{Duration, Instant};
@@ -22,7 +22,7 @@ pub struct Opt {
     key: Option<String>,
 
     #[clap(short, long, default_value = "0", action)]
-    gen: u64,
+    generation: u64,
 
     #[clap(long, action)]
     cert_pem: Option<String>,
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     let (guest, io) = Guest::new(None);
     let guest = Arc::new(guest);
 
-    let _join_handle = up_main(crucible_opts, opt.gen, None, io, None)?;
+    let _join_handle = up_main(crucible_opts, opt.generation, None, io, None)?;
     println!("Crucible runtime is spawned");
 
     guest.activate().await?;

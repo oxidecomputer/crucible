@@ -1,6 +1,6 @@
 // Copyright 2022 Oxide Computer Company
 
-use base64::{engine, Engine};
+use base64::{Engine, engine};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -29,7 +29,8 @@ pub enum VolumeConstructionRequest {
         blocks_per_extent: u64,
         extent_count: u32,
         opts: CrucibleOpts,
-        gen: u64,
+        #[serde(rename = "gen")]
+        generation: u64,
     },
     File {
         id: Uuid,

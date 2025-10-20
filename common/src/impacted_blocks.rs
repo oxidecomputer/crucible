@@ -135,7 +135,7 @@ impl ImpactedBlocks {
     pub fn extents(
         &self,
         ddef: &RegionDefinition,
-    ) -> impl Iterator<Item = ExtentId> {
+    ) -> impl Iterator<Item = ExtentId> + use<'_> {
         let blocks_per_extent = ddef.extent_size().value;
         match self {
             ImpactedBlocks::Empty => None, /* empty range */
@@ -222,7 +222,7 @@ mod test {
     use proptest::prelude::*;
     use std::panic;
     use std::panic::UnwindSafe;
-    use test_strategy::{proptest, Arbitrary};
+    use test_strategy::{Arbitrary, proptest};
 
     fn basic_region_definition(
         extent_size: u32,
@@ -574,8 +574,8 @@ mod test {
 
     /// Generate a random region definition, and a single ImpactedBlocks range
     /// within it.
-    fn region_and_impacted_blocks_strategy(
-    ) -> impl Strategy<Value = (RegionDefinition, ImpactedBlocks)> {
+    fn region_and_impacted_blocks_strategy()
+    -> impl Strategy<Value = (RegionDefinition, ImpactedBlocks)> {
         any::<(ArbitraryRegionDefinition, ArbitraryImpactedBlocks)>().prop_map(
             |(test_ddef, test_iblocks)| {
                 let ddef = reify_region_definition(test_ddef);
