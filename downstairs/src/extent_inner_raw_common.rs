@@ -16,6 +16,10 @@ pub(super) struct OnDiskMeta {
     pub gen_number: u64,
     pub flush_number: u64,
     pub ext_version: u32,
+
+    // Extra data added for debugging purposes
+    pub bonus_sync_count: u32,
+    pub defrag_count: u32,
 }
 
 impl OnDiskMeta {
@@ -106,6 +110,8 @@ mod test {
             gen_number: u64::MAX,
             flush_number: u64::MAX,
             ext_version: u32::MAX,
+            bonus_sync_count: u32::MAX,
+            defrag_count: u32::MAX,
         };
         let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
         bincode::serialize_into(meta_buf.as_mut_slice(), &Some(m)).unwrap();

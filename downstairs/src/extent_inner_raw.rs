@@ -31,6 +31,7 @@ use std::path::Path;
 struct OnDiskDownstairsBlockContext {
     block_context: BlockContext,
     on_disk_hash: u64,
+    flush_id: u16,
 }
 
 /// Size of backup data
@@ -105,6 +106,19 @@ pub struct RawInner {
 
     /// Denominator corresponding to `extra_syscall_count`
     extra_syscall_denominator: u64,
+
+    /// Number of times we've done a bonus sync
+    ///
+    /// The lower 32 bits are written to the metadata for debug purposes
+    bonus_sync_count: u64,
+
+    /// Number of times we've done context slot defragmentation
+    ///
+    /// The lower 32 bits are written to the metadata for debug purposes
+    defrag_count: u64,
+
+    /// Most recent flush number, written to context slots for debug purposes
+    last_flush: u64,
 }
 
 /// Bitpacked array, with one bit per block
@@ -688,20 +702,27 @@ impl RawInner {
             0,
             ctxs.iter().map(Option::as_ref),
             ContextSlot::A,
+            0,
         )?;
         layout.write_context_slots_contiguous(
             file,
             0,
             std::iter::repeat(None).take(block_count),
             ContextSlot::B,
+            0,
         )?;
 
         layout.write_active_context_and_metadata(
             file,
             &ActiveContextSlots::new(layout.block_count()),
-            dirty,
-            flush_number,
-            gen_number,
+            OnDiskMeta {
+                dirty,
+                flush_number,
+                gen_number,
+                ext_version: EXTENT_META_RAW,
+                bonus_sync_count: 0,
+                defrag_count: 0,
+            },
         )?;
 
         Ok(())
@@ -737,6 +758,9 @@ impl RawInner {
             block_dirty: BlockBitArray::new(extent_size.value),
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
+            bonus_sync_count: 0,
+            defrag_count: 0,
+            last_flush: 0,
         };
         // Setting the flush number also writes the extent version, since
         // they're serialized together in the same block.
@@ -895,6 +919,9 @@ impl RawInner {
             block_dirty: BlockBitArray::new(def.extent_size().value),
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
+            bonus_sync_count: u64::from(meta.bonus_sync_count),
+            defrag_count: u64::from(meta.defrag_count),
+            last_flush: meta.flush_number,
         })
     }
 
@@ -996,6 +1023,7 @@ impl RawInner {
                 ))
             })?;
             self.block_dirty.reset();
+            self.bonus_sync_count += 1;
         }
         // Mark the to-be-written blocks as unsynched on disk
         //
@@ -1055,6 +1083,7 @@ impl RawInner {
                 start,
                 group.map(Option::Some),
                 slot,
+                self.last_flush,
             )?;
             writes += 1;
         }
@@ -1079,11 +1108,17 @@ impl RawInner {
         self.layout.write_active_context_and_metadata(
             &self.file,
             &self.active_context,
-            false, // dirty
-            new_flush,
-            new_gen,
+            OnDiskMeta {
+                dirty: false,
+                flush_number: new_flush,
+                gen_number: new_gen,
+                ext_version: EXTENT_META_RAW,
+                bonus_sync_count: self.bonus_sync_count as u32,
+                defrag_count: self.defrag_count as u32,
+            },
         )?;
         self.dirty = false;
+        self.last_flush = new_flush;
         Ok(())
     }
 
@@ -1277,6 +1312,7 @@ impl RawInner {
             counter.min_block,
             dest_slots.iter().map(|v| v.as_ref()),
             !copy_from,
+            self.last_flush,
         );
 
         // If this write failed, then try recomputing every context slot
@@ -1298,6 +1334,7 @@ impl RawInner {
             // data** in both context slots, so it would still be a valid state
             // for the file.
         }
+        self.defrag_count += 1;
         r.map(|_| ())
     }
 }
@@ -1402,6 +1439,7 @@ impl RawLayout {
         block_start: u64,
         iter: I,
         slot: ContextSlot,
+        last_flush: u64,
     ) -> Result<(), CrucibleError>
     where
         I: Iterator<Item = Option<&'a DownstairsBlockContext>>,
@@ -1414,6 +1452,7 @@ impl RawLayout {
             let d = block_context.map(|b| OnDiskDownstairsBlockContext {
                 block_context: b.block_context,
                 on_disk_hash: b.on_disk_hash,
+                flush_id: last_flush as u16,
             });
             bincode::serialize_into(&mut buf[n..], &d).unwrap();
         }
@@ -1498,9 +1537,7 @@ impl RawLayout {
         &self,
         file: &File,
         active_context: &ActiveContextSlots,
-        dirty: bool,
-        flush_number: u64,
-        gen_number: u64,
+        d: OnDiskMeta,
     ) -> Result<(), CrucibleError> {
         assert_eq!(active_context.len(), self.block_count() as usize);
 
@@ -1514,12 +1551,6 @@ impl RawLayout {
             buf.push(v);
         }
 
-        let d = OnDiskMeta {
-            dirty,
-            flush_number,
-            gen_number,
-            ext_version: EXTENT_META_RAW,
-        };
         let mut meta = [0u8; BLOCK_META_SIZE_BYTES as usize];
         bincode::serialize_into(meta.as_mut_slice(), &d).unwrap();
         buf.extend(meta);
@@ -2557,6 +2588,7 @@ mod test {
                 }),
             },
             on_disk_hash: u64::MAX,
+            flush_id: u16::MAX,
         };
         let mut ctx_buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
         bincode::serialize_into(ctx_buf.as_mut_slice(), &Some(c)).unwrap();
