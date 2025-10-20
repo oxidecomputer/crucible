@@ -1038,7 +1038,6 @@ impl Region {
     }
 
     #[cfg(not(feature = "omicron-build"))]
-    #[allow(clippy::unused_async)]
     fn flush_extents(
         &mut self,
         dirty_extents: &BTreeSet<ExtentId>,
