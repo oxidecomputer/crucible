@@ -1,5 +1,6 @@
 // Copyright 2021 Oxide Computer Company
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use std::net::SocketAddr;
 
 use anyhow::{bail, Context, Result};
@@ -183,7 +184,7 @@ async fn crucible_api_get_bytes(
     let api_context = rqctx.context();
     let req = req.into_inner();
 
-    let mut cpf = api_context.cpf.lock().unwrap();
+    let mut cpf = api_context.cpf.lock().await;
 
     match cpf.seek(SeekFrom::Start(req.offset)) {
         Ok(_) => {},
@@ -214,7 +215,7 @@ async fn crucible_api_put_bytes(
     let api_context = rqctx.context();
     let req = req.into_inner();
 
-    let mut cpf = api_context.cpf.lock().unwrap();
+    let mut cpf = api_context.cpf.lock().await;
 
     match cpf.seek(SeekFrom::Start(req.offset)) {
         Ok(_) => {},
