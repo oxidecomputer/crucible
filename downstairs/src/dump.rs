@@ -11,24 +11,45 @@ struct ExtInfo {
     ei_hm: HashMap<u32, ExtentMeta>,
 }
 
-pub fn verify_region(region_dir: PathBuf, log: Logger) -> Result<()> {
+pub fn verify_region(
+    region_dir: PathBuf,
+    thread_count: Option<usize>,
+    log: Logger,
+) -> Result<()> {
     let region = Region::open(region_dir, false, true, &log)?;
-    let errors: Vec<_> = region
-        .extents
-        .par_iter()
-        .filter_map(|e| {
-            let extent = match e {
-                extent::ExtentState::Opened(extent) => extent,
-                extent::ExtentState::Closed => panic!("dump on closed extent!"),
-            };
 
-            if let Err(err) = extent.validate() {
-                Some((extent.number, err))
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Configure thread pool based on parameter
+    let pool = if let Some(count) = thread_count {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(count)
+            .build()
+            .expect("Failed to build thread pool")
+    } else {
+        rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to build thread pool")
+    };
+
+    let errors: Vec<_> = pool.install(|| {
+        region
+            .extents
+            .par_iter()
+            .filter_map(|e| {
+                let extent = match e {
+                    extent::ExtentState::Opened(extent) => extent,
+                    extent::ExtentState::Closed => {
+                        panic!("dump on closed extent!")
+                    }
+                };
+
+                if let Err(err) = extent.validate() {
+                    Some((extent.number, err))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    });
 
     if !errors.is_empty() {
         for (number, err) in &errors {

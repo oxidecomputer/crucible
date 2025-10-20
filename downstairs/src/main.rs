@@ -223,6 +223,11 @@ enum Args {
         /// Directory containing a region.
         #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
+
+        /// Number of threads to use for validation.
+        /// If not specified, uses available_parallelism (all CPU cores).
+        #[clap(short, long, action)]
+        threads: Option<usize>,
     },
     Version,
     /// Measure an isolated downstairs' disk usage
@@ -471,7 +476,7 @@ async fn main() -> Result<()> {
 
             run_dropshot(bind_addr, &log).await
         }
-        Args::Verify { data } => verify_region(data, log),
+        Args::Verify { data, threads } => verify_region(data, threads, log),
         Args::Version => {
             let info = crucible_common::BuildInfo::default();
             println!("Crucible Version: {}", info);
