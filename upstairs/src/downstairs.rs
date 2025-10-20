@@ -7,7 +7,13 @@ use std::{
 };
 
 use crate::{
-    cdt,
+    AckStatus, ActiveJobs, AllocRingBuffer, BlockRes, Buffer, ClientData,
+    ClientIOStateCount, ClientId, ClientMap, ConnectionMode, CrucibleError,
+    DownstairsIO, DownstairsMend, DsState, DsStateData, ExtentFix,
+    ExtentRepairIDs, IOState, IOStateCount, IOop, ImpactedBlocks, JobId,
+    Message, NegotiationState, RawReadResponse, RawWrite, ReconcileIO,
+    ReconciliationId, RegionDefinition, RegionMetadata, ReplaceResult,
+    SnapshotDetails, WorkSummary, cdt,
     client::{
         ClientAction, ClientFaultReason, ClientNegotiationFailed,
         ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
@@ -20,19 +26,12 @@ use crate::{
     notify::{NotifyQueue, NotifyRequest},
     stats::DownstairsStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
-    AckStatus, ActiveJobs, AllocRingBuffer, BlockRes, Buffer, ClientData,
-    ClientIOStateCount, ClientId, ClientMap, ConnectionMode, CrucibleError,
-    DownstairsIO, DownstairsMend, DsState, DsStateData, ExtentFix,
-    ExtentRepairIDs, IOState, IOStateCount, IOop, ImpactedBlocks, JobId,
-    Message, NegotiationState, RawReadResponse, RawWrite, ReconcileIO,
-    ReconciliationId, RegionDefinition, RegionMetadata, ReplaceResult,
-    SnapshotDetails, WorkSummary,
 };
 use crucible_common::{BlockIndex, ExtentId, NegotiationError};
 use crucible_protocol::WriteHeader;
 
 use ringbuffer::RingBuffer;
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{Logger, debug, error, info, o, warn};
 use uuid::Uuid;
 
 /// Downstairs data
@@ -935,10 +934,10 @@ impl Downstairs {
 
             for (i, m) in rec.iter().enumerate() {
                 max_flush = max_flush.max(m.flush + 1);
-                max_gen = max_gen.max(m.gen + 1);
+                max_gen = max_gen.max(m.generation + 1);
                 if i < MAX_LOG {
                     flush_log.push(m.flush);
-                    gen_log.push(m.gen);
+                    gen_log.push(m.generation);
                     dirty_log.push(m.dirty);
                 }
             }
@@ -1004,7 +1003,7 @@ impl Downstairs {
             };
             for m in data.iter() {
                 max_flush = max_flush.max(m.flush + 1);
-                max_gen = max_gen.max(m.gen + 1);
+                max_gen = max_gen.max(m.generation + 1);
             }
         }
         self.start_reconciliation(CollateData { max_gen, max_flush }, |data| {
@@ -4071,13 +4070,13 @@ pub(crate) mod test {
         NegotiationStateData, PendingJob,
     };
     use crate::{
-        downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
-        live_repair::ExtentInfo,
-        upstairs::UpstairsState,
         BlockOpWaiter, BlockRes, ClientId, CrucibleError, DsStateData,
         ExtentFix, ExtentRepairIDs, IOState, IOop, ImpactedBlocks, JobId,
         RawReadResponse, ReconcileIO, ReconcileIOState, ReconciliationId,
         RegionMetadata, SnapshotDetails,
+        downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
+        live_repair::ExtentInfo,
+        upstairs::UpstairsState,
     };
 
     use bytes::BytesMut;
@@ -6537,9 +6536,11 @@ pub(crate) mod test {
 
         // The last skipped flush should still be on the skipped list
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(0)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(0)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
@@ -6714,9 +6715,11 @@ pub(crate) mod test {
         // One downstairs should have a skipped job on its list.
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(1)]
-            .skipped_jobs
-            .contains(&JobId(1001)));
+        assert!(
+            ds.clients[ClientId::new(1)]
+                .skipped_jobs
+                .contains(&JobId(1001))
+        );
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
         // Enqueue the flush.
@@ -6752,9 +6755,11 @@ pub(crate) mod test {
         // Only the skipped flush should remain.
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(1)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(1)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
@@ -7234,9 +7239,11 @@ pub(crate) mod test {
 
         // Skipped jobs just has the flush
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(0)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(0)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
 
         // The writes, the read, and the flush should be completed.
         assert_eq!(ds.completed().len(), 3);
@@ -7328,13 +7335,17 @@ pub(crate) mod test {
 
         // Skipped jobs now just have the flush.
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(0)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(0)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(2)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(2)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
 
         // The writes, the read, and the flush should be completed.
         assert_eq!(ds.completed().len(), 3);
@@ -7580,18 +7591,24 @@ pub(crate) mod test {
                 flush_number: 3,
                 dirty: false,
             };
-            assert!(ds.clients[ClientId::new(0)]
-                .repair_info
-                .replace(ei)
-                .is_none());
-            assert!(ds.clients[ClientId::new(1)]
-                .repair_info
-                .replace(ei)
-                .is_none());
-            assert!(ds.clients[ClientId::new(2)]
-                .repair_info
-                .replace(ei)
-                .is_none());
+            assert!(
+                ds.clients[ClientId::new(0)]
+                    .repair_info
+                    .replace(ei)
+                    .is_none()
+            );
+            assert!(
+                ds.clients[ClientId::new(1)]
+                    .repair_info
+                    .replace(ei)
+                    .is_none()
+            );
+            assert!(
+                ds.clients[ClientId::new(2)]
+                    .repair_info
+                    .replace(ei)
+                    .is_none()
+            );
 
             let repair_extent = if source == ClientId::new(0) {
                 vec![ClientId::new(1), ClientId::new(2)]
@@ -7679,32 +7696,44 @@ pub(crate) mod test {
             // is the source.
             // First try one source, one repair
             let repair = if source == ClientId::new(0) {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(1)]
             } else {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(0)]
             };
 
@@ -7713,32 +7742,44 @@ pub(crate) mod test {
 
             // Next try the other downstairs to repair.
             let repair = if source == ClientId::new(2) {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(1)]
             } else {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(2)]
             };
 
@@ -7765,46 +7806,64 @@ pub(crate) mod test {
             // is the source.
             // One source, two repair
             let repair = if source == ClientId::new(0) {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(1), ClientId::new(2)]
             } else if source == ClientId::new(1) {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(0), ClientId::new(2)]
             } else {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(0), ClientId::new(1)]
             };
 

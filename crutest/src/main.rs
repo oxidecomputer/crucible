@@ -1,9 +1,9 @@
 // Copyright 2023 Oxide Computer Company
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use clap::Parser;
-use futures::stream::FuturesOrdered;
 use futures::StreamExt;
+use futures::stream::FuturesOrdered;
 use human_bytes::human_bytes;
 use indicatif::{ProgressBar, ProgressStyle};
 use oximeter::types::ProducerRegistry;
@@ -12,15 +12,15 @@ use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
-use slog::{info, o, warn, Logger};
+use slog::{Logger, info, o, warn};
 use std::fmt;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -36,7 +36,7 @@ use crucible::volume::{VolumeBuilder, VolumeInfo};
 use crucible::*;
 use crucible_client_types::RegionExtentInfo;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
-use dsc_client::{types::DownstairsState, Client};
+use dsc_client::{Client, types::DownstairsState};
 use repair_client::Client as repair_client;
 
 /*
@@ -175,7 +175,7 @@ pub struct Opt {
     flush_timeout: Option<f32>,
 
     #[clap(short, global = true, long, default_value_t = 0, action)]
-    gen: u64,
+    generation: u64,
 
     /// The key for an encrypted downstairs.
     #[clap(short, global = true, long, action)]
@@ -670,10 +670,8 @@ async fn load_write_log(
     /*
      * Only verify the volume if requested.
      */
-    if verify {
-        if let Err(e) = verify_volume(volume, di, false).await {
-            bail!("Initial volume verify failed: {:?}", e)
-        }
+    if verify && let Err(e) = verify_volume(volume, di, false).await {
+        bail!("Initial volume verify failed: {:?}", e)
     }
     Ok(())
 }
@@ -766,7 +764,7 @@ async fn make_a_volume(
         };
         info!(test_log, "Using VCR: {:?}", vcr);
 
-        if opt.gen != 0 {
+        if opt.generation != 0 {
             warn!(test_log, "gen option is ignored when VCR is provided");
         }
         if !opt.target.is_empty() {
@@ -845,7 +843,7 @@ async fn make_a_volume(
                 .add_subvolume_create_guest(
                     crucible_opts.clone(),
                     extent_info.clone(),
-                    opt.gen,
+                    opt.generation,
                     pr.clone(),
                 )
                 .await
@@ -903,7 +901,7 @@ async fn make_a_volume(
             .add_subvolume_create_guest(
                 crucible_opts.clone(),
                 extent_info,
-                opt.gen,
+                opt.generation,
                 pr,
             )
             .await
@@ -1015,13 +1013,13 @@ async fn main() -> Result<()> {
     }
 
     if opt.retry_activate {
-        while let Err(e) = volume.activate_with_gen(opt.gen).await {
+        while let Err(e) = volume.activate_with_gen(opt.generation).await {
             println!("Activate returns: {:#}  Retrying", e);
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         }
         println!("Activate successful");
     } else {
-        volume.activate_with_gen(opt.gen).await?;
+        volume.activate_with_gen(opt.generation).await?;
     }
 
     println!("Wait for a query_work_queue command to finish before sending IO");
@@ -1111,7 +1109,7 @@ async fn main() -> Result<()> {
              */
             let count = opt.count.unwrap_or(5);
             println!("Run deactivate test");
-            deactivate_workload(&volume, count, &mut disk_info, opt.gen)
+            deactivate_workload(&volume, count, &mut disk_info, opt.generation)
                 .await?;
         }
         Workload::Demo => {
@@ -1359,7 +1357,7 @@ async fn main() -> Result<()> {
                 &mut disk_info,
                 targets,
                 dsc_client,
-                opt.gen,
+                opt.generation,
                 test_log,
             )
             .await?;
@@ -1405,7 +1403,7 @@ async fn main() -> Result<()> {
                 &mut disk_info,
                 targets,
                 dsc_client,
-                opt.gen,
+                opt.generation,
                 test_log,
             )
             .await?;
@@ -1477,10 +1475,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    if opt.verify_at_end {
-        if let Err(e) = verify_volume(&volume, &mut disk_info, false).await {
-            bail!("Final volume verify failed: {:?}", e)
-        }
+    if opt.verify_at_end
+        && let Err(e) = verify_volume(&volume, &mut disk_info, false).await
+    {
+        bail!("Final volume verify failed: {:?}", e)
     }
 
     if let Some(vo) = &opt.verify_out {
@@ -2355,7 +2353,8 @@ async fn yolo_workload(
                                 // this is an error.
                                 if !range {
                                     eprintln!(
-                                        "Verify Error out of range at {block_index} len:{data_len}");
+                                        "Verify Error out of range at {block_index} len:{data_len}"
+                                    );
                                     verify_errors += 1;
                                 }
                             }
@@ -2494,7 +2493,7 @@ async fn replace_while_reconcile(
     di: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
-    mut gen: u64,
+    mut generation: u64,
     log: Logger,
 ) -> Result<()> {
     assert!(targets.len() % 3 == 1);
@@ -2555,10 +2554,10 @@ async fn replace_while_reconcile(
         info!(log, "[{c}] Request the upstairs activate");
         // Spawn a task to re-activate, this will not finish till all three
         // downstairs have reconciled.
-        gen += 1;
+        generation += 1;
         let gc = volume.clone();
         let handle =
-            tokio::spawn(async move { gc.activate_with_gen(gen).await });
+            tokio::spawn(async move { gc.activate_with_gen(generation).await });
 
         info!(log, "[{c}] wait {active_wait} for reconcile to start");
         tokio::time::sleep(tokio::time::Duration::from_secs(active_wait)).await;
@@ -2691,7 +2690,7 @@ async fn replace_before_active(
     di: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
-    mut gen: u64,
+    mut generation: u64,
     log: Logger,
 ) -> Result<()> {
     assert!(targets.len() % 3 == 1);
@@ -2734,10 +2733,10 @@ async fn replace_before_active(
         info!(log, "[{c}] Request the upstairs activate");
         // Spawn a task to re-activate, this will not finish till all three
         // downstairs respond.
-        gen += 1;
+        generation += 1;
         let gc = volume.clone();
         let handle =
-            tokio::spawn(async move { gc.activate_with_gen(gen).await });
+            tokio::spawn(async move { gc.activate_with_gen(generation).await });
 
         //  Give the activation request time to percolate in the upstairs.
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
@@ -2925,11 +2924,11 @@ async fn replace_workload(
                 break;
             }
             // See (if provided) we have reached a requested number of loops
-            if let Some(stop_at) = stop_at {
-                if c >= stop_at {
-                    println!("[{c}] Replace task ends as count was reached");
-                    break;
-                }
+            if let Some(stop_at) = stop_at
+                && c >= stop_at
+            {
+                println!("[{c}] Replace task ends as count was reached");
+                break;
             }
 
             // No stopping yet, let's do another loop.
@@ -3449,7 +3448,7 @@ async fn deactivate_workload(
     volume: &Volume,
     count: usize,
     di: &mut DiskInfo,
-    mut gen: u64,
+    mut generation: u64,
 ) -> Result<()> {
     let count_width = count.to_string().len();
     for c in 1..=count {
@@ -3490,8 +3489,8 @@ async fn deactivate_workload(
             width = count_width
         );
         let mut retry = 1;
-        gen += 1;
-        while let Err(e) = volume.activate_with_gen(gen).await {
+        generation += 1;
+        while let Err(e) = volume.activate_with_gen(generation).await {
             println!(
                 "{:>0width$}/{:>0width$}, Retry:{} activate {:?}",
                 c,

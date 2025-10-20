@@ -1,6 +1,6 @@
 // Copyright 2024 Oxide Computer Company
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use omicron_common::api::internal::nexus::ProducerKind;
 use oximeter_producer::{

@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use uuid::Uuid;
 
@@ -38,7 +38,7 @@ pub struct Opt {
     key: Option<String>,
 
     #[clap(short, long, default_value = "1", action)]
-    gen: u64,
+    generation: u64,
 
     /*
      * Number of upstairs to sequentially activate and handoff to
@@ -121,8 +121,9 @@ async fn main() -> Result<()> {
          */
         let (guest, io) = Guest::new(None);
 
-        let gen: u64 = i as u64 + opt.gen;
-        let _join_handle = up_main(crucible_opts.clone(), gen, None, io, None)?;
+        let generation: u64 = i as u64 + opt.generation;
+        let _join_handle =
+            up_main(crucible_opts.clone(), generation, None, io, None)?;
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);

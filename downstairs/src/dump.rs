@@ -1045,7 +1045,7 @@ pub fn extent_info(
     println!();
 
     // Calculate extent file layout details using RawLayout
-    use crate::extent_inner_raw::{RawLayout, BLOCK_CONTEXT_SLOT_SIZE_BYTES};
+    use crate::extent_inner_raw::{BLOCK_CONTEXT_SLOT_SIZE_BYTES, RawLayout};
     use crate::extent_inner_raw_common::BLOCK_META_SIZE_BYTES;
 
     let layout = RawLayout::new(def.extent_size());
@@ -1223,17 +1223,12 @@ pub fn extent_info(
         if start_byte == end_byte {
             println!(
                 "Active Context Bits:  0x{:08x} bits {}-{} (0 = Slot A, 1 = Slot B)",
-                active_context_start,
-                start_bit,
-                end_bit
+                active_context_start, start_bit, end_bit
             );
         } else {
             println!(
                 "Active Context Bits:  0x{:08x} bit {} - 0x{:08x} bit {} (0 = Slot A, 1 = Slot B)",
-                active_context_start,
-                start_bit,
-                active_context_end,
-                end_bit
+                active_context_start, start_bit, active_context_end, end_bit
             );
         }
 

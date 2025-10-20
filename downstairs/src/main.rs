@@ -3,17 +3,17 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use slog::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
-use crucible_common::{build_logger, ExtentId};
+use crucible_common::{ExtentId, build_logger};
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
-use crucible_protocol::{JobId, CRUCIBLE_MESSAGE_VERSION};
+use crucible_protocol::{CRUCIBLE_MESSAGE_VERSION, JobId};
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -1,15 +1,15 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt, format_job_list, integrity_hash, io_limits::ClientIOLimits,
-    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
     ClientIOStateCount, ClientId, ConnectionMode, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, DsStateData, EncryptionContext,
     IOState, IOop, JobId, Message, RawReadResponse, ReconcileIO,
-    ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
+    ReconcileIOState, RegionDefinitionStatus, RegionMetadata, cdt,
+    format_job_list, integrity_hash, io_limits::ClientIOLimits,
+    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
 };
-use crucible_common::{x509::TLSContext, NegotiationError, VerboseTimeout};
+use crucible_common::{NegotiationError, VerboseTimeout, x509::TLSContext};
 use crucible_protocol::{
-    MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
+    CRUCIBLE_MESSAGE_VERSION, MessageWriter, ReconciliationId,
 };
 use strum::IntoDiscriminant;
 
@@ -17,22 +17,22 @@ use std::{
     collections::BTreeSet,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{Logger, debug, error, info, o, warn};
 use tokio::{
     net::{TcpSocket, TcpStream},
     sync::{
         mpsc,
         oneshot::{self, error::RecvError},
     },
-    time::{sleep, sleep_until, Duration, Instant},
+    time::{Duration, Instant, sleep, sleep_until},
 };
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
@@ -253,7 +253,7 @@ impl DownstairsClient {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: self.cfg.upstairs_id,
             session_id: self.cfg.session_id,
-            gen: self.cfg.generation(),
+            generation: self.cfg.generation(),
             read_only: self.cfg.read_only,
             encrypted: self.cfg.encrypted(),
             alternate_versions: vec![],
@@ -1152,9 +1152,9 @@ impl DownstairsClient {
                         let ci = self.repair_info.replace(extent_info.unwrap());
                         if ci.is_some() {
                             panic!(
-                            "[{}] Unexpected repair found on insertion: {:?}",
-                            self.client_id, ci
-                        );
+                                "[{}] Unexpected repair found on insertion: {:?}",
+                                self.client_id, ci
+                            );
                         }
                     }
                     IOop::ExtentLiveRepair { .. }
@@ -1306,7 +1306,7 @@ impl DownstairsClient {
                 self.send(Message::PromoteToActive {
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
-                    gen: self.cfg.generation(),
+                    generation: self.cfg.generation(),
                 });
                 Ok(NegotiationResult::NotDone)
             }
@@ -1346,7 +1346,7 @@ impl DownstairsClient {
             Message::YouAreNowActive {
                 upstairs_id,
                 session_id,
-                gen,
+                generation,
             } => {
                 if !matches!(state, NegotiationStateData::WaitForPromote) {
                     error!(
@@ -1383,16 +1383,16 @@ impl DownstairsClient {
                     });
                 }
                 let upstairs_gen = self.cfg.generation();
-                if upstairs_gen != gen {
+                if upstairs_gen != generation {
                     error!(
                         self.log,
                         "generation mismatch in YouAreNowActive: {} != {}",
                         upstairs_gen,
-                        gen
+                        generation,
                     );
                     err = Some(NegotiationError::GenerationNumberTooLow {
                         requested: upstairs_gen,
-                        actual: gen,
+                        actual: generation,
                     });
                 }
                 if let Some(e) = err {
@@ -2586,10 +2586,10 @@ fn update_net_start_probes(m: &Message, cid: ClientId) {
         Message::ReadRequest { job_id, .. } => {
             cdt::ds__read__net__start!(|| (job_id.0, cid.get()));
         }
-        Message::Write { ref header, .. } => {
+        Message::Write { header, .. } => {
             cdt::ds__write__net__start!(|| (header.job_id.0, cid.get()));
         }
-        Message::WriteUnwritten { ref header, .. } => {
+        Message::WriteUnwritten { header, .. } => {
             cdt::ds__write__unwritten__net__start!(|| (
                 header.job_id.0,
                 cid.get()
@@ -2603,7 +2603,7 @@ fn update_net_start_probes(m: &Message, cid: ClientId) {
 }
 fn update_net_done_probes(m: &Message, cid: ClientId) {
     match m {
-        Message::ReadResponse { ref header, .. } => {
+        Message::ReadResponse { header, .. } => {
             cdt::ds__read__net__done!(|| (header.job_id.0, cid.get()));
         }
         Message::WriteAck { job_id, .. } => {

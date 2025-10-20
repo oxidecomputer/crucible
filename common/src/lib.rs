@@ -7,7 +7,7 @@ use std::path::Path;
 
 use ErrorKind::NotFound;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::Drain;
@@ -16,9 +16,9 @@ use tokio::time::Duration;
 
 mod region;
 pub use region::{
-    config_path, Block, BlockIndex, BlockOffset, ExtentId, RegionDefinition,
-    RegionOptions, DATABASE_READ_VERSION, DATABASE_WRITE_VERSION,
-    MAX_BLOCK_SIZE, MAX_SHIFT, MIN_BLOCK_SIZE, MIN_SHIFT,
+    Block, BlockIndex, BlockOffset, DATABASE_READ_VERSION,
+    DATABASE_WRITE_VERSION, ExtentId, MAX_BLOCK_SIZE, MAX_SHIFT,
+    MIN_BLOCK_SIZE, MIN_SHIFT, RegionDefinition, RegionOptions, config_path,
 };
 
 pub mod impacted_blocks;
@@ -225,9 +225,7 @@ pub enum NegotiationError {
     )]
     EncryptionMismatch { expected: bool, actual: bool },
 
-    #[error(
-        "Incompatible read-only settings: wanted {expected}, got {actual}"
-    )]
+    #[error("Incompatible read-only settings: wanted {expected}, got {actual}")]
     ReadOnlyMismatch { expected: bool, actual: bool },
 
     #[error("Incompatible upstairs ID: wanted {expected}, got {actual}")]
