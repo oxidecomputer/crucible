@@ -115,6 +115,7 @@ async fn main() -> Result<()> {
     let mut api = ApiDescription::new();
     api.register(crucible_api_get_bytes).unwrap();
     api.register(crucible_api_put_bytes).unwrap();
+    api.register(crucible_api_put_flush).unwrap();
 
     // The functions that implement our API endpoints will share this context.
     let api_context = CrucibleContext::new(cpf);
@@ -138,7 +139,7 @@ async fn main() -> Result<()> {
 
     // Wait for the server to stop.  Note that there's not any code to shut down
     // this server, so we should never get past this point.
-    server.await;
+    let _ = server.await;
     Ok(())
 }
 
@@ -170,7 +171,6 @@ struct WriteRequest {
 struct ReadResponse {
     bytes: String,
 }
-
 
 /// Read bytes
 #[endpoint {
@@ -224,9 +224,28 @@ async fn crucible_api_put_bytes(
         ))
     };
     match cpf.write(&mut req.bytes.as_bytes()) {
-        Ok(bytes_written) => Ok(HttpResponseUpdatedNoContent()),
+        Ok(_bytes_written) => Ok(HttpResponseUpdatedNoContent()),
         Err(e) => return Err(HttpError::for_internal_error(
             format!("write failed: {e}")
+        ))
+    }
+}
+/// flush
+#[endpoint {
+    method = PUT,
+    path = "/flush",
+}]
+async fn crucible_api_put_flush(
+    rqctx: RequestContext<CrucibleContext>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let api_context = rqctx.context();
+
+    let mut cpf = api_context.cpf.lock().await;
+
+    match cpf.flush() {
+        Ok(_) => Ok(HttpResponseUpdatedNoContent()),
+        Err(e) => return Err(HttpError::for_internal_error(
+            format!("flush failed: {e}")
         ))
     }
 }
