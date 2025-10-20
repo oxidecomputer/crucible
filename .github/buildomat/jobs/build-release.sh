@@ -79,7 +79,7 @@ ptime -m cargo test --verbose --features=omicron-build -- --nocapture > /tmp/car
 
 banner output
 mkdir -p /work/rbins
-for t in crucible-downstairs crucible-hammer crutest dsc crudd; do
+for t in crucible-downstairs crucible-hammer crutest dsc crudd crucible-rest-server; do
 	gzip < "target/release/$t" > "/work/rbins/$t.gz"
 done
 
