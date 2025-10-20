@@ -58,8 +58,13 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
         })?;
     print!("bs:{block_size} bytes  bc:{block_count:>6}");
     println!(
-        "  dirty:{:>5} gen:{} flush_number:{:>6} ext_ver:{}",
-        meta.dirty, meta.gen_number, meta.flush_number, meta.ext_version
+        "  dirty:{:>5} gen:{} flush_number:{:>6} ext_ver:{} bonus_sync:{} defrag:{}",
+        meta.dirty,
+        meta.gen_number,
+        meta.flush_number,
+        meta.ext_version,
+        meta.bonus_sync_count,
+        meta.defrag_count,
     );
 
     let slot_selected = if !meta.dirty {
@@ -100,17 +105,24 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
                 failed = true;
                 print!("Error at block {:>6}:", i);
                 print!(
-                    "  slot {} [selected]: {r:?}",
-                    if s { "A" } else { "B" }
+                    "  slot {} [selected]: {r:?}{}",
+                    if s { "A" } else { "B" },
+                    if let Some(ctx) = ctx {
+                        format!(", flush id: {}", ctx.flush_id)
+                    } else {
+                        "".to_owned()
+                    }
                 );
+                let other_ctx = if s { ctx_b[i] } else { ctx_a[i] };
                 print!(
-                    " | slot {} [deselected]: {:?}",
+                    " | slot {} [deselected]: {:?}{}",
                     if s { "B" } else { "A" },
-                    check_block(
-                        chunk,
-                        hash,
-                        if s { ctx_b[i] } else { ctx_a[i] }
-                    )
+                    check_block(chunk, hash, other_ctx),
+                    if let Some(ctx) = other_ctx {
+                        format!(", flush id: {}", ctx.flush_id)
+                    } else {
+                        "".to_owned()
+                    }
                 );
                 if chunk.iter().all(|b| *b == 0u8) {
                     print!("  Block is all zeros");
@@ -123,8 +135,22 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
             // Otherwise, check both context slots to see if either is valid
             failed = true;
             print!("Error at block {i}:");
-            print!("  slot A: {ea:?}");
-            print!(" | slot B: {eb:?}");
+            print!(
+                "  slot A: {ea:?}{}",
+                if let Some(ctx) = ctx_a[i] {
+                    format!(", flush id: {}", ctx.flush_id)
+                } else {
+                    "".to_owned()
+                }
+            );
+            print!(
+                " | slot B: {eb:?}{}",
+                if let Some(ctx) = ctx_b[i] {
+                    format!(", flush id: {}", ctx.flush_id)
+                } else {
+                    "".to_owned()
+                }
+            );
             if chunk.iter().all(|b| *b == 0u8) {
                 print!("  Block is all zeros");
             }
@@ -192,6 +218,7 @@ fn get_block_count(data_len: usize, block_size: usize) -> Option<usize> {
 struct OnDiskDownstairsBlockContext {
     block_context: BlockContext,
     on_disk_hash: u64,
+    flush_id: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +227,8 @@ struct OnDiskMeta {
     pub gen_number: u64,
     pub flush_number: u64,
     pub ext_version: u32,
+    pub bonus_sync_count: u32,
+    pub defrag_count: u32,
 }
 
 const BLOCK_CONTEXT_SLOT_SIZE_BYTES: usize = 48;
