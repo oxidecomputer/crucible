@@ -106,7 +106,7 @@ $BINDIR/dsc start \
 # This gives dsc time to fail, as it is known to happen.  If we don't check,
 # then the later test will just hang forever waiting for downstairs that
 # will never show up.
-sleep 5
+sleep 60 # bonus time for region checking
 dsc_pid=$(pgrep dsc);
 
 if [[ "$dsc_pid" -eq 0 ]]; then
