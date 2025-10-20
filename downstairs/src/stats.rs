@@ -5,8 +5,8 @@ use super::*;
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use omicron_common::api::internal::nexus::ProducerKind;
 use oximeter::{
-    types::{Cumulative, Sample},
     Metric, MetricsError, Producer, Target,
+    types::{Cumulative, Sample},
 };
 use oximeter_producer::{
     Config, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,

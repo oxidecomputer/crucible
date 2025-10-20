@@ -293,7 +293,7 @@ extern "C" {
     ) -> c_int;
 
     pub fn scf_pg_create(handle: *mut scf_handle_t)
-        -> *mut scf_propertygroup_t;
+    -> *mut scf_propertygroup_t;
     pub fn scf_pg_destroy(pg: *mut scf_propertygroup_t);
 
     pub fn scf_pg_get_name(
@@ -420,7 +420,7 @@ extern "C" {
     ) -> c_int;
 
     pub fn smf_disable_instance(instance: *const c_char, flags: c_int)
-        -> c_int;
+    -> c_int;
     pub fn smf_enable_instance(instance: *const c_char, flags: c_int) -> c_int;
     pub fn smf_refresh_instance(instance: *const c_char) -> c_int;
 

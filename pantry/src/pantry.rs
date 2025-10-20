@@ -6,16 +6,16 @@ use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use anyhow::Result;
+use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
 use dropshot::HttpError;
 use sha2::Digest;
 use sha2::Sha256;
+use slog::Logger;
 use slog::error;
 use slog::info;
 use slog::o;
-use slog::Logger;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -25,8 +25,8 @@ use crucible::ReplaceResult;
 use crucible::SnapshotDetails;
 use crucible::Volume;
 use crucible::VolumeConstructionRequest;
-use crucible_common::crucible_bail;
 use crucible_common::CrucibleError;
+use crucible_common::crucible_bail;
 use crucible_pantry_types::{ExpectedDigest, PantryStatus, VolumeStatus};
 
 pub enum ActiveObservation {

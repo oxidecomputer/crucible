@@ -1,8 +1,8 @@
 // Copyright 2023 Oxide Computer Company
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use crucible_agent_types::snapshot::Snapshot;
-use slog::{error, info, Logger};
+use slog::{Logger, error, info};
 #[cfg(test)]
 use std::collections::HashSet;
 use std::process::Command;
@@ -113,9 +113,8 @@ impl SnapshotInterface for ZfsSnapshotInterface {
                 let cmd_stdout = String::from_utf8_lossy(&cmd.stdout);
 
                 // Remove newline
-                let cmd_stdout = cmd_stdout.trim_end().to_string();
 
-                cmd_stdout
+                cmd_stdout.trim_end().to_string()
             };
 
             if !cmd.status.success() {

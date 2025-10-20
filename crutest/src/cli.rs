@@ -901,12 +901,9 @@ async fn process_cli_command(
                      * seems like once we go active we won't need to run
                      * it again.
                      */
-                    if !*wc_filled {
-                        if let Some(vi) = verify_input {
-                            load_write_log(volume, &mut new_di, vi, false)
-                                .await?;
-                            *wc_filled = true;
-                        }
+                    if !*wc_filled && let Some(vi) = verify_input {
+                        load_write_log(volume, &mut new_di, vi, false).await?;
+                        *wc_filled = true;
                     }
                     *di_option = Some(new_di.clone());
                     fw.send(CliMessage::Info(new_di.volume_info)).await

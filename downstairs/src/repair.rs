@@ -11,7 +11,7 @@ use dropshot::{
 use hyper::{Response, StatusCode};
 
 use super::*;
-use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
+use crate::extent::{ExtentType, extent_dir, extent_file_name, extent_path};
 
 /**
  * Our context is the root of the region we want to serve.

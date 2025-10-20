@@ -97,8 +97,8 @@ pub enum ScfError {
 
 impl From<u32> for ScfError {
     fn from(error: u32) -> Self {
-        use scf_error_t::*;
         use ScfError::*;
+        use scf_error_t::*;
 
         match scf_error_t::from_u32(error) {
             Some(SCF_ERROR_NONE) => None,

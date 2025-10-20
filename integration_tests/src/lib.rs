@@ -351,14 +351,14 @@ mod integration_tests {
 
     impl<T: TestDownstairsDataset> Drop for TestDownstairs<T> {
         fn drop(&mut self) {
-            if self.dataset.stop_downstairs_during_drop() {
-                if let Some(downstairs) = self.downstairs.take() {
-                    tokio::task::block_in_place(move || {
-                        tokio::runtime::Handle::current()
-                            .block_on(async move { downstairs.stop().await })
-                            .unwrap();
-                    });
-                }
+            if self.dataset.stop_downstairs_during_drop()
+                && let Some(downstairs) = self.downstairs.take()
+            {
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current()
+                        .block_on(async move { downstairs.stop().await })
+                        .unwrap();
+                });
             }
         }
     }

@@ -670,10 +670,8 @@ async fn load_write_log(
     /*
      * Only verify the volume if requested.
      */
-    if verify {
-        if let Err(e) = verify_volume(volume, di, false).await {
-            bail!("Initial volume verify failed: {:?}", e)
-        }
+    if verify && let Err(e) = verify_volume(volume, di, false).await {
+        bail!("Initial volume verify failed: {:?}", e)
     }
     Ok(())
 }
@@ -1477,10 +1475,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    if opt.verify_at_end {
-        if let Err(e) = verify_volume(&volume, &mut disk_info, false).await {
-            bail!("Final volume verify failed: {:?}", e)
-        }
+    if opt.verify_at_end
+        && let Err(e) = verify_volume(&volume, &mut disk_info, false).await
+    {
+        bail!("Final volume verify failed: {:?}", e)
     }
 
     if let Some(vo) = &opt.verify_out {
@@ -2926,11 +2924,11 @@ async fn replace_workload(
                 break;
             }
             // See (if provided) we have reached a requested number of loops
-            if let Some(stop_at) = stop_at {
-                if c >= stop_at {
-                    println!("[{c}] Replace task ends as count was reached");
-                    break;
-                }
+            if let Some(stop_at) = stop_at
+                && c >= stop_at
+            {
+                println!("[{c}] Replace task ends as count was reached");
+                break;
             }
 
             // No stopping yet, let's do another loop.

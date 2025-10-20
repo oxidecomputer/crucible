@@ -1,5 +1,4 @@
 // Copyright 2022 Oxide Computer Company
-use dropshot::endpoint;
 use dropshot::ApiDescription;
 use dropshot::ConfigDropshot;
 use dropshot::ConfigLogging;
@@ -9,6 +8,7 @@ use dropshot::HttpError;
 use dropshot::HttpServerStarter;
 use dropshot::Path;
 use dropshot::RequestContext;
+use dropshot::endpoint;
 use dropshot::{HttpResponseOk, HttpResponseUpdatedNoContent};
 use schemars::JsonSchema;
 use serde::Deserialize;
