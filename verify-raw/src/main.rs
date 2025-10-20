@@ -95,15 +95,16 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
             // dirty), then it must be correct.
             let s = slot_selected[i];
             let ctx = if s { ctx_a[i] } else { ctx_b[i] };
-            if let Err(e) = check_block(chunk, hash, ctx) {
+            let r = check_block(chunk, hash, ctx);
+            if r.is_err() {
                 failed = true;
                 print!("Error at block {:>6}:", i);
                 print!(
-                    "  slot {} (selected): {e:?}",
+                    "  slot {} [selected]: {r:?}",
                     if s { "A" } else { "B" }
                 );
                 print!(
-                    "  slot {} (deselected): {:?}",
+                    " | slot {} [deselected]: {:?}",
                     if s { "B" } else { "A" },
                     check_block(
                         chunk,
@@ -114,7 +115,7 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
                 if chunk.iter().all(|b| *b == 0u8) {
                     print!("  Block is all zeros");
                 }
-                println!("");
+                println!();
             }
         } else if let Err(ea) = check_block(chunk, hash, ctx_a[i])
             && let Err(eb) = check_block(chunk, hash, ctx_b[i])
@@ -123,11 +124,11 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
             failed = true;
             print!("Error at block {i}:");
             print!("  slot A: {ea:?}");
-            print!("  slot B: {eb:?}");
+            print!(" | slot B: {eb:?}");
             if chunk.iter().all(|b| *b == 0u8) {
                 print!("  Block is all zeros");
             }
-            println!("");
+            println!();
         }
     }
 
@@ -141,18 +142,24 @@ fn check_block(
     block: &[u8],
     hash: u64,
     ctx: Option<OnDiskDownstairsBlockContext>,
-) -> Result<(), Failure> {
+) -> Result<Success, Failure> {
     if let Some(ctx) = ctx {
         if ctx.on_disk_hash == hash {
-            Ok(())
+            Ok(Success::HashMatch)
         } else {
             Err(Failure::SlotHashMismatch)
         }
     } else if block.iter().all(|v| *v == 0u8) {
-        Ok(())
+        Ok(Success::BlockEmpty)
     } else {
         Err(Failure::EmptySlotWithNonzeroData)
     }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum Success {
+    HashMatch,
+    BlockEmpty,
 }
 
 #[derive(Copy, Clone, Debug)]

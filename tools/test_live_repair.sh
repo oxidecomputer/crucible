@@ -126,6 +126,7 @@ if ! ps -p $dsc_pid > /dev/null; then
     echo "$dsc failed to start"
     exit 1
 fi
+sleep 60 # wait for volumes to start up
 
 gen=1
 # Seed the initial volume
