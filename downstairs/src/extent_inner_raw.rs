@@ -939,10 +939,8 @@ impl RawInner {
     }
 
     fn set_dirty(&mut self) -> Result<(), CrucibleError> {
-        if !self.dirty {
-            self.layout.set_dirty(&self.file)?;
-            self.dirty = true;
-        }
+        self.layout.set_dirty(&self.file)?;
+        self.dirty = true;
         Ok(())
     }
 
