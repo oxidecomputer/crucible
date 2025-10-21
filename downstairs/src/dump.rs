@@ -989,12 +989,38 @@ mod test {
  */
 pub fn extent_info(
     region_dir: PathBuf,
-    block: Option<u64>,
+    block: Option<String>,
     _log: Logger,
 ) -> Result<()> {
     use crucible_common::config_path;
     use std::fs::File;
     use std::io::BufReader;
+
+    // Parse block range if provided
+    let block_range = if let Some(ref block_str) = block {
+        let parts: Vec<&str> = block_str.split('-').collect();
+        match parts.len() {
+            1 => {
+                let block_num = block_str.parse::<u64>()?;
+                Some((block_num, block_num))
+            }
+            2 => {
+                let start = parts[0].parse::<u64>()?;
+                let end = parts[1].parse::<u64>()?;
+                if start > end {
+                    bail!(
+                        "Invalid block range: start ({}) > end ({})",
+                        start,
+                        end
+                    );
+                }
+                Some((start, end))
+            }
+            _ => bail!("Invalid block range format. Use 'N' or 'N-M'"),
+        }
+    } else {
+        None
+    };
 
     // Read region.json file directly
     let config_file = config_path(&region_dir);
@@ -1170,61 +1196,100 @@ pub fn extent_info(
     println!("  Total: {} bytes", metadata_size);
     println!();
 
-    // If a specific block was requested, show its offsets
-    if let Some(block_num) = block {
-        if block_num >= extent_size_blocks {
+    // If a block range was requested, show offsets for that range
+    if let Some((start_block, end_block)) = block_range {
+        if start_block >= extent_size_blocks {
             bail!(
-                "Block {} is out of range (extent has {} blocks)",
-                block_num,
+                "Start block {} is out of range (extent has {} blocks)",
+                start_block,
+                extent_size_blocks
+            );
+        }
+        if end_block >= extent_size_blocks {
+            bail!(
+                "End block {} is out of range (extent has {} blocks)",
+                end_block,
                 extent_size_blocks
             );
         }
 
-        println!("=== Block {} Offsets ===", block_num);
+        let block_count = end_block - start_block + 1;
+        let range_str = if start_block == end_block {
+            format!("Block {}", start_block)
+        } else {
+            format!("Blocks {}-{}", start_block, end_block)
+        };
+
+        println!("=== {} File Offsets ===", range_str);
         println!();
 
-        // Block data offset
-        let block_data_offset = block_num * block_size;
+        // Block data range
+        let block_data_start = start_block * block_size;
+        let block_data_end = (end_block + 1) * block_size - 1;
+        let block_data_range_size = (end_block - start_block + 1) * block_size;
         println!(
-            "Block Data:           0x{:08x} - 0x{:08x} ({} bytes)",
-            block_data_offset,
-            block_data_offset + block_size - 1,
-            block_size
+            "Block Data:           0x{:08x} - 0x{:08x} ({} bytes, {} blocks)",
+            block_data_start,
+            block_data_end,
+            block_data_range_size,
+            block_count
         );
 
-        // Context slot A offset
+        // Context slot A range
         let context_a_base = block_data_size;
-        let context_a_offset =
-            context_a_base + (block_num * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
+        let context_a_start =
+            context_a_base + (start_block * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
+        let context_a_end = context_a_base
+            + ((end_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES)
+            - 1;
+        let context_a_range_size =
+            (end_block - start_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
         println!(
-            "Context Slot A:       0x{:08x} - 0x{:08x} ({} bytes)",
-            context_a_offset,
-            context_a_offset + BLOCK_CONTEXT_SLOT_SIZE_BYTES - 1,
-            BLOCK_CONTEXT_SLOT_SIZE_BYTES
+            "Context Slot A:       0x{:08x} - 0x{:08x} ({} bytes, {} slots)",
+            context_a_start, context_a_end, context_a_range_size, block_count
         );
 
-        // Context slot B offset
+        // Context slot B range
         let context_b_base = context_a_base
             + (extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
-        let context_b_offset =
-            context_b_base + (block_num * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
+        let context_b_start =
+            context_b_base + (start_block * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
+        let context_b_end = context_b_base
+            + ((end_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES)
+            - 1;
+        let context_b_range_size =
+            (end_block - start_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
         println!(
-            "Context Slot B:       0x{:08x} - 0x{:08x} ({} bytes)",
-            context_b_offset,
-            context_b_offset + BLOCK_CONTEXT_SLOT_SIZE_BYTES - 1,
-            BLOCK_CONTEXT_SLOT_SIZE_BYTES
+            "Context Slot B:       0x{:08x} - 0x{:08x} ({} bytes, {} slots)",
+            context_b_start, context_b_end, context_b_range_size, block_count
         );
 
-        // Active context bit
+        // Active context bits range
         let active_context_base = context_b_base
             + (extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
-        let byte_index = block_num / 8;
-        let bit_index = block_num % 8;
-        let active_context_byte_offset = active_context_base + byte_index;
-        println!(
-            "Active Context Bit:   0x{:08x} bit {} (0 = Slot A, 1 = Slot B)",
-            active_context_byte_offset, bit_index
-        );
+        let start_byte = start_block / 8;
+        let end_byte = end_block / 8;
+        let start_bit = start_block % 8;
+        let end_bit = end_block % 8;
+        let active_context_start = active_context_base + start_byte;
+        let active_context_end = active_context_base + end_byte;
+
+        if start_byte == end_byte {
+            println!(
+                "Active Context Bits:  0x{:08x} bits {}-{} (0 = Slot A, 1 = Slot B)",
+                active_context_start,
+                start_bit,
+                end_bit
+            );
+        } else {
+            println!(
+                "Active Context Bits:  0x{:08x} bit {} - 0x{:08x} bit {} (0 = Slot A, 1 = Slot B)",
+                active_context_start,
+                start_bit,
+                active_context_end,
+                end_bit
+            );
+        }
 
         // Metadata is shared across all blocks
         let metadata_offset = active_context_base + active_context_size;
@@ -1238,7 +1303,7 @@ pub fn extent_info(
 
         println!("Notes:");
         println!("  - Each block has two context slots (A and B) for crash consistency");
-        println!("  - The Active Context Bit indicates which slot is currently valid");
+        println!("  - The Active Context Bits indicate which slot is currently valid for each block");
         println!(
             "  - Context slots contain encryption context and integrity hash"
         );

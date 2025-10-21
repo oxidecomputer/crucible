@@ -230,9 +230,9 @@ enum Args {
         #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
 
-        /// Show offsets for a specific block number
-        #[clap(short, long, value_name = "BLOCK_NUM", action)]
-        block: Option<u64>,
+        /// Show offsets for a specific block or block range (e.g., "50" or "17064-17071")
+        #[clap(short, long, value_name = "BLOCK_RANGE", action)]
+        block: Option<String>,
     },
     Version,
     /// Measure an isolated downstairs' disk usage
