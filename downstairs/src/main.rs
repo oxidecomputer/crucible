@@ -229,6 +229,10 @@ enum Args {
         /// Directory containing a region.
         #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
+
+        /// Show offsets for a specific block number
+        #[clap(short, long, value_name = "BLOCK_NUM", action)]
+        block: Option<u64>,
     },
     Version,
     /// Measure an isolated downstairs' disk usage
@@ -478,7 +482,7 @@ async fn main() -> Result<()> {
             run_dropshot(bind_addr, &log).await
         }
         Args::Verify { data } => verify_region(data, log),
-        Args::ExtentInfo { data } => extent_info(data, log),
+        Args::ExtentInfo { data, block } => extent_info(data, block, log),
         Args::Version => {
             let info = crucible_common::BuildInfo::default();
             println!("Crucible Version: {}", info);
