@@ -982,3 +982,189 @@ mod test {
         assert_eq!(colors, vec![32, 31, 31]);
     }
 }
+
+/*
+ * Display extent file layout information
+ * Reads only the region.json file and calculates the layout
+ */
+pub fn extent_info(region_dir: PathBuf, _log: Logger) -> Result<()> {
+    use crucible_common::config_path;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    // Read region.json file directly
+    let config_file = config_path(&region_dir);
+    let file = File::open(&config_file)?;
+    let reader = BufReader::new(file);
+    let def: crucible_common::RegionDefinition =
+        serde_json::from_reader(reader)?;
+
+    // Print general region information
+    println!("=== Region Information ===");
+    println!();
+    println!("Region directory:    {}", region_dir.display());
+    println!("UUID:                {}", def.uuid());
+    println!("Encrypted:           {}", def.get_encrypted());
+    println!("Block size:          {} bytes", def.block_size());
+    println!("Extent size:         {} blocks", def.extent_size().value);
+    println!("Extent count:        {}", def.extent_count());
+    println!(
+        "Total size:          {} bytes ({:.2} MiB)",
+        def.total_size(),
+        def.total_size() as f64 / (1024.0 * 1024.0)
+    );
+    println!("DB read version:     {}", def.database_read_version());
+    println!("DB write version:    {}", def.database_write_version());
+    println!();
+
+    // Calculate extent file layout details
+    let block_size = def.block_size();
+    let extent_size_blocks = def.extent_size().value;
+
+    // Block data size
+    let block_data_size = block_size * extent_size_blocks;
+
+    // Context slots size (2 arrays, each with one slot per block)
+    const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
+    let context_slots_size =
+        extent_size_blocks * 2 * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
+
+    // Active context array size (bitpacked, 1 bit per block, rounded up to bytes)
+    let active_context_size = extent_size_blocks.div_ceil(8);
+
+    // Metadata size
+    const BLOCK_META_SIZE_BYTES: u64 = 32;
+    let metadata_size = BLOCK_META_SIZE_BYTES;
+
+    // Total file size
+    let total_file_size = block_data_size
+        + context_slots_size
+        + active_context_size
+        + metadata_size;
+
+    println!("=== Extent File Layout ===");
+    println!();
+    println!(
+        "Each extent file contains {} blocks of {} bytes each",
+        extent_size_blocks, block_size
+    );
+    println!(
+        "Total extent file size: {} bytes ({:.2} MiB)",
+        total_file_size,
+        total_file_size as f64 / (1024.0 * 1024.0)
+    );
+    println!();
+
+    // Print detailed breakdown table
+    println!("Offset Breakdown:");
+    println!("{:-<80}", "");
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Section", "Start Offset", "Size (bytes)", "End Offset"
+    );
+    println!("{:-<80}", "");
+
+    let mut current_offset = 0u64;
+
+    // Block data
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Block Data",
+        format!("0x{:08x}", current_offset),
+        block_data_size,
+        format!("0x{:08x}", current_offset + block_data_size - 1)
+    );
+    current_offset += block_data_size;
+
+    // Context slot A
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Context Slot A",
+        format!("0x{:08x}", current_offset),
+        extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES,
+        format!(
+            "0x{:08x}",
+            current_offset + extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES
+                - 1
+        )
+    );
+    current_offset += extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
+
+    // Context slot B
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Context Slot B",
+        format!("0x{:08x}", current_offset),
+        extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES,
+        format!(
+            "0x{:08x}",
+            current_offset + extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES
+                - 1
+        )
+    );
+    current_offset += extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
+
+    // Active context slots (bitpacked)
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Active Context Array",
+        format!("0x{:08x}", current_offset),
+        active_context_size,
+        format!("0x{:08x}", current_offset + active_context_size - 1)
+    );
+    current_offset += active_context_size;
+
+    // Metadata
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Metadata",
+        format!("0x{:08x}", current_offset),
+        metadata_size,
+        format!("0x{:08x}", current_offset + metadata_size - 1)
+    );
+
+    println!("{:-<80}", "");
+    println!("{:<30} {:>15} {:>15}", "Total", "", total_file_size);
+    println!("{:-<80}", "");
+    println!();
+
+    // Explain each section
+    println!("=== Section Details ===");
+    println!();
+    println!("Block Data:");
+    println!("  Contains the actual data blocks stored in this extent.");
+    println!(
+        "  {} blocks × {} bytes/block = {} bytes",
+        extent_size_blocks, block_size, block_data_size
+    );
+    println!();
+
+    println!("Context Slots A & B:");
+    println!("  Two arrays used in a ping-pong fashion for crash consistency.");
+    println!("  Each slot stores encryption context and integrity hash for one block.");
+    println!(
+        "  {} blocks × {} bytes/slot × 2 arrays = {} bytes",
+        extent_size_blocks, BLOCK_CONTEXT_SLOT_SIZE_BYTES, context_slots_size
+    );
+    println!();
+
+    println!("Active Context Array:");
+    println!("  Bitpacked array (1 bit per block) indicating which context slot (A or B)");
+    println!("  is currently active for each block. Only valid when dirty bit is clear.");
+    println!(
+        "  {} blocks ÷ 8 bits/byte = {} bytes (rounded up)",
+        extent_size_blocks, active_context_size
+    );
+    println!();
+
+    println!("Metadata:");
+    println!("  Contains:");
+    println!("    - dirty flag (1 byte)");
+    println!("    - generation number (8 bytes)");
+    println!("    - flush number (8 bytes)");
+    println!("    - extent version tag (4 bytes)");
+    println!("  Total: {} bytes", metadata_size);
+    println!();
+
+    Ok(())
+}
