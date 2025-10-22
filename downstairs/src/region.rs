@@ -400,6 +400,39 @@ impl Region {
             assert_eq!(self.get_opened_extent(eid).number, eid);
         }
         assert_eq!(self.def.extent_count() as usize, self.extents.len());
+        use rayon::prelude::*;
+
+        // Use a thread pool with a maximum of 8 threads for validation
+        // during startup to avoid overwhelming the system
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .expect("Failed to build thread pool");
+
+        let errors: Vec<_> = pool.install(|| {
+            self.extents
+                .par_iter()
+                .filter_map(|e| {
+                    let ExtentState::Opened(extent) = e else {
+                        unreachable!("got closed extent");
+                    };
+                    if let Err(err) = extent.validate() {
+                        Some((extent.number, err))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        });
+        if !errors.is_empty() {
+            for (number, err) in &errors {
+                warn!(
+                    self.log,
+                    "validation falied for extent {number}: {err:?}"
+                );
+            }
+            panic!("validation failed");
+        }
     }
 
     /// Walk the list of extents and close each one.
@@ -680,6 +713,28 @@ impl Region {
                 RepairRequestError,
                 "Extent {eid} on remote repair server is in incorrect state",
             );
+        }
+
+        // Validate the extent that we just received, before copying it over
+        {
+            let new_extent = match Extent::open(
+                &copy_dir,
+                &self.def(),
+                eid,
+                true, // read-only
+                &self.log.clone(),
+            ) {
+                Ok(e) => e,
+                Err(e) => {
+                    panic!(
+                        "Failed to open live-repair extent {eid} in \
+                         {copy_dir:?}: {e:?}"
+                    );
+                }
+            };
+            if let Err(e) = new_extent.validate() {
+                panic!("Failed to validate live-repair extent {eid}: {e:?}");
+            }
         }
 
         // After we have all files: move the repair dir.
