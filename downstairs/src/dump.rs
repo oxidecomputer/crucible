@@ -983,10 +983,8 @@ mod test {
     }
 }
 
-/*
- * Display extent file layout information
- * Reads only the region.json file and calculates the layout
- */
+// Display extent file layout information
+// Reads only the region.json file and calculates the layout
 pub fn extent_info(
     region_dir: PathBuf,
     block: Option<String>,
