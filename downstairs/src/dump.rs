@@ -1031,7 +1031,6 @@ pub fn extent_info(
 
     // Print general region information
     println!("=== Region Information ===");
-    println!();
     println!("Region directory:    {}", region_dir.display());
     println!("UUID:                {}", def.uuid());
     println!("Encrypted:           {}", def.get_encrypted());
@@ -1073,7 +1072,6 @@ pub fn extent_info(
         + metadata_size;
 
     println!("=== Extent File Layout ===");
-    println!();
     println!(
         "Each extent file contains {} blocks of {} bytes each",
         extent_size_blocks, block_size
@@ -1087,7 +1085,6 @@ pub fn extent_info(
 
     // Print detailed breakdown table
     println!("Offset Breakdown:");
-    println!("{:-<80}", "");
     println!(
         "{:<30} {:>15} {:>15} {:>15}",
         "Section", "Start Offset", "Size (bytes)", "End Offset"
@@ -1155,46 +1152,6 @@ pub fn extent_info(
 
     println!("{:-<80}", "");
     println!("{:<30} {:>15} {:>15}", "Total", "", total_file_size);
-    println!("{:-<80}", "");
-    println!();
-
-    // Explain each section
-    println!("=== Section Details ===");
-    println!();
-    println!("Block Data:");
-    println!("  Contains the actual data blocks stored in this extent.");
-    println!(
-        "  {} blocks × {} bytes/block = {} bytes",
-        extent_size_blocks, block_size, block_data_size
-    );
-    println!();
-
-    println!("Context Slots A & B:");
-    println!("  Two arrays used in a ping-pong fashion for crash consistency.");
-    println!("  Each slot stores encryption context and integrity hash for one block.");
-    println!(
-        "  {} blocks × {} bytes/slot × 2 arrays = {} bytes",
-        extent_size_blocks, BLOCK_CONTEXT_SLOT_SIZE_BYTES, context_slots_size
-    );
-    println!();
-
-    println!("Active Context Array:");
-    println!("  Bitpacked array (1 bit per block) indicating which context slot (A or B)");
-    println!("  is currently active for each block. Only valid when dirty bit is clear.");
-    println!(
-        "  {} blocks ÷ 8 bits/byte = {} bytes (rounded up)",
-        extent_size_blocks, active_context_size
-    );
-    println!();
-
-    println!("Metadata:");
-    println!("  Contains:");
-    println!("    - dirty flag (1 byte)");
-    println!("    - generation number (8 bytes)");
-    println!("    - flush number (8 bytes)");
-    println!("    - extent version tag (4 bytes)");
-    println!("  Total: {} bytes", metadata_size);
-    println!();
 
     // If a block range was requested, show offsets for that range
     if let Some((start_block, end_block)) = block_range {
@@ -1220,8 +1177,12 @@ pub fn extent_info(
             format!("Blocks {}-{}", start_block, end_block)
         };
 
-        println!("=== {} File Offsets ===", range_str);
         println!();
+        println!("=== {} File Offsets ===", range_str);
+        println!(
+            "{:<20}  {:>10}   {:>10}",
+            "Section", "Start", "End"
+        );
 
         // Block data range
         let block_data_start = start_block * block_size;
@@ -1293,22 +1254,11 @@ pub fn extent_info(
 
         // Metadata is shared across all blocks
         let metadata_offset = active_context_base + active_context_size;
-        println!();
         println!(
             "Extent Metadata:      0x{:08x} - 0x{:08x} (shared by all blocks)",
             metadata_offset,
             metadata_offset + metadata_size - 1
         );
-        println!();
-
-        println!("Notes:");
-        println!("  - Each block has two context slots (A and B) for crash consistency");
-        println!("  - The Active Context Bits indicate which slot is currently valid for each block");
-        println!(
-            "  - Context slots contain encryption context and integrity hash"
-        );
-        println!("  - Metadata is per-extent, not per-block");
-        println!();
     }
 
     Ok(())
