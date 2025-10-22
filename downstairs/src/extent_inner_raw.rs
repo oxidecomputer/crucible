@@ -104,19 +104,16 @@ pub struct RawInner {
     extra_syscall_denominator: u64,
 }
 
-/// Data structure containing a list of active context slots
-///
-/// Under the hood, this is a bitpacked array with one bit per block; 0
-/// indicates that `ContextSlot::A` is active and 1 selects `ContextSlot::B`.
+/// Bitpacked array, with one bit per block
 #[derive(Debug)]
-struct ActiveContextSlots {
+struct BlockBitArray {
     data: Vec<u32>,
     /// Number of blocks
     block_count: u64,
 }
 
-impl ActiveContextSlots {
-    /// Builds a new list with [`ContextSlot::A`] initially active
+impl BlockBitArray {
+    /// Builds a new list with all bits set to zero
     fn new(block_count: u64) -> Self {
         Self {
             data: vec![0u32; (block_count as usize).div_ceil(32)],
@@ -135,39 +132,85 @@ impl ActiveContextSlots {
     }
 
     /// Sets the context slot for the given block
-    fn set(&mut self, block: u64, slot: ContextSlot) {
+    fn set(&mut self, block: u64, value: bool) {
         let (index, mask) = self.decode(block);
         let target = &mut self.data[index];
-        match slot {
-            ContextSlot::A => *target &= !mask, // clear the bit
-            ContextSlot::B => *target |= mask,  // set the bit
+        if value {
+            *target |= mask // set the bit
+        } else {
+            *target &= !mask // clear the bit
         }
     }
 
-    /// Swaps the active context slot for the given block
+    /// Swaps the bit for the given block
     fn swap(&mut self, block: u64) {
         let (index, mask) = self.decode(block);
         self.data[index] ^= mask;
     }
 
+    fn len(&self) -> usize {
+        self.block_count as usize
+    }
+
+    fn iter(&self) -> impl Iterator<Item = bool> + '_ {
+        (0..self.block_count).map(|i| self[i])
+    }
+}
+
+impl std::ops::Index<u64> for BlockBitArray {
+    type Output = bool;
+    fn index(&self, block: u64) -> &Self::Output {
+        let (index, mask) = self.decode(block);
+        if self.data[index] & mask == 0 {
+            &false
+        } else {
+            &true
+        }
+    }
+}
+
+/// Data structure containing a list of active context slots
+///
+/// Under the hood, this is a bitpacked array with one bit per block; 0
+/// indicates that `ContextSlot::A` is active and 1 selects `ContextSlot::B`.
+#[derive(Debug)]
+struct ActiveContextSlots(BlockBitArray);
+
+impl ActiveContextSlots {
+    /// Builds a new list with [`ContextSlot::A`] initially active
+    fn new(block_count: u64) -> Self {
+        Self(BlockBitArray::new(block_count))
+    }
+
+    /// Sets the context slot for the given block
+    fn set(&mut self, block: u64, slot: ContextSlot) {
+        self.0.set(block, slot == ContextSlot::B)
+    }
+
+    /// Swaps the active context slot for the given block
+    fn swap(&mut self, block: u64) {
+        self.0.swap(block)
+    }
+
     /// Iterates over context slots
     fn iter(&self) -> impl Iterator<Item = ContextSlot> + '_ {
-        (0..self.block_count).map(|i| self[i])
+        self.0
+            .iter()
+            .map(|b| if b { ContextSlot::B } else { ContextSlot::A })
     }
 
     fn len(&self) -> usize {
-        self.block_count as usize
+        self.0.len()
     }
 }
 
 impl std::ops::Index<u64> for ActiveContextSlots {
     type Output = ContextSlot;
     fn index(&self, block: u64) -> &Self::Output {
-        let (index, mask) = self.decode(block);
-        if self.data[index] & mask == 0 {
-            &ContextSlot::A
-        } else {
+        if self.0[block] {
             &ContextSlot::B
+        } else {
+            &ContextSlot::A
         }
     }
 }
