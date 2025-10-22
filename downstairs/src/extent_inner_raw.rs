@@ -939,8 +939,18 @@ impl RawInner {
     }
 
     fn set_dirty(&mut self) -> Result<(), CrucibleError> {
-        self.layout.set_dirty(&self.file)?;
-        self.dirty = true;
+        if !self.dirty {
+            self.layout.set_dirty(&self.file)?;
+            self.dirty = true;
+        } else {
+            let meta = self.layout.get_metadata(&self.file)?;
+            assert!(
+                meta.dirty,
+                "extent {} has `self.dirty = false` \
+                 but on-disk metadata diagrees: {meta:?}",
+                self.extent_number
+            );
+        }
         Ok(())
     }
 
