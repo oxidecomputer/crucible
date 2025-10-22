@@ -941,8 +941,22 @@ impl RawInner {
     fn set_dirty(&mut self) -> Result<(), CrucibleError> {
         if !self.dirty {
             self.layout.set_dirty(&self.file)?;
+            // We must sync the file after writing the dirty flag; otherwise,
+            // a later sync could merge a subsequent write to this address.
+            // This is a property of ZFS: writes are normally persisted in the
+            // same order that they're submitted, but if you write to the same
+            // location in a file twice, the later write's data will be used
+            // when persisting the earlier write to disk.  See crucible#1788 for
+            // details.
+            self.file.sync_all().map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "extent {}: sync_all failed in `set_dirty`: {e}",
+                    self.extent_number,
+                ))
+            })?;
             self.dirty = true;
         } else {
+            // XXX debug code remove this before merging
             let meta = self.layout.get_metadata(&self.file)?;
             assert!(
                 meta.dirty,
