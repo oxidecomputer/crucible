@@ -32,6 +32,8 @@ members = [
     "workspace-hack",
     "xtask",
     "agent-antagonist",
+    "verify-raw",
+    "raw-extent",
 ]
 resolver = "2"
 
@@ -155,6 +157,8 @@ crucible-pantry-api = { path = "./pantry-api" }
 crucible-pantry-client = { path = "./pantry-client" }
 crucible-pantry-types = { path = "./pantry-types" }
 crucible-protocol = { path = "./protocol" }
+crucible-raw-extent = { path = "./raw-extent" }
+crucible-verify-raw = { path = "./verify-raw" }
 crucible-smf = { path = "./smf" }
 dsc-client = { path = "./dsc-client" }
 repair-client = { path = "./repair-client" }
