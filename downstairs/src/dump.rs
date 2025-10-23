@@ -1177,10 +1177,7 @@ pub fn extent_info(
 
         println!();
         println!("=== {} File Offsets ===", range_str);
-        println!(
-            "{:<20}  {:>10}   {:>10}",
-            "Section", "Start", "End"
-        );
+        println!("{:<20}  {:>10}   {:>10}", "Section", "Start", "End");
 
         // Block data range
         let block_data_start = start_block * block_size;
