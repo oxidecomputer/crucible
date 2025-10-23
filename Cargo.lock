@@ -1252,6 +1252,7 @@ dependencies = [
  "crucible-downstairs-api",
  "crucible-downstairs-types",
  "crucible-protocol",
+ "crucible-raw-extent",
  "crucible-workspace-hack",
  "dropshot",
  "expectorate",
@@ -1280,7 +1281,6 @@ dependencies = [
  "rusqlite",
  "schemars",
  "semver 1.0.27",
- "serde",
  "serde_json",
  "sha2",
  "slog",
@@ -1524,6 +1524,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-raw-extent"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "crucible-common",
+ "crucible-protocol",
+ "crucible-workspace-hack",
+ "serde",
+]
+
+[[package]]
 name = "crucible-smf"
 version = "0.0.0"
 dependencies = [
@@ -1544,6 +1555,19 @@ dependencies = [
  "num-derive",
  "num-traits",
  "thiserror 2.0.16",
+]
+
+[[package]]
+name = "crucible-verify-raw"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "clap",
+ "crucible-common",
+ "crucible-raw-extent",
+ "crucible-workspace-hack",
+ "serde",
 ]
 
 [[package]]
