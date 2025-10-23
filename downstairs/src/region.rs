@@ -1223,7 +1223,7 @@ impl Region {
 }
 
 #[cfg(feature = "omicron-build")]
-extern "C" {
+unsafe extern "C" {
     fn syncfs(fd: std::ffi::c_int) -> std::ffi::c_int;
 }
 

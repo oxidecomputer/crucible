@@ -120,7 +120,7 @@ pub const SCF_DECODE_FMRI_REQUIRE_NO_INSTANCE: c_int = 0x00000008;
 
 #[cfg(target_os = "illumos")]
 #[link(name = "scf")]
-extern "C" {
+unsafe extern "C" {
     pub fn scf_handle_create(version: scf_version_t) -> *mut scf_handle_t;
     pub fn scf_handle_destroy(handle: *mut scf_handle_t);
     pub fn scf_handle_bind(handle: *mut scf_handle_t) -> c_int;
