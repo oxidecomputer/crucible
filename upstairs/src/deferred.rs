@@ -3,18 +3,18 @@
 use std::sync::Arc;
 
 use crate::{
-    client::ConnectionId, io_limits::IOLimitGuard, upstairs::UpstairsConfig,
     BlockContext, BlockOp, ClientId, ImpactedBlocks, Message, RawWrite,
+    client::ConnectionId, io_limits::IOLimitGuard, upstairs::UpstairsConfig,
 };
 use bytes::BytesMut;
-use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
+use crucible_common::{CrucibleError, RegionDefinition, integrity_hash};
 use crucible_protocol::{ReadBlockContext, ReadResponseHeader};
 use futures::{
-    future::{ready, Either, Ready},
-    stream::FuturesOrdered,
     StreamExt,
+    future::{Either, Ready, ready},
+    stream::FuturesOrdered,
 };
-use slog::{error, Logger};
+use slog::{Logger, error};
 use tokio::sync::oneshot;
 
 /// Future stored in a [`DeferredQueue`]

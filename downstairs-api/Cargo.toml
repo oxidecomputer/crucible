@@ -2,8 +2,8 @@
 name = "crucible-downstairs-api"
 version = "0.1.0"
 license = "MPL-2.0"
-edition = "2021"
-rust-version = "1.81"
+edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 crucible-common.workspace = true

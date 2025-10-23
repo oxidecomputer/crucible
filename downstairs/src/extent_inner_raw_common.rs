@@ -1,4 +1,4 @@
-use crate::{extent::extent_path, CrucibleError};
+use crate::{CrucibleError, extent::extent_path};
 use crucible_common::ExtentId;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;

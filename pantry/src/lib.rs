@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
-use slog::{info, o, Logger};
+use slog::{Logger, info, o};
 
 pub const PROG: &str = "crucible-pantry";
 

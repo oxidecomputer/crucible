@@ -7,9 +7,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::client::{CLIENT_RECONNECT_DELAY, CLIENT_TIMEOUT};
-use crate::guest::Guest;
-use crate::up_main;
 use crate::BlockIO;
 use crate::Buffer;
 use crate::ClientFaultReason;
@@ -18,6 +15,9 @@ use crate::ConnectionMode;
 use crate::CrucibleError;
 use crate::DsState;
 use crate::NegotiationState;
+use crate::client::{CLIENT_RECONNECT_DELAY, CLIENT_TIMEOUT};
+use crate::guest::Guest;
+use crate::up_main;
 use crate::{
     IO_CACHED_MAX_BYTES, IO_CACHED_MAX_JOBS, IO_OUTSTANDING_MAX_BYTES,
     IO_OUTSTANDING_MAX_JOBS,
@@ -41,12 +41,12 @@ use crucible_protocol::WriteHeader;
 use bytes::BytesMut;
 use futures::SinkExt;
 use futures::StreamExt;
+use slog::Drain;
+use slog::Logger;
 use slog::error;
 use slog::info;
 use slog::o;
 use slog::warn;
-use slog::Drain;
-use slog::Logger;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
@@ -167,10 +167,10 @@ impl DownstairsHandle {
         if let Message::PromoteToActive {
             upstairs_id,
             session_id,
-            gen,
+            generation,
         } = &packet
         {
-            assert!(*gen == 1);
+            assert!(*generation == 1);
 
             info!(self.log, "negotiate packet {:?}", packet);
 
@@ -180,7 +180,7 @@ impl DownstairsHandle {
             self.send(Message::YouAreNowActive {
                 upstairs_id: *upstairs_id,
                 session_id: *session_id,
-                gen: *gen,
+                generation: *generation,
             })
             .unwrap();
         } else {
@@ -906,25 +906,37 @@ async fn run_live_repair(mut harness: TestHarness) {
             ds3_buffered_messages.push(harness.ds3.recv().await.unwrap());
         }
 
-        assert!(ds1_buffered_messages
-            .iter()
-            .any(|m| matches!(m, Message::ExtentLiveClose { .. })));
-        assert!(ds2_buffered_messages
-            .iter()
-            .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. })));
-        assert!(ds3_buffered_messages
-            .iter()
-            .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. })));
+        assert!(
+            ds1_buffered_messages
+                .iter()
+                .any(|m| matches!(m, Message::ExtentLiveClose { .. }))
+        );
+        assert!(
+            ds2_buffered_messages
+                .iter()
+                .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. }))
+        );
+        assert!(
+            ds3_buffered_messages
+                .iter()
+                .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. }))
+        );
 
-        assert!(ds1_buffered_messages
-            .iter()
-            .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
-        assert!(ds2_buffered_messages
-            .iter()
-            .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
-        assert!(ds3_buffered_messages
-            .iter()
-            .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
+        assert!(
+            ds1_buffered_messages
+                .iter()
+                .any(|m| matches!(m, Message::ExtentLiveReopen { .. }))
+        );
+        assert!(
+            ds2_buffered_messages
+                .iter()
+                .any(|m| matches!(m, Message::ExtentLiveReopen { .. }))
+        );
+        assert!(
+            ds3_buffered_messages
+                .iter()
+                .any(|m| matches!(m, Message::ExtentLiveReopen { .. }))
+        );
 
         // This is the reopen job id for extent eid
 
@@ -1208,7 +1220,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                 assert!(*extent_id == eid);
 
                 // ds1 didn't get the flush, it was set to faulted
-                let gen = 1;
+                let generation = 1;
                 let flush = 0;
                 let dirty = false;
 
@@ -1218,7 +1230,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                         upstairs_id: *upstairs_id,
                         session_id: *session_id,
                         job_id: *job_id,
-                        result: Ok((gen, flush, dirty)),
+                        result: Ok((generation, flush, dirty)),
                     })
                     .unwrap();
             }
@@ -1236,7 +1248,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                 assert!(*extent_id == eid);
 
                 // ds2 and ds3 did get a flush
-                let gen = 0;
+                let generation = 0;
                 let flush = 2;
                 let dirty = false;
 
@@ -1246,7 +1258,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                         upstairs_id: *upstairs_id,
                         session_id: *session_id,
                         job_id: *job_id,
-                        result: Ok((gen, flush, dirty)),
+                        result: Ok((generation, flush, dirty)),
                     })
                     .unwrap()
             }
@@ -1264,7 +1276,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                 assert!(*extent_id == eid);
 
                 // ds2 and ds3 did get a flush
-                let gen = 0;
+                let generation = 0;
                 let flush = 2;
                 let dirty = false;
 
@@ -1274,7 +1286,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                         upstairs_id: *upstairs_id,
                         session_id: *session_id,
                         job_id: *job_id,
-                        result: Ok((gen, flush, dirty)),
+                        result: Ok((generation, flush, dirty)),
                     })
                     .unwrap()
             }
@@ -2253,25 +2265,37 @@ async fn test_error_during_live_repair_no_halt() {
         ds3_buffered_messages.push(harness.ds3.recv().await.unwrap());
     }
 
-    assert!(ds1_buffered_messages
-        .iter()
-        .any(|m| matches!(m, Message::ExtentLiveClose { .. })));
-    assert!(ds2_buffered_messages
-        .iter()
-        .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. })));
-    assert!(ds3_buffered_messages
-        .iter()
-        .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. })));
+    assert!(
+        ds1_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveClose { .. }))
+    );
+    assert!(
+        ds2_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. }))
+    );
+    assert!(
+        ds3_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveFlushClose { .. }))
+    );
 
-    assert!(ds1_buffered_messages
-        .iter()
-        .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
-    assert!(ds2_buffered_messages
-        .iter()
-        .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
-    assert!(ds3_buffered_messages
-        .iter()
-        .any(|m| matches!(m, Message::ExtentLiveReopen { .. })));
+    assert!(
+        ds1_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveReopen { .. }))
+    );
+    assert!(
+        ds2_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveReopen { .. }))
+    );
+    assert!(
+        ds3_buffered_messages
+            .iter()
+            .any(|m| matches!(m, Message::ExtentLiveReopen { .. }))
+    );
 
     // The repair task then waits for the close responses.
 
@@ -2299,7 +2323,7 @@ async fn test_error_during_live_repair_no_halt() {
             assert!(*extent_id == ExtentId(0));
 
             // ds1 didn't get the flush, it was set to faulted
-            let gen = 1;
+            let generation = 1;
             let flush = 0;
             let dirty = false;
 
@@ -2309,7 +2333,7 @@ async fn test_error_during_live_repair_no_halt() {
                     upstairs_id: *upstairs_id,
                     session_id: *session_id,
                     job_id: *job_id,
-                    result: Ok((gen, flush, dirty)),
+                    result: Ok((generation, flush, dirty)),
                 })
                 .unwrap();
         }
@@ -2327,7 +2351,7 @@ async fn test_error_during_live_repair_no_halt() {
             assert!(*extent_id == ExtentId(0));
 
             // ds2 and ds3 did get a flush
-            let gen = 0;
+            let generation = 0;
             let flush = 2;
             let dirty = false;
 
@@ -2337,7 +2361,7 @@ async fn test_error_during_live_repair_no_halt() {
                     upstairs_id: *upstairs_id,
                     session_id: *session_id,
                     job_id: *job_id,
-                    result: Ok((gen, flush, dirty)),
+                    result: Ok((generation, flush, dirty)),
                 })
                 .unwrap()
         }
@@ -2355,7 +2379,7 @@ async fn test_error_during_live_repair_no_halt() {
             assert!(*extent_id == ExtentId(0));
 
             // ds2 and ds3 did get a flush
-            let gen = 0;
+            let generation = 0;
             let flush = 2;
             let dirty = false;
 
@@ -2365,7 +2389,7 @@ async fn test_error_during_live_repair_no_halt() {
                     upstairs_id: *upstairs_id,
                     session_id: *session_id,
                     job_id: *job_id,
-                    result: Ok((gen, flush, dirty)),
+                    result: Ok((generation, flush, dirty)),
                 })
                 .unwrap()
         }

@@ -1,19 +1,19 @@
 // Copyright 2021 Oxide Computer Company
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use crucible_agent_types::{region::*, snapshot::*};
 use crucible_common::write_json;
 use serde::{Deserialize, Serialize};
-use slog::{crit, error, info, Logger};
+use slog::{Logger, crit, error, info};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
+use crate::ZFSDataset;
 use crate::resource::Resource;
 use crate::snapshot_interface::SnapshotInterface;
-use crate::ZFSDataset;
 
 pub struct DataFile {
     log: Logger,
@@ -434,31 +434,29 @@ impl DataFile {
          */
         if let Some(running_snapshots) =
             inner.running_snapshots.get(&request.id)
+            && let Some(running_snapshot) = running_snapshots.get(&request.name)
         {
-            if let Some(running_snapshot) = running_snapshots.get(&request.name)
-            {
-                match running_snapshot.state {
-                    State::Requested | State::Created | State::Tombstoned => {
-                        bail!(
-                            "read-only downstairs running for region {} snapshot {}",
-                            request.id.0,
-                            request.name
-                        );
-                    }
+            match running_snapshot.state {
+                State::Requested | State::Created | State::Tombstoned => {
+                    bail!(
+                        "read-only downstairs running for region {} snapshot {}",
+                        request.id.0,
+                        request.name
+                    );
+                }
 
-                    State::Destroyed => {
-                        // ok to delete
-                    }
+                State::Destroyed => {
+                    // ok to delete
+                }
 
-                    State::Failed => {
-                        // Something has set the running snapshot to state
-                        // failed, so we can't delete this snapshot.
-                        bail!(
-                            "read-only downstairs state set to failed for region {} snapshot {}",
-                            request.id.0,
-                            request.name
-                        );
-                    }
+                State::Failed => {
+                    // Something has set the running snapshot to state
+                    // failed, so we can't delete this snapshot.
+                    bail!(
+                        "read-only downstairs state set to failed for region {} snapshot {}",
+                        request.id.0,
+                        request.name
+                    );
                 }
             }
         }
@@ -489,7 +487,10 @@ impl DataFile {
                             // This is a bug: according to the agent's datafile,
                             // the region exists, but according to zfs list, it
                             // does not
-                            bail!("Agent thinks region {} exists but zfs list does not! {e}", request.id.0);
+                            bail!(
+                                "Agent thinks region {} exists but zfs list does not! {e}",
+                                request.id.0
+                            );
                         }
 
                         State::Failed => {
@@ -503,7 +504,11 @@ impl DataFile {
                     }
                 } else {
                     // In here, the region never existed!
-                    bail!("Inside region {} snapshot {} delete, region never existed! {e}", request.id.0, request.name);
+                    bail!(
+                        "Inside region {} snapshot {} delete, region never existed! {e}",
+                        request.id.0,
+                        request.name
+                    );
                 }
             }
         };
@@ -863,7 +868,7 @@ impl DataFile {
 
 #[cfg(test)]
 mod test {
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
     use chrono::{DateTime, TimeZone, Utc};
     use std::process::Command;
 
@@ -901,9 +906,8 @@ mod test {
             let cmd_stdout = String::from_utf8_lossy(&cmd.stdout);
 
             // Remove newline
-            let cmd_stdout = cmd_stdout.trim_end().to_string();
 
-            cmd_stdout
+            cmd_stdout.trim_end().to_string()
         };
 
         let _date = Utc.timestamp_opt(cmd_stdout.parse()?, 0).unwrap();
