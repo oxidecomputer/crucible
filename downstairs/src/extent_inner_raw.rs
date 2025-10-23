@@ -901,7 +901,10 @@ impl RawInner {
                     }
 
                     matching_slot.or(empty_slot).ok_or(
-                        CrucibleError::MissingContextSlot(block as u64),
+                        CrucibleError::MissingContextSlot {
+                            block: block as u64,
+                            extent: extent_number.0,
+                        },
                     )?
                 };
                 active_context.set(block as u64, slot);
@@ -995,9 +998,12 @@ impl RawInner {
                 empty_slot = Some(slot);
             }
         }
-        let value = matching_slot
-            .or(empty_slot)
-            .ok_or(CrucibleError::MissingContextSlot(block))?;
+        let value = matching_slot.or(empty_slot).ok_or(
+            CrucibleError::MissingContextSlot {
+                block,
+                extent: self.extent_number.0,
+            },
+        )?;
         self.active_context.set(block, value);
         Ok(())
     }
