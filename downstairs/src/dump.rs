@@ -1044,30 +1044,25 @@ pub fn extent_info(
     println!("DB write version:    {}", def.database_write_version());
     println!();
 
-    // Calculate extent file layout details
-    let block_size = def.block_size();
-    let extent_size_blocks = def.extent_size().value;
+    // Calculate extent file layout details using RawLayout
+    use crate::extent_inner_raw::{RawLayout, BLOCK_CONTEXT_SLOT_SIZE_BYTES};
+    use crate::extent_inner_raw_common::BLOCK_META_SIZE_BYTES;
+
+    let layout = RawLayout::new(def.extent_size());
+    let block_size = layout.block_size();
+    let extent_size_blocks = layout.block_count();
 
     // Block data size
-    let block_data_size = block_size * extent_size_blocks;
-
-    // Context slots size (2 arrays, each with one slot per block)
-    const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
-    let context_slots_size =
-        extent_size_blocks * 2 * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
+    let block_data_size = layout.supplementary_data_offset();
 
     // Active context array size (bitpacked, 1 bit per block, rounded up to bytes)
-    let active_context_size = extent_size_blocks.div_ceil(8);
+    let active_context_size = layout.active_context_size();
 
     // Metadata size
-    const BLOCK_META_SIZE_BYTES: u64 = 32;
     let metadata_size = BLOCK_META_SIZE_BYTES;
 
     // Total file size
-    let total_file_size = block_data_size
-        + context_slots_size
-        + active_context_size
-        + metadata_size;
+    let total_file_size = layout.file_size();
 
     println!("=== Extent File Layout ===");
     println!(
@@ -1192,12 +1187,11 @@ pub fn extent_info(
         );
 
         // Context slot A range
-        let context_a_base = block_data_size;
+        use crate::extent_inner_raw::ContextSlot;
         let context_a_start =
-            context_a_base + (start_block * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
-        let context_a_end = context_a_base
-            + ((end_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES)
-            - 1;
+            layout.context_slot_offset(start_block, ContextSlot::A);
+        let context_a_end =
+            layout.context_slot_offset(end_block + 1, ContextSlot::A) - 1;
         let context_a_range_size =
             (end_block - start_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
         println!(
@@ -1206,13 +1200,10 @@ pub fn extent_info(
         );
 
         // Context slot B range
-        let context_b_base = context_a_base
-            + (extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
         let context_b_start =
-            context_b_base + (start_block * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
-        let context_b_end = context_b_base
-            + ((end_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES)
-            - 1;
+            layout.context_slot_offset(start_block, ContextSlot::B);
+        let context_b_end =
+            layout.context_slot_offset(end_block + 1, ContextSlot::B) - 1;
         let context_b_range_size =
             (end_block - start_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
         println!(
@@ -1221,8 +1212,7 @@ pub fn extent_info(
         );
 
         // Active context bits range
-        let active_context_base = context_b_base
-            + (extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES);
+        let active_context_base = layout.active_context_offset();
         let start_byte = start_block / 8;
         let end_byte = end_block / 8;
         let start_bit = start_block % 8;
@@ -1248,7 +1238,7 @@ pub fn extent_info(
         }
 
         // Metadata is shared across all blocks
-        let metadata_offset = active_context_base + active_context_size;
+        let metadata_offset = layout.metadata_offset();
         println!(
             "Extent Metadata:      0x{:08x} - 0x{:08x} (shared by all blocks)",
             metadata_offset,
