@@ -1,29 +1,22 @@
 // Copyright 2022 Oxide Computer Company
 use clap::{Parser, Subcommand, ValueEnum};
-use crossterm::{
-    cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    execute,
-    terminal::{
-        disable_raw_mode, enable_raw_mode, Clear, ClearType,
-        EnterAlternateScreen, LeaveAlternateScreen,
-    },
-};
 use crucible_control_client::Client;
 use crucible_protocol::ClientId;
 use serde::Deserialize;
 use std::fmt;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use tokio::time::{sleep, Duration};
 
 use crucible::DtraceInfo;
 
+mod ctop;
+
 #[derive(Debug, Deserialize)]
-struct DtraceWrapper {
-    pid: u32,
-    status: DtraceInfo,
+pub struct DtraceWrapper {
+    pub pid: u32,
+    pub status: DtraceInfo,
 }
 
 /// Connect to crucible control server
@@ -45,7 +38,7 @@ struct Args {
 
 // The possible fields we will display when receiving DTrace output.
 #[derive(Debug, Copy, Clone, ValueEnum, EnumIter)]
-enum DtraceDisplay {
+pub enum DtraceDisplay {
     Pid,
     Session,
     UpstairsId,
@@ -124,12 +117,19 @@ enum Action {
     /// Show the status of various LiveRepair stats
     Repair,
     /// Curses-based top-like display of dtrace data
-    Ctop,
+    Ctop {
+        /// Command to run to generate dtrace output
+        #[clap(
+            long,
+            default_value = "dtrace -s /opt/oxide/crucible_dtrace/upstairs_raw.d"
+        )]
+        dtrace_cmd: String,
+    },
 }
 
 /// Translate what the default DsState string is (that we are getting from DTrace)
 /// into a three letter string for printing.
-fn short_state(dss: &str) -> String {
+pub fn short_state(dss: &str) -> String {
     match dss {
         "Active" => "ACT".to_string(),
         "WaitQuorum" => "WQ".to_string(),
@@ -551,66 +551,6 @@ fn dtrace_loop(output: Vec<DtraceDisplay>) {
     }
 }
 
-// Ctop display loop with curses-like interface
-fn ctop_loop() -> Result<(), Box<dyn std::error::Error>> {
-    // Set up terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-
-    // Set up panic handler to restore terminal
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
-        original_hook(panic_info);
-    }));
-
-    // Main loop
-    loop {
-        // Clear screen
-        execute!(stdout, Clear(ClearType::All), cursor::MoveTo(0, 0))?;
-
-        // Get current date and time
-        let now = std::time::SystemTime::now();
-        let duration = now
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let date_str = format!("Unix timestamp: {}", duration.as_secs());
-
-        // Display date
-        writeln!(stdout, "cmon ctop - {}", date_str)?;
-        stdout.flush()?;
-
-        // Check for keyboard input with timeout
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key_event) = event::read()? {
-                match key_event {
-                    // Exit on 'q'
-                    KeyEvent {
-                        code: KeyCode::Char('q'),
-                        modifiers: KeyModifiers::NONE,
-                        ..
-                    } => break,
-                    // Exit on Ctrl+C
-                    KeyEvent {
-                        code: KeyCode::Char('c'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => break,
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Clean up terminal
-    execute!(stdout, LeaveAlternateScreen)?;
-    disable_raw_mode()?;
-
-    Ok(())
-}
-
 /*
  * Simple tool to connect to a crucible upstairs control http port
  * and report back the results from a upstairs_fill_info command.
@@ -635,8 +575,8 @@ async fn main() {
         Action::Repair => {
             show_repair_stats(args).await;
         }
-        Action::Ctop => {
-            if let Err(e) = ctop_loop() {
+        Action::Ctop { dtrace_cmd } => {
+            if let Err(e) = ctop::ctop_loop(dtrace_cmd).await {
                 eprintln!("Error running ctop: {}", e);
             }
         }
