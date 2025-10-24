@@ -7,6 +7,7 @@ edition = "2021"
 [dependencies]
 clap.workspace = true
 clearscreen.workspace = true
+crossterm.workspace = true
 crucible.workspace = true
 crucible-control-client.workspace = true
 crucible-protocol.workspace = true

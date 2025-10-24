@@ -845,6 +845,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clearscreen",
+ "crossterm",
  "crucible",
  "crucible-control-client",
  "crucible-protocol",
