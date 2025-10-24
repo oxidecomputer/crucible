@@ -7,6 +7,5 @@
 #pragma D option strsize=2k
 crucible_upstairs*:::up-status
 {
-    trace(json(copyinstr(arg1), "ok"));
-    printf("\n");
+    printf("{\"pid\":%d,\"status\":%s}\n", pid, json(copyinstr(arg1), "ok"));
 }
