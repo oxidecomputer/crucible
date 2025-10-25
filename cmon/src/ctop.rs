@@ -494,16 +494,21 @@ async fn display_task(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
 
-        // Display header
+        // Display header (clear line first to remove artifacts)
         write!(
             stdout,
-            "cmon ctop - Unix timestamp: {}\r\n",
+            "cmon ctop - Unix timestamp: {}",
             duration.as_secs()
         )?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        write!(stdout, "\r\n")?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
         write!(stdout, "\r\n")?;
 
         // Display column headers
-        write!(stdout, "{}\r\n", format_header(&display_fields))?;
+        write!(stdout, "{}", format_header(&display_fields))?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        write!(stdout, "\r\n")?;
 
         // Read state and display sessions sorted by PID (then session_id)
         let state_guard = state.read().await;
@@ -522,19 +527,24 @@ async fn display_task(
                 &display_fields,
                 is_stale,
             );
-            write!(stdout, "{}\r\n", row)?;
+            write!(stdout, "{}", row)?;
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
+            write!(stdout, "\r\n")?;
         }
         drop(state_guard);
 
         // Display footer
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
         write!(stdout, "\r\n")?;
         write!(
             stdout,
-            "Press 'q' or Ctrl+C to quit. * = stale (no update in {}s)\r\n",
+            "Press 'q' or Ctrl+C to quit. * = stale (no update in {}s)",
             STALE_THRESHOLD_SECS
         )?;
+        execute!(stdout, Clear(ClearType::UntilNewLine))?;
+        write!(stdout, "\r\n")?;
 
-        // Clear from cursor to end of screen (removes any leftover data)
+        // Clear from cursor to end of screen (removes any leftover lines)
         execute!(stdout, Clear(ClearType::FromCursorDown))?;
 
         stdout.flush()?;
