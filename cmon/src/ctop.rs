@@ -57,6 +57,9 @@ fn default_display_fields() -> Vec<DtraceDisplay> {
         DtraceDisplay::Session,
         DtraceDisplay::State,
         DtraceDisplay::NextJobId,
+        DtraceDisplay::Connected,
+        DtraceDisplay::UpCount,
+        DtraceDisplay::DsCount,
         DtraceDisplay::JobDelta,
         DtraceDisplay::ExtentLimit,
         DtraceDisplay::DsReconciled,
@@ -204,19 +207,15 @@ fn format_row(
     d_out: &DtraceInfo,
     precomputed_delta: Option<u64>,
     dd: &[DtraceDisplay],
-    is_stale: bool,
+    _is_stale: bool,
 ) -> String {
     let mut result = String::new();
 
     for display_item in dd.iter() {
         match display_item {
             DtraceDisplay::Pid => {
-                let pid_str = if is_stale {
-                    format!("{pid}*")
-                } else {
-                    format!("{pid}")
-                };
-                result.push_str(&format!(" {:>5}", pid_str));
+                // Note: stale indicator is now shown in the first column
+                result.push_str(&format!(" {:>5}", pid));
             }
             DtraceDisplay::Session => {
                 let session_short =
@@ -798,8 +797,15 @@ async fn display_task(
                 let is_stale = now.duration_since(session_data.last_updated)
                     > Duration::from_secs(STALE_THRESHOLD_SECS);
 
-                // Add selection indicator
-                let indicator = if idx == selected_index { ">" } else { " " };
+                // Add indicator: > for selected, * for stale, space otherwise
+                // Selection indicator (>) takes priority over stale indicator (*)
+                let indicator = if idx == selected_index {
+                    ">"
+                } else if is_stale {
+                    "*"
+                } else {
+                    " "
+                };
                 write!(stdout, "{}", indicator)?;
 
                 let row = format_row(
@@ -837,7 +843,7 @@ async fn display_task(
             write!(stdout, "\r\n")?;
             write!(
                 stdout,
-                "[↑↓: Select | 'd': Details | 'q': Quit] * = stale ({}s)",
+                "[↑↓: Select | 'd': Details | 'q': Quit] > = selected, * = stale ({}s)",
                 STALE_THRESHOLD_SECS
             )?;
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
