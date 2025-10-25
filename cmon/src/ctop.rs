@@ -12,6 +12,13 @@ use crossterm::{
 };
 use crucible::DtraceInfo;
 use crucible_protocol::ClientId;
+use ratatui::{
+    backend::CrosstermBackend,
+    style::Color,
+    widgets::canvas::{Canvas, Line, Points},
+    widgets::{Block, Borders},
+    Terminal,
+};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -38,6 +45,8 @@ struct SessionData {
 #[derive(Debug, Default)]
 struct CtopState {
     sessions: HashMap<String, SessionData>,
+    selected_index: usize,
+    detail_mode: bool,
 }
 
 /// Default display fields (same as dtrace command defaults)
@@ -519,6 +528,94 @@ async fn subprocess_reader_task(
     Ok(())
 }
 
+/// Render full-screen detail view for a selected session
+fn render_detail_view(
+    session_data: &SessionData,
+    _terminal_size: (u16, u16),
+) -> io::Result<()> {
+    // Calculate statistics
+    let history: Vec<u64> =
+        session_data.delta_history.iter().copied().collect();
+    let max = history.iter().copied().max().unwrap_or(1);
+    let min = history.iter().copied().min().unwrap_or(0);
+    let avg = if !history.is_empty() {
+        history.iter().sum::<u64>() / history.len() as u64
+    } else {
+        0
+    };
+    let current = session_data.current_delta.unwrap_or(0);
+
+    // Render using ratatui
+    let mut stdout = io::stdout();
+    let backend = CrosstermBackend::new(&mut stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Clear the screen to remove previous frame (ratatui handles this efficiently)
+    terminal.clear()?;
+
+    terminal.draw(|f| {
+        let area = f.area();
+
+        // Create title
+        let session_short: String =
+            session_data.dtrace_info.session_id.chars().take(8).collect();
+        let title = format!(
+            " Delta History - PID {} - Session {} ",
+            session_data.pid, session_short
+        );
+
+        // Create canvas widget
+        let canvas = Canvas::default()
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .title_bottom(format!(
+                        " Samples: {} | Min: {} | Max: {} | Avg: {} | Current: {} ",
+                        history.len(),
+                        min,
+                        max,
+                        avg,
+                        current
+                    ))
+                    .title_bottom(" ['d': Back to table | 'q': Quit] "),
+            )
+            .x_bounds([0.0, history.len().max(1) as f64])
+            .y_bounds([min as f64, max as f64])
+            .paint(|ctx| {
+                // Draw the line graph
+                if history.len() > 1 {
+                    for i in 0..history.len() - 1 {
+                        let x1 = i as f64;
+                        let y1 = history[i] as f64;
+                        let x2 = (i + 1) as f64;
+                        let y2 = history[i + 1] as f64;
+
+                        ctx.draw(&Line {
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            color: Color::Cyan,
+                        });
+                    }
+                }
+
+                // Draw points for each sample
+                for (i, &value) in history.iter().enumerate() {
+                    ctx.draw(&Points {
+                        coords: &[(i as f64, value as f64)],
+                        color: Color::Yellow,
+                    });
+                }
+            });
+
+        f.render_widget(canvas, area);
+    })?;
+
+    Ok(())
+}
+
 /// Display task - renders the screen and handles keyboard input
 async fn display_task(
     state: Arc<RwLock<CtopState>>,
@@ -556,88 +653,129 @@ async fn display_task(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
 
-        // Display header (clear line first to remove artifacts)
-        write!(stdout, "cmon ctop - Unix timestamp: {}", duration.as_secs())?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
-        write!(stdout, "\r\n")?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
-        write!(stdout, "\r\n")?;
+        // Get terminal size
+        let terminal_size = crossterm::terminal::size()?;
 
-        // Display column headers
-        write!(stdout, "{}", format_header(&display_fields))?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
-        write!(stdout, "\r\n")?;
-
-        // Get terminal size for sparkline width calculation
-        let (terminal_width, _) = crossterm::terminal::size()?;
-
-        // Read state and display sessions sorted by PID (then session_id)
+        // Read state to check mode
         let state_guard = state.read().await;
-        let mut sessions: Vec<&SessionData> =
-            state_guard.sessions.values().collect();
-        sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
+        let in_detail_mode = state_guard.detail_mode;
+        let selected_index = state_guard.selected_index;
 
-        // Calculate global max across all sessions for consistent sparkline
-        // scaling
-        let global_max = sessions
-            .iter()
-            .flat_map(|s| s.delta_history.iter())
-            .copied()
-            .max()
-            .unwrap_or(1);
+        // If in detail mode, render detail view and skip table
+        if in_detail_mode {
+            let mut sessions: Vec<&SessionData> =
+                state_guard.sessions.values().collect();
+            sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
 
-        for session_data in sessions {
-            let is_stale = now.duration_since(session_data.last_updated)
-                > Duration::from_secs(STALE_THRESHOLD_SECS);
-
-            let row = format_row(
-                session_data.pid,
-                &session_data.dtrace_info,
-                session_data.current_delta,
-                &display_fields,
-                is_stale,
-            );
-            write!(stdout, "{}", row)?;
-
-            // Render sparkline in remaining space
-            let row_len = row.chars().count();
-            if terminal_width > row_len as u16 {
-                let sparkline_width =
-                    (terminal_width as usize - row_len).saturating_sub(1);
-                if sparkline_width > 0 {
-                    let sparkline = render_sparkline(
-                        &session_data.delta_history,
-                        sparkline_width,
-                        global_max,
-                    );
-                    write!(stdout, " {}", sparkline)?;
-                }
+            if let Some(selected_session) = sessions.get(selected_index) {
+                // Clone the session data so we can drop the lock
+                let session_clone = (*selected_session).clone();
+                drop(state_guard);
+                render_detail_view(&session_clone, terminal_size)?;
+            } else {
+                drop(state_guard);
             }
+        } else {
+            // Table mode - render normal view
+            drop(state_guard);
 
+            // Display header (clear line first to remove artifacts)
+            execute!(stdout, cursor::MoveTo(0, 0))?;
+            write!(
+                stdout,
+                "cmon ctop - Unix timestamp: {}",
+                duration.as_secs()
+            )?;
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
             write!(stdout, "\r\n")?;
-        }
-        drop(state_guard);
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
+            write!(stdout, "\r\n")?;
 
-        // Display footer
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
-        write!(stdout, "\r\n")?;
-        write!(
-            stdout,
-            "Press 'q' or Ctrl+C to quit. * = stale (no update in {}s)",
-            STALE_THRESHOLD_SECS
-        )?;
-        execute!(stdout, Clear(ClearType::UntilNewLine))?;
-        write!(stdout, "\r\n")?;
+            // Display column headers
+            write!(stdout, "{}", format_header(&display_fields))?;
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
+            write!(stdout, "\r\n")?;
 
-        // Clear from cursor to end of screen (removes any leftover lines)
-        execute!(stdout, Clear(ClearType::FromCursorDown))?;
+            let (terminal_width, _) = terminal_size;
 
-        stdout.flush()?;
+            // Read state and display sessions sorted by PID (then session_id)
+            let state_guard = state.read().await;
+            let mut sessions: Vec<&SessionData> =
+                state_guard.sessions.values().collect();
+            sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
+
+            // Calculate global max across all sessions for consistent sparkline
+            // scaling
+            let global_max = sessions
+                .iter()
+                .flat_map(|s| s.delta_history.iter())
+                .copied()
+                .max()
+                .unwrap_or(1);
+
+            let selected_index = state_guard.selected_index;
+
+            for (idx, session_data) in sessions.iter().enumerate() {
+                let is_stale = now.duration_since(session_data.last_updated)
+                    > Duration::from_secs(STALE_THRESHOLD_SECS);
+
+                // Add selection indicator
+                let indicator = if idx == selected_index { ">" } else { " " };
+                write!(stdout, "{}", indicator)?;
+
+                let row = format_row(
+                    session_data.pid,
+                    &session_data.dtrace_info,
+                    session_data.current_delta,
+                    &display_fields,
+                    is_stale,
+                );
+                write!(stdout, "{}", row)?;
+
+                // Render sparkline in remaining space
+                // Account for the indicator character (1 char)
+                let row_len = row.chars().count() + 1;
+                if terminal_width > row_len as u16 {
+                    let sparkline_width =
+                        (terminal_width as usize - row_len).saturating_sub(1);
+                    if sparkline_width > 0 {
+                        let sparkline = render_sparkline(
+                            &session_data.delta_history,
+                            sparkline_width,
+                            global_max,
+                        );
+                        write!(stdout, " {}", sparkline)?;
+                    }
+                }
+
+                execute!(stdout, Clear(ClearType::UntilNewLine))?;
+                write!(stdout, "\r\n")?;
+            }
+            drop(state_guard);
+
+            // Display footer
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
+            write!(stdout, "\r\n")?;
+            write!(
+                stdout,
+                "[↑↓: Select | 'd': Details | 'q': Quit] * = stale ({}s)",
+                STALE_THRESHOLD_SECS
+            )?;
+            execute!(stdout, Clear(ClearType::UntilNewLine))?;
+            write!(stdout, "\r\n")?;
+
+            // Clear from cursor to end of screen (removes any leftover lines)
+            execute!(stdout, Clear(ClearType::FromCursorDown))?;
+
+            stdout.flush()?;
+        } // End of table mode rendering
 
         // Check for keyboard input (non-blocking)
         if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key_event) = event::read()? {
+                let mut state_guard = state.write().await;
+                let num_sessions = state_guard.sessions.len();
+
                 match key_event {
                     KeyEvent {
                         code: KeyCode::Char('q'),
@@ -649,8 +787,48 @@ async fn display_task(
                         modifiers: KeyModifiers::CONTROL,
                         ..
                     } => break,
+                    KeyEvent {
+                        code: KeyCode::Char('d'),
+                        modifiers: KeyModifiers::NONE,
+                        ..
+                    } => {
+                        // Toggle detail mode
+                        state_guard.detail_mode = !state_guard.detail_mode;
+                    }
+                    KeyEvent {
+                        code: KeyCode::Up,
+                        modifiers: KeyModifiers::NONE,
+                        ..
+                    } => {
+                        // Move selection up (only in table mode)
+                        if !state_guard.detail_mode && num_sessions > 0 {
+                            state_guard.selected_index =
+                                state_guard.selected_index.saturating_sub(1);
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Down,
+                        modifiers: KeyModifiers::NONE,
+                        ..
+                    } => {
+                        // Move selection down (only in table mode)
+                        if !state_guard.detail_mode && num_sessions > 0 {
+                            state_guard.selected_index =
+                                (state_guard.selected_index + 1)
+                                    .min(num_sessions.saturating_sub(1));
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Esc,
+                        modifiers: KeyModifiers::NONE,
+                        ..
+                    } => {
+                        // Exit detail mode
+                        state_guard.detail_mode = false;
+                    }
                     _ => {}
                 }
+                drop(state_guard);
             }
         }
     }
