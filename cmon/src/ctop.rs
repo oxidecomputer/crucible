@@ -57,9 +57,6 @@ fn default_display_fields() -> Vec<DtraceDisplay> {
         DtraceDisplay::Session,
         DtraceDisplay::State,
         DtraceDisplay::NextJobId,
-        DtraceDisplay::Connected,
-        DtraceDisplay::UpCount,
-        DtraceDisplay::DsCount,
         DtraceDisplay::JobDelta,
         DtraceDisplay::ExtentLimit,
         DtraceDisplay::DsReconciled,
@@ -158,7 +155,7 @@ fn format_header(dd: &[DtraceDisplay]) -> String {
                 result.push_str(&format!(" {:>4}", "EXTL"));
             }
             DtraceDisplay::NextJobId => {
-                result.push_str(&format!(" {:>7}", "NEXTJOB"));
+                result.push_str(&format!(" {:>10}", "NEXTJOB"));
             }
             DtraceDisplay::JobDelta => {
                 result.push_str(&format!(" {:>5}", "DELTA"));
@@ -331,7 +328,7 @@ fn format_row(
                 result.push_str(&format!(" {:4}", d_out.ds_extent_limit));
             }
             DtraceDisplay::NextJobId => {
-                result.push_str(&format!(" {:>7}", d_out.next_job_id));
+                result.push_str(&format!(" {:>10}", d_out.next_job_id));
             }
             DtraceDisplay::JobDelta => {
                 if let Some(delta) = precomputed_delta {
