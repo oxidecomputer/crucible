@@ -389,7 +389,13 @@ fn format_row(
 
 /// Render a sparkline from delta history
 /// Uses Unicode block characters to show trend: ▁▂▃▄▅▆▇█
-fn render_sparkline(history: &VecDeque<u64>, width: usize) -> String {
+/// If global_max is provided, scales relative to that value for
+/// cross-session comparison
+fn render_sparkline(
+    history: &VecDeque<u64>,
+    width: usize,
+    global_max: u64,
+) -> String {
     if history.is_empty() || width == 0 {
         return String::new();
     }
@@ -412,18 +418,19 @@ fn render_sparkline(history: &VecDeque<u64>, width: usize) -> String {
         return String::new();
     }
 
-    // Find max value for scaling
-    let max = *samples.iter().max().unwrap_or(&1);
-    if max == 0 {
-        return BLOCKS[0].to_string().repeat(samples.len());
-    }
+    // Use global max for scaling (minimum 1 to avoid division by zero)
+    let max = global_max.max(1);
 
     // Map each value to a block character
     samples
         .iter()
         .map(|&val| {
-            let normalized = (val as f64 / max as f64 * 7.0) as usize;
-            BLOCKS[normalized.min(7)]
+            if val == 0 {
+                BLOCKS[0]
+            } else {
+                let normalized = (val as f64 / max as f64 * 7.0) as usize;
+                BLOCKS[normalized.min(7)]
+            }
         })
         .collect()
 }
@@ -570,6 +577,15 @@ async fn display_task(
             state_guard.sessions.values().collect();
         sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
 
+        // Calculate global max across all sessions for consistent sparkline
+        // scaling
+        let global_max = sessions
+            .iter()
+            .flat_map(|s| s.delta_history.iter())
+            .copied()
+            .max()
+            .unwrap_or(1);
+
         for session_data in sessions {
             let is_stale = now.duration_since(session_data.last_updated)
                 > Duration::from_secs(STALE_THRESHOLD_SECS);
@@ -592,6 +608,7 @@ async fn display_task(
                     let sparkline = render_sparkline(
                         &session_data.delta_history,
                         sparkline_width,
+                        global_max,
                     );
                     write!(stdout, " {}", sparkline)?;
                 }
