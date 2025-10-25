@@ -484,8 +484,8 @@ async fn display_task(
             _ = tokio::time::sleep(Duration::from_millis(100)) => {},
         }
 
-        // Clear screen
-        execute!(stdout, Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+        // Move cursor to top-left (don't clear entire screen)
+        execute!(stdout, cursor::MoveTo(0, 0))?;
 
         // Get current time
         let now = Instant::now();
@@ -533,6 +533,9 @@ async fn display_task(
             "Press 'q' or Ctrl+C to quit. * = stale (no update in {}s)\r\n",
             STALE_THRESHOLD_SECS
         )?;
+
+        // Clear from cursor to end of screen (removes any leftover data)
+        execute!(stdout, Clear(ClearType::FromCursorDown))?;
 
         stdout.flush()?;
 
