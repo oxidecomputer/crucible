@@ -14,9 +14,10 @@ use crucible::DtraceInfo;
 use crucible_protocol::ClientId;
 use ratatui::{
     backend::CrosstermBackend,
+    layout::{Constraint, Layout},
     style::Color,
     widgets::canvas::{Canvas, Line, Points},
-    widgets::{Block, Borders},
+    widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 use std::collections::{HashMap, VecDeque};
@@ -560,6 +561,30 @@ fn render_detail_view(
     terminal.draw(|f| {
         let area = f.area();
 
+        // Split area: 1 line at top for session data, rest for canvas
+        let chunks = Layout::default()
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+
+        // Format the session data row
+        let display_fields = default_display_fields();
+        let is_stale = session_data
+            .last_updated
+            .elapsed()
+            .as_secs()
+            > STALE_THRESHOLD_SECS;
+        let row_data = format_row(
+            session_data.pid,
+            &session_data.dtrace_info,
+            session_data.current_delta,
+            &display_fields,
+            is_stale,
+        );
+
+        // Render session data at top
+        let data_paragraph = Paragraph::new(row_data);
+        f.render_widget(data_paragraph, chunks[0]);
+
         // Create title
         let session_short: String =
             session_data.dtrace_info.session_id.chars().take(8).collect();
@@ -569,7 +594,7 @@ fn render_detail_view(
             session_data.pid, session_short, mode_str
         );
 
-        // Create canvas widget
+        // Create canvas widget in bottom area (1 line shorter)
         let canvas = Canvas::default()
             .block(
                 Block::default()
@@ -592,20 +617,20 @@ fn render_detail_view(
             .paint(|ctx| {
                 // Draw Y-axis labels (at left edge of graph)
                 let y_range = display_max as f64 - display_min as f64;
-                let labels = [
-                    (display_max, "top"),
-                    (display_min + (y_range * 0.75) as u64, "3/4"),
-                    (display_min + (y_range * 0.5) as u64, "1/2"),
-                    (display_min + (y_range * 0.25) as u64, "1/4"),
-                    (display_min, "base"),
+                let y_positions = [
+                    display_max,
+                    display_min + (y_range * 0.75) as u64,
+                    display_min + (y_range * 0.5) as u64,
+                    display_min + (y_range * 0.25) as u64,
+                    display_min,
                 ];
 
-                for (y_val, label) in &labels {
+                for y_val in &y_positions {
                     ctx.print(
                         0.0,
                         *y_val as f64,
                         ratatui::text::Span::styled(
-                            format!("{}: {}", label, y_val),
+                            format!("{}", y_val),
                             ratatui::style::Style::default()
                                 .fg(Color::Gray),
                         ),
@@ -639,7 +664,7 @@ fn render_detail_view(
                 }
             });
 
-        f.render_widget(canvas, area);
+        f.render_widget(canvas, chunks[1]);
     })?;
 
     Ok(())
