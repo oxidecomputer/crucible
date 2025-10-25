@@ -12,7 +12,7 @@ use crossterm::{
 };
 use crucible::DtraceInfo;
 use crucible_protocol::ClientId;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use tokio::process::Command;
 use tokio::sync::{Notify, RwLock};
 
 const STALE_THRESHOLD_SECS: u64 = 10;
+const MAX_DELTA_HISTORY: usize = 100;
 
 /// Data for a single session
 #[derive(Debug, Clone)]
@@ -29,6 +30,8 @@ struct SessionData {
     dtrace_info: DtraceInfo,
     last_job_id: u64,
     last_updated: Instant,
+    current_delta: Option<u64>,
+    delta_history: VecDeque<u64>,
 }
 
 /// Shared state between stdin reader and display tasks
@@ -189,12 +192,11 @@ fn format_header(dd: &[DtraceDisplay]) -> String {
 fn format_row(
     pid: u32,
     d_out: &DtraceInfo,
-    last_job_id: u64,
+    precomputed_delta: Option<u64>,
     dd: &[DtraceDisplay],
     is_stale: bool,
 ) -> String {
     let mut result = String::new();
-    let mut computed_delta: Option<u64> = None;
 
     for display_item in dd.iter() {
         match display_item {
@@ -323,14 +325,7 @@ fn format_row(
                 result.push_str(&format!(" {:>7}", d_out.next_job_id));
             }
             DtraceDisplay::JobDelta => {
-                if computed_delta.is_none() {
-                    computed_delta = if last_job_id == 0 {
-                        None
-                    } else {
-                        Some(d_out.next_job_id.0 - last_job_id)
-                    };
-                }
-                if let Some(delta) = computed_delta {
+                if let Some(delta) = precomputed_delta {
                     result.push_str(&format!(" {:5}", delta));
                 } else {
                     result.push_str(&format!(" {:>5}", "---"));
@@ -392,6 +387,47 @@ fn format_row(
     result
 }
 
+/// Render a sparkline from delta history
+/// Uses Unicode block characters to show trend: ▁▂▃▄▅▆▇█
+fn render_sparkline(history: &VecDeque<u64>, width: usize) -> String {
+    if history.is_empty() || width == 0 {
+        return String::new();
+    }
+
+    // Unicode block characters from lowest to highest
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    // Take last 'width' samples (most recent)
+    let samples: Vec<u64> = history
+        .iter()
+        .rev()
+        .take(width)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    if samples.is_empty() {
+        return String::new();
+    }
+
+    // Find max value for scaling
+    let max = *samples.iter().max().unwrap_or(&1);
+    if max == 0 {
+        return BLOCKS[0].to_string().repeat(samples.len());
+    }
+
+    // Map each value to a block character
+    samples
+        .iter()
+        .map(|&val| {
+            let normalized = (val as f64 / max as f64 * 7.0) as usize;
+            BLOCKS[normalized.min(7)]
+        })
+        .collect()
+}
+
 /// Subprocess reader task - spawns dtrace command and reads JSON output
 async fn subprocess_reader_task(
     dtrace_cmd: String,
@@ -438,10 +474,29 @@ async fn subprocess_reader_task(
                 dtrace_info: wrapper.status.clone(),
                 last_job_id: 0,
                 last_updated: Instant::now(),
+                current_delta: None,
+                delta_history: VecDeque::new(),
             });
 
-        // Save the old job_id before updating
-        session_data.last_job_id = session_data.dtrace_info.next_job_id.0;
+        // Calculate delta (jobs per second)
+        let current_job_id = wrapper.status.next_job_id.0;
+        let delta = if session_data.last_job_id != 0 {
+            let d = current_job_id.saturating_sub(session_data.last_job_id);
+
+            // Add to history ring buffer
+            session_data.delta_history.push_back(d);
+            if session_data.delta_history.len() > MAX_DELTA_HISTORY {
+                session_data.delta_history.pop_front();
+            }
+
+            Some(d)
+        } else {
+            None
+        };
+
+        // Store current delta and update state
+        session_data.current_delta = delta;
+        session_data.last_job_id = current_job_id;
         session_data.dtrace_info = wrapper.status;
         session_data.last_updated = Instant::now();
 
@@ -495,11 +550,7 @@ async fn display_task(
             .unwrap_or_default();
 
         // Display header (clear line first to remove artifacts)
-        write!(
-            stdout,
-            "cmon ctop - Unix timestamp: {}",
-            duration.as_secs()
-        )?;
+        write!(stdout, "cmon ctop - Unix timestamp: {}", duration.as_secs())?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
         write!(stdout, "\r\n")?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
@@ -509,6 +560,9 @@ async fn display_task(
         write!(stdout, "{}", format_header(&display_fields))?;
         execute!(stdout, Clear(ClearType::UntilNewLine))?;
         write!(stdout, "\r\n")?;
+
+        // Get terminal size for sparkline width calculation
+        let (terminal_width, _) = crossterm::terminal::size()?;
 
         // Read state and display sessions sorted by PID (then session_id)
         let state_guard = state.read().await;
@@ -523,11 +577,26 @@ async fn display_task(
             let row = format_row(
                 session_data.pid,
                 &session_data.dtrace_info,
-                session_data.last_job_id,
+                session_data.current_delta,
                 &display_fields,
                 is_stale,
             );
             write!(stdout, "{}", row)?;
+
+            // Render sparkline in remaining space
+            let row_len = row.chars().count();
+            if terminal_width > row_len as u16 {
+                let sparkline_width =
+                    (terminal_width as usize - row_len).saturating_sub(1);
+                if sparkline_width > 0 {
+                    let sparkline = render_sparkline(
+                        &session_data.delta_history,
+                        sparkline_width,
+                    );
+                    write!(stdout, " {}", sparkline)?;
+                }
+            }
+
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
             write!(stdout, "\r\n")?;
         }
