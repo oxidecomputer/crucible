@@ -22,9 +22,10 @@ use tokio::sync::{Notify, RwLock};
 
 const STALE_THRESHOLD_SECS: u64 = 10;
 
-/// Data for a single process
+/// Data for a single session
 #[derive(Debug, Clone)]
-struct ProcessData {
+struct SessionData {
+    pid: u32,
     dtrace_info: DtraceInfo,
     last_job_id: u64,
     last_updated: Instant,
@@ -33,7 +34,7 @@ struct ProcessData {
 /// Shared state between stdin reader and display tasks
 #[derive(Debug, Default)]
 struct CtopState {
-    processes: HashMap<u32, ProcessData>,
+    sessions: HashMap<String, SessionData>,
 }
 
 /// Default display fields (same as dtrace command defaults)
@@ -428,18 +429,21 @@ async fn subprocess_reader_task(
 
         // Update state
         let mut state_guard = state.write().await;
-        let process_data = state_guard
-            .processes
-            .entry(wrapper.pid)
-            .or_insert_with(|| ProcessData {
+
+        let session_data = state_guard
+            .sessions
+            .entry(wrapper.status.session_id.clone())
+            .or_insert_with(|| SessionData {
+                pid: wrapper.pid,
                 dtrace_info: wrapper.status.clone(),
                 last_job_id: 0,
                 last_updated: Instant::now(),
             });
 
-        process_data.last_job_id = process_data.dtrace_info.next_job_id.0;
-        process_data.dtrace_info = wrapper.status;
-        process_data.last_updated = Instant::now();
+        // Save the old job_id before updating
+        session_data.last_job_id = session_data.dtrace_info.next_job_id.0;
+        session_data.dtrace_info = wrapper.status;
+        session_data.last_updated = Instant::now();
 
         drop(state_guard);
 
@@ -501,26 +505,24 @@ async fn display_task(
         // Display column headers
         write!(stdout, "{}\r\n", format_header(&display_fields))?;
 
-        // Read state and display processes sorted by PID
+        // Read state and display sessions sorted by PID (then session_id)
         let state_guard = state.read().await;
-        let mut pids: Vec<u32> =
-            state_guard.processes.keys().copied().collect();
-        pids.sort_unstable();
+        let mut sessions: Vec<&SessionData> =
+            state_guard.sessions.values().collect();
+        sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
 
-        for pid in pids {
-            if let Some(process_data) = state_guard.processes.get(&pid) {
-                let is_stale = now.duration_since(process_data.last_updated)
-                    > Duration::from_secs(STALE_THRESHOLD_SECS);
+        for session_data in sessions {
+            let is_stale = now.duration_since(session_data.last_updated)
+                > Duration::from_secs(STALE_THRESHOLD_SECS);
 
-                let row = format_row(
-                    pid,
-                    &process_data.dtrace_info,
-                    process_data.last_job_id,
-                    &display_fields,
-                    is_stale,
-                );
-                write!(stdout, "{}\r\n", row)?;
-            }
+            let row = format_row(
+                session_data.pid,
+                &session_data.dtrace_info,
+                session_data.last_job_id,
+                &display_fields,
+                is_stale,
+            );
+            write!(stdout, "{}\r\n", row)?;
         }
         drop(state_guard);
 
