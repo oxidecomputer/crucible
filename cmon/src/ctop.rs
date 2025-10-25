@@ -47,6 +47,7 @@ struct CtopState {
     sessions: HashMap<String, SessionData>,
     selected_index: usize,
     detail_mode: bool,
+    normalize_detail: bool, // Use global min/max for detail view scaling
 }
 
 /// Default display fields (same as dtrace command defaults)
@@ -532,12 +533,16 @@ async fn subprocess_reader_task(
 fn render_detail_view(
     session_data: &SessionData,
     _terminal_size: (u16, u16),
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    global_min: Option<u64>,
+    global_max: Option<u64>,
+    normalize: bool,
 ) -> io::Result<()> {
     // Calculate statistics
     let history: Vec<u64> =
         session_data.delta_history.iter().copied().collect();
-    let max = history.iter().copied().max().unwrap_or(1);
-    let min = history.iter().copied().min().unwrap_or(0);
+    let session_max = history.iter().copied().max().unwrap_or(1);
+    let session_min = history.iter().copied().min().unwrap_or(0);
     let avg = if !history.is_empty() {
         history.iter().sum::<u64>() / history.len() as u64
     } else {
@@ -545,23 +550,27 @@ fn render_detail_view(
     };
     let current = session_data.current_delta.unwrap_or(0);
 
-    // Render using ratatui
-    let mut stdout = io::stdout();
-    let backend = CrosstermBackend::new(&mut stdout);
-    let mut terminal = Terminal::new(backend)?;
+    // Choose min/max based on normalize mode
+    let (display_min, display_max) = if normalize {
+        (
+            global_min.unwrap_or(session_min),
+            global_max.unwrap_or(session_max),
+        )
+    } else {
+        (session_min, session_max)
+    };
 
-    // Clear the screen to remove previous frame (ratatui handles this efficiently)
-    terminal.clear()?;
-
+    // Render using ratatui (terminal is reused, ratatui handles diffing)
     terminal.draw(|f| {
         let area = f.area();
 
         // Create title
         let session_short: String =
             session_data.dtrace_info.session_id.chars().take(8).collect();
+        let mode_str = if normalize { " [NORMALIZED]" } else { "" };
         let title = format!(
-            " Delta History - PID {} - Session {} ",
-            session_data.pid, session_short
+            " Delta History - PID {} - Session {}{} ",
+            session_data.pid, session_short, mode_str
         );
 
         // Create canvas widget
@@ -573,16 +582,40 @@ fn render_detail_view(
                     .title_bottom(format!(
                         " Samples: {} | Min: {} | Max: {} | Avg: {} | Current: {} ",
                         history.len(),
-                        min,
-                        max,
+                        session_min,
+                        session_max,
                         avg,
                         current
                     ))
-                    .title_bottom(" ['d': Back to table | 'q': Quit] "),
+                    .title_bottom(
+                        " ['d': Back | 'n': Toggle normalize | 'q': Quit] ",
+                    ),
             )
             .x_bounds([0.0, history.len().max(1) as f64])
-            .y_bounds([min as f64, max as f64])
+            .y_bounds([display_min as f64, display_max as f64])
             .paint(|ctx| {
+                // Draw Y-axis labels (at left edge of graph)
+                let y_range = display_max as f64 - display_min as f64;
+                let labels = [
+                    (display_max, "top"),
+                    (display_min + (y_range * 0.75) as u64, "3/4"),
+                    (display_min + (y_range * 0.5) as u64, "1/2"),
+                    (display_min + (y_range * 0.25) as u64, "1/4"),
+                    (display_min, "base"),
+                ];
+
+                for (y_val, label) in &labels {
+                    ctx.print(
+                        0.0,
+                        *y_val as f64,
+                        ratatui::text::Span::styled(
+                            format!("{}: {}", label, y_val),
+                            ratatui::style::Style::default()
+                                .fg(Color::Gray),
+                        ),
+                    );
+                }
+
                 // Draw the line graph
                 if history.len() > 1 {
                     for i in 0..history.len() - 1 {
@@ -636,15 +669,18 @@ async fn display_task(
 
     let display_fields = default_display_fields();
 
+    // Track detail mode and persistent terminal for detail view
+    let mut was_in_detail_mode = false;
+    let mut detail_terminal: Option<
+        Terminal<CrosstermBackend<io::Stdout>>,
+    > = None;
+
     loop {
         // Wait for notification or timeout
         tokio::select! {
             _ = notify.notified() => {},
             _ = tokio::time::sleep(Duration::from_millis(100)) => {},
         }
-
-        // Move cursor to top-left (don't clear entire screen)
-        execute!(stdout, cursor::MoveTo(0, 0))?;
 
         // Get current time
         let now = Instant::now();
@@ -660,22 +696,65 @@ async fn display_task(
         let state_guard = state.read().await;
         let in_detail_mode = state_guard.detail_mode;
         let selected_index = state_guard.selected_index;
+        let normalize_detail = state_guard.normalize_detail;
 
         // If in detail mode, render detail view and skip table
         if in_detail_mode {
+            // Create terminal on first entry to detail mode
+            if !was_in_detail_mode {
+                execute!(stdout, Clear(ClearType::All))?;
+                // Create a new stdout handle for the Terminal
+                let detail_stdout = io::stdout();
+                let backend = CrosstermBackend::new(detail_stdout);
+                detail_terminal = Some(Terminal::new(backend)?);
+            }
+
             let mut sessions: Vec<&SessionData> =
                 state_guard.sessions.values().collect();
             sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
+
+            // Calculate global min/max across all sessions for normalization
+            let global_min = sessions
+                .iter()
+                .flat_map(|s| s.delta_history.iter())
+                .copied()
+                .min();
+            let global_max = sessions
+                .iter()
+                .flat_map(|s| s.delta_history.iter())
+                .copied()
+                .max();
 
             if let Some(selected_session) = sessions.get(selected_index) {
                 // Clone the session data so we can drop the lock
                 let session_clone = (*selected_session).clone();
                 drop(state_guard);
-                render_detail_view(&session_clone, terminal_size)?;
+
+                if let Some(terminal) = detail_terminal.as_mut() {
+                    render_detail_view(
+                        &session_clone,
+                        terminal_size,
+                        terminal,
+                        global_min,
+                        global_max,
+                        normalize_detail,
+                    )?;
+                }
             } else {
                 drop(state_guard);
             }
+
+            was_in_detail_mode = true;
         } else {
+            // Exiting detail mode - drop terminal and redraw table
+            if was_in_detail_mode {
+                detail_terminal = None;
+                execute!(stdout, Clear(ClearType::All))?;
+            }
+            was_in_detail_mode = false;
+
+            // Move cursor to top-left
+            execute!(stdout, cursor::MoveTo(0, 0))?;
             // Table mode - render normal view
             drop(state_guard);
 
@@ -794,6 +873,15 @@ async fn display_task(
                     } => {
                         // Toggle detail mode
                         state_guard.detail_mode = !state_guard.detail_mode;
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char('n'),
+                        modifiers: KeyModifiers::NONE,
+                        ..
+                    } => {
+                        // Toggle normalize mode (only affects detail view)
+                        state_guard.normalize_detail =
+                            !state_guard.normalize_detail;
                     }
                     KeyEvent {
                         code: KeyCode::Up,
