@@ -155,7 +155,7 @@ fn format_header(dd: &[DtraceDisplay]) -> String {
                 result.push_str(&format!(" {:>4}", "EXTL"));
             }
             DtraceDisplay::NextJobId => {
-                result.push_str(&format!(" {:>10}", "NEXTJOB"));
+                result.push_str(&format!("  {:>10}", "NEXTJOB"));
             }
             DtraceDisplay::JobDelta => {
                 result.push_str(&format!(" {:>5}", "DELTA"));
