@@ -472,15 +472,14 @@ async fn subprocess_reader_task(
     state: Arc<RwLock<CtopState>>,
     notify: Arc<Notify>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse command string into command and args
-    let parts: Vec<&str> = dtrace_cmd.split_whitespace().collect();
-    if parts.is_empty() {
+    if dtrace_cmd.is_empty() {
         return Err("Empty dtrace command".into());
     }
 
-    // Spawn the dtrace subprocess
-    let mut child = Command::new(parts[0])
-        .args(&parts[1..])
+    // Execute the command through a shell to properly handle quoting
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(&dtrace_cmd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()?;
