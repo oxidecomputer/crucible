@@ -1,5 +1,8 @@
 // Copyright 2025 Oxide Computer Company
 
+//! Standalone ctop - curses-based top-like display of crucible dtrace data
+
+use clap::Parser;
 use cmon_common::{DtraceDisplay, DtraceWrapper, short_state};
 use crossterm::{
     cursor,
@@ -27,6 +30,19 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Notify, RwLock};
+
+/// Crucible top - monitor crucible upstairs via dtrace
+#[derive(Parser, Debug)]
+#[clap(name = "ctop", term_width = 80)]
+#[clap(about = "Curses-based crucible monitor", long_about = None)]
+struct Args {
+    /// Command to run to generate dtrace output
+    #[clap(
+        long,
+        default_value = "dtrace -s /opt/oxide/crucible_dtrace/upstairs_raw.d"
+    )]
+    dtrace_cmd: String,
+}
 
 const STALE_THRESHOLD_SECS: u64 = 10;
 const MAX_DELTA_HISTORY: usize = 100;
@@ -983,4 +999,15 @@ pub async fn ctop_loop(
         tokio::time::timeout(Duration::from_millis(100), reader_handle).await;
 
     display_result
+}
+
+/// Main entry point
+#[tokio::main]
+async fn main() {
+    let args = Args::parse();
+
+    if let Err(e) = ctop_loop(args.dtrace_cmd).await {
+        eprintln!("Error running ctop: {}", e);
+        std::process::exit(1);
+    }
 }

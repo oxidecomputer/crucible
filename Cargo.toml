@@ -8,8 +8,10 @@ members = [
     "common",
     "control-client",
     "cmon",
+    "cmon-common",
     "crudd",
     "crutest",
+    "ctop",
     "downstairs",
     "downstairs-api",
     "downstairs-types",
@@ -139,6 +141,7 @@ oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 
 # local path
+cmon-common = { path = "./cmon-common" }
 crucible = { path = "./upstairs" }
 crucible-agent-api = { path = "./agent-api" }
 crucible-agent-client = { path = "./agent-client" }

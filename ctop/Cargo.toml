@@ -1,21 +1,18 @@
 [package]
-name = "cmon"
+name = "ctop"
 version = "0.1.0"
 license = "MPL-2.0"
 edition = "2024"
 
 [dependencies]
 clap.workspace = true
-clearscreen.workspace = true
-cmon-common = { path = "../cmon-common", features = ["clap"] }
+cmon-common = { path = "../cmon-common" }
 crossterm.workspace = true
 crucible.workspace = true
-crucible-control-client.workspace = true
 crucible-protocol.workspace = true
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 strum.workspace = true
-strum_macros.workspace = true
 tokio.workspace = true
 crucible-workspace-hack.workspace = true

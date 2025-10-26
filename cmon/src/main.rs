@@ -1,23 +1,14 @@
 // Copyright 2022 Oxide Computer Company
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+use cmon_common::{DtraceDisplay, DtraceWrapper, short_state};
+use crucible::DtraceInfo;
 use crucible_control_client::Client;
 use crucible_protocol::ClientId;
-use serde::Deserialize;
-use std::fmt;
 use std::io::{self, BufRead};
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
-use tokio::time::{sleep, Duration};
-
-use crucible::DtraceInfo;
+use tokio::time::{Duration, sleep};
 
 mod ctop;
-
-#[derive(Debug, Deserialize)]
-pub struct DtraceWrapper {
-    pub pid: u32,
-    pub status: DtraceInfo,
-}
 
 /// Connect to crucible control server
 #[derive(Parser, Debug)]
@@ -34,71 +25,6 @@ struct Args {
     /// Seconds to wait between displaying data.
     #[clap(short, long, default_value = "5", action)]
     seconds: u64,
-}
-
-// The possible fields we will display when receiving DTrace output.
-#[derive(Debug, Copy, Clone, ValueEnum, EnumIter)]
-pub enum DtraceDisplay {
-    Pid,
-    Session,
-    UpstairsId,
-    State,
-    IoCount,
-    IoSummary,
-    UpCount,
-    DsCount,
-    Reconcile,
-    DsReconciled,
-    DsReconcileNeeded,
-    LiveRepair,
-    Connected,
-    Replaced,
-    ExtentLiveRepair,
-    ExtentLimit,
-    NextJobId,
-    JobDelta,
-    DsDelay,
-    WriteBytesOut,
-    RoLrSkipped,
-    // IOStateCount fields (already partially covered by IoCount/IoSummary)
-    DsIoInProgress,
-    DsIoDone,
-    DsIoSkipped,
-    DsIoError,
-}
-
-impl fmt::Display for DtraceDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            DtraceDisplay::Pid => write!(f, "pid"),
-            DtraceDisplay::Session => write!(f, "session"),
-            DtraceDisplay::UpstairsId => write!(f, "upstairs_id"),
-            DtraceDisplay::State => write!(f, "state"),
-            DtraceDisplay::IoCount => write!(f, "io_count"),
-            DtraceDisplay::IoSummary => write!(f, "io_summary"),
-            DtraceDisplay::UpCount => write!(f, "up_count"),
-            DtraceDisplay::DsCount => write!(f, "ds_count"),
-            DtraceDisplay::Reconcile => write!(f, "reconcile"),
-            DtraceDisplay::DsReconciled => write!(f, "ds_reconciled"),
-            DtraceDisplay::DsReconcileNeeded => {
-                write!(f, "ds_reconcile_needed")
-            }
-            DtraceDisplay::LiveRepair => write!(f, "live_repair"),
-            DtraceDisplay::Connected => write!(f, "connected"),
-            DtraceDisplay::Replaced => write!(f, "replaced"),
-            DtraceDisplay::ExtentLiveRepair => write!(f, "extent_live_repair"),
-            DtraceDisplay::ExtentLimit => write!(f, "extent_under_repair"),
-            DtraceDisplay::NextJobId => write!(f, "next_job_id"),
-            DtraceDisplay::JobDelta => write!(f, "job_delta"),
-            DtraceDisplay::DsDelay => write!(f, "ds_delay"),
-            DtraceDisplay::WriteBytesOut => write!(f, "write_bytes_out"),
-            DtraceDisplay::RoLrSkipped => write!(f, "ro_lr_skipped"),
-            DtraceDisplay::DsIoInProgress => write!(f, "ds_io_in_progress"),
-            DtraceDisplay::DsIoDone => write!(f, "ds_io_done"),
-            DtraceDisplay::DsIoSkipped => write!(f, "ds_io_skipped"),
-            DtraceDisplay::DsIoError => write!(f, "ds_io_error"),
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -125,28 +51,6 @@ enum Action {
         )]
         dtrace_cmd: String,
     },
-}
-
-/// Translate what the default DsState string is (that we are getting from DTrace)
-/// into a three letter string for printing.
-pub fn short_state(dss: &str) -> String {
-    match dss {
-        "Active" => "ACT".to_string(),
-        "WaitQuorum" => "WQ".to_string(),
-        "Reconcile" => "REC".to_string(),
-        "LiveRepairReady" => "LRR".to_string(),
-        "New" => "NEW".to_string(),
-        "Faulted" => "FLT".to_string(),
-        "Offline" => "OFL".to_string(),
-        "Replaced" => "RPL".to_string(),
-        "LiveRepair" => "LR".to_string(),
-        "Replacing" => "RPC".to_string(),
-        "Disabled" => "DIS".to_string(),
-        "Deactivated" => "DAV".to_string(),
-        "NegotiationFailed" => "NF".to_string(),
-        "Fault" => "FLT".to_string(),
-        x => x.to_string(),
-    }
 }
 
 // Show the downstairs work queue
