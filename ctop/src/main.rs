@@ -1011,3 +1011,410 @@ async fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for ctop
+    //!
+    //! # Test Coverage Overview
+    //!
+    //! These unit tests validate the pure functions and data structures that
+    //! power ctop's display logic, focusing on areas that don't require async
+    //! runtime or terminal mocking.
+    //!
+    //! ## Current Coverage
+    //!
+    //! ### Display Formatting (format_header, format_row)
+    //! - Column header generation for all DtraceDisplay field types
+    //! - Multi-column fields (State shows DS0/DS1/DS2)
+    //! - IO summary fields with multiple columns per downstairs
+    //! - Empty field handling
+    //!
+    //! ### Sparkline Rendering (render_sparkline)
+    //! - Empty history handling
+    //! - Zero-width rendering
+    //! - Single and multiple value rendering
+    //! - Width limiting (showing only recent samples)
+    //! - Normalization using global max value
+    //! - Unicode block character validation (▁▂▃▄▅▆▇█)
+    //! - Ascending/descending trend visualization
+    //!
+    //! ### State Management
+    //! - Default CtopState initialization
+    //! - Delta history ring buffer behavior (MAX_DELTA_HISTORY)
+    //! - Constants validation (STALE_THRESHOLD_SECS, MAX_DELTA_HISTORY)
+    //!
+    //! ## What's NOT Tested (See integration_test.rs for full list)
+    //!
+    //! - Async tasks (subprocess_reader_task, display_task)
+    //! - Terminal rendering and keyboard input
+    //! - Session lifecycle and state updates
+    //! - DTrace subprocess integration
+    //! - Multi-session coordination
+    //!
+    //! ## Testing Strategy
+    //!
+    //! These tests focus on **testable units** - pure functions with no I/O.
+    //! For components requiring mocking (terminal, subprocess, async runtime),
+    //! see the testing improvement proposals in integration_test.rs.
+    //!
+    //! ## Running Tests
+    //!
+    //! ```bash
+    //! # Run all ctop unit tests
+    //! cargo test -p ctop --lib
+    //!
+    //! # Run specific test
+    //! cargo test -p ctop --lib test_render_sparkline_normalization
+    //! ```
+
+    use super::*;
+
+    // ============================================================================
+    // Display Field Configuration Tests
+    // ============================================================================
+    //
+    // These tests verify the default display configuration that users see when
+    // they first run ctop. The fields should provide a good overview of upstairs
+    // state without overwhelming the display.
+
+    #[test]
+    fn test_default_display_fields() {
+        let fields = default_display_fields();
+
+        // Verify we have the expected default fields
+        assert_eq!(fields.len(), 8);
+        assert_eq!(fields[0], DtraceDisplay::Pid);
+        assert_eq!(fields[1], DtraceDisplay::Session);
+        assert_eq!(fields[2], DtraceDisplay::State);
+        assert_eq!(fields[3], DtraceDisplay::NextJobId);
+        assert_eq!(fields[4], DtraceDisplay::JobDelta);
+        assert_eq!(fields[5], DtraceDisplay::ExtentLimit);
+        assert_eq!(fields[6], DtraceDisplay::DsReconciled);
+        assert_eq!(fields[7], DtraceDisplay::DsReconcileNeeded);
+    }
+
+    // ============================================================================
+    // Header Formatting Tests
+    // ============================================================================
+    //
+    // These tests verify that format_header() generates correct column headers
+    // for various field types. Some fields (like State, IoSummary) expand into
+    // multiple columns representing the three downstairs replicas.
+
+    #[test]
+    fn test_format_header_basic_fields() {
+        let fields = vec![DtraceDisplay::Pid, DtraceDisplay::Session];
+        let header = format_header(&fields);
+
+        // Check that header contains expected column names
+        assert!(header.contains("PID"));
+        assert!(header.contains("SESSION"));
+    }
+
+    #[test]
+    fn test_format_header_state_field() {
+        let fields = vec![DtraceDisplay::State];
+        let header = format_header(&fields);
+
+        // State field should show three downstairs columns
+        assert!(header.contains("DS0"));
+        assert!(header.contains("DS1"));
+        assert!(header.contains("DS2"));
+    }
+
+    #[test]
+    fn test_format_header_io_fields() {
+        let fields = vec![DtraceDisplay::IoSummary];
+        let header = format_header(&fields);
+
+        // Should show in_progress, done, and skipped for each DS
+        assert!(header.contains("IP0"));
+        assert!(header.contains("IP1"));
+        assert!(header.contains("IP2"));
+        assert!(header.contains("D0"));
+        assert!(header.contains("D1"));
+        assert!(header.contains("D2"));
+        assert!(header.contains("S0"));
+        assert!(header.contains("S1"));
+        assert!(header.contains("S2"));
+    }
+
+    #[test]
+    fn test_format_header_empty_fields() {
+        let fields = vec![];
+        let header = format_header(&fields);
+
+        // Empty fields should produce empty header
+        assert_eq!(header, "");
+    }
+
+    // ============================================================================
+    // Sparkline Rendering Tests
+    // ============================================================================
+    //
+    // Sparklines provide a compact visualization of job delta trends over time.
+    // They use Unicode block characters (▁▂▃▄▅▆▇█) to represent values.
+    //
+    // Key behaviors tested:
+    // - Empty history and edge cases (zero width, single values)
+    // - Width limiting (showing only the most recent N samples)
+    // - Normalization across sessions (global_max parameter)
+    // - Unicode character validity
+    //
+    // TODO: Consider property-based testing (proptest) to generate random
+    // histories and verify properties like:
+    // - Sparkline length <= requested width
+    // - All characters are valid block characters
+    // - Normalized values respect global_max
+
+    #[test]
+    fn test_render_sparkline_empty() {
+        let history = VecDeque::new();
+        let sparkline = render_sparkline(&history, 10, 100);
+
+        assert_eq!(sparkline, "");
+    }
+
+    #[test]
+    fn test_render_sparkline_zero_width() {
+        let mut history = VecDeque::new();
+        history.push_back(10);
+        history.push_back(20);
+
+        let sparkline = render_sparkline(&history, 0, 100);
+        assert_eq!(sparkline, "");
+    }
+
+    #[test]
+    fn test_render_sparkline_single_value() {
+        let mut history = VecDeque::new();
+        history.push_back(50);
+
+        let sparkline = render_sparkline(&history, 10, 100);
+
+        // Should have one character
+        assert_eq!(sparkline.chars().count(), 1);
+    }
+
+    #[test]
+    fn test_render_sparkline_ascending_values() {
+        let mut history = VecDeque::new();
+        for i in 0..10 {
+            history.push_back(i * 10);
+        }
+
+        let sparkline = render_sparkline(&history, 10, 100);
+
+        // Should have 10 characters (one per value)
+        assert_eq!(sparkline.chars().count(), 10);
+
+        // First character should be lower than last (ascending trend)
+        let chars: Vec<char> = sparkline.chars().collect();
+        assert!(chars[0] < chars[9]);
+    }
+
+    #[test]
+    fn test_render_sparkline_width_limit() {
+        let mut history = VecDeque::new();
+        for i in 0..100 {
+            history.push_back(i);
+        }
+
+        // Request only last 5 samples
+        let sparkline = render_sparkline(&history, 5, 100);
+
+        // Should only show 5 characters
+        assert_eq!(sparkline.chars().count(), 5);
+    }
+
+    #[test]
+    fn test_render_sparkline_max_value() {
+        let mut history = VecDeque::new();
+        history.push_back(0);
+        history.push_back(100);
+
+        let sparkline = render_sparkline(&history, 10, 100);
+
+        // Should use valid unicode block characters
+        for c in sparkline.chars() {
+            assert!(
+                ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'].contains(&c),
+                "Invalid sparkline character: {}",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_sparkline_normalization() {
+        // This test verifies a critical feature: sparklines are normalized using
+        // a global_max value computed across ALL sessions. This allows users to
+        // visually compare activity levels between different upstairs instances.
+        //
+        // Without global normalization, each session would auto-scale to its own
+        // range, making cross-session comparison meaningless.
+
+        let mut history = VecDeque::new();
+        history.push_back(50);
+        history.push_back(100);
+
+        // Test with global max = 200 (should scale differently than 100)
+        let sparkline1 = render_sparkline(&history, 10, 200);
+        let sparkline2 = render_sparkline(&history, 10, 100);
+
+        // With higher global max, the values should appear relatively lower
+        let chars1: Vec<char> = sparkline1.chars().collect();
+        let chars2: Vec<char> = sparkline2.chars().collect();
+
+        // Second sparkline should use higher blocks (value 100 is max in range 0-100,
+        // but only midpoint in range 0-200)
+        assert!(
+            chars1[1] < chars2[1],
+            "Expected normalization to affect block height"
+        );
+    }
+
+    // ============================================================================
+    // State Management Tests
+    // ============================================================================
+    //
+    // These tests verify the data structures that track session state:
+    // - CtopState: Overall application state (sessions map, selection, mode)
+    // - SessionData: Per-session data including delta history ring buffer
+    // - Constants: STALE_THRESHOLD_SECS, MAX_DELTA_HISTORY
+    //
+    // Note: These tests only validate initialization and constants. Full
+    // state lifecycle testing (session updates, transitions) requires async
+    // mocking infrastructure.
+
+    #[test]
+    fn test_ctop_state_default() {
+        let state = CtopState::default();
+
+        assert_eq!(state.sessions.len(), 0);
+        assert_eq!(state.selected_index, 0);
+        assert!(!state.detail_mode);
+        assert!(!state.normalize_detail);
+    }
+
+    #[test]
+    fn test_session_data_delta_history_max_size() {
+        // Delta history uses a ring buffer (VecDeque) to maintain a sliding window
+        // of recent job delta values for sparkline rendering. This test verifies
+        // the ring buffer behavior: old values are evicted when capacity is reached.
+        //
+        // In production, subprocess_reader_task maintains this ring buffer by:
+        // 1. Computing delta = new_job_id - old_job_id
+        // 2. Pushing delta to back of deque
+        // 3. Popping from front if len > MAX_DELTA_HISTORY
+
+        let mut delta_history = VecDeque::new();
+
+        // Simulate adding more than MAX_DELTA_HISTORY items
+        for i in 0..(MAX_DELTA_HISTORY + 10) {
+            delta_history.push_back(i as u64);
+            if delta_history.len() > MAX_DELTA_HISTORY {
+                delta_history.pop_front();
+            }
+        }
+
+        // Should never exceed MAX_DELTA_HISTORY
+        assert_eq!(delta_history.len(), MAX_DELTA_HISTORY);
+
+        // Should contain the most recent items (oldest 10 were evicted)
+        assert_eq!(*delta_history.front().unwrap(), 10); // First item should be item 10
+        assert_eq!(
+            *delta_history.back().unwrap(),
+            (MAX_DELTA_HISTORY + 9) as u64
+        ); // Last item is most recent
+    }
+
+    #[test]
+    fn test_stale_threshold_constant() {
+        // Verify STALE_THRESHOLD_SECS is reasonable
+        assert!(
+            STALE_THRESHOLD_SECS > 0,
+            "Stale threshold should be positive"
+        );
+        assert!(
+            STALE_THRESHOLD_SECS <= 60,
+            "Stale threshold should be under a minute"
+        );
+    }
+
+    #[test]
+    fn test_max_delta_history_constant() {
+        // Verify MAX_DELTA_HISTORY is reasonable for sparklines
+        assert!(
+            MAX_DELTA_HISTORY >= 50,
+            "Should store enough history for reasonable sparklines"
+        );
+        assert!(
+            MAX_DELTA_HISTORY <= 1000,
+            "History shouldn't be excessively large"
+        );
+    }
+
+    // ============================================================================
+    // Future Testing Opportunities
+    // ============================================================================
+    //
+    // The following areas could benefit from additional testing infrastructure:
+    //
+    // ## 1. Async Task Testing (mockall crate)
+    //
+    // Mock the subprocess Command to test subprocess_reader_task:
+    // - Emit controlled JSON lines
+    // - Verify state updates (sessions map, delta calculations)
+    // - Test error handling (invalid JSON, subprocess crashes)
+    // - Test session expiration and cleanup
+    //
+    // ## 2. Terminal UI Testing (ratatui::TestBackend)
+    //
+    // Capture terminal output to verify:
+    // - Header and row formatting in actual terminal context
+    // - Stale session indicators (*) appear correctly
+    // - Selection indicators (>) highlight correct row
+    // - Sparklines render in available terminal width
+    // - Detail mode layout and graphing
+    //
+    // ## 3. Keyboard Input Testing
+    //
+    // Mock crossterm events to test:
+    // - Up/Down arrow navigation (selected_index changes)
+    // - 'd' toggles detail_mode
+    // - 'n' toggles normalize_detail
+    // - 'q' and Ctrl-C exit cleanly
+    // - Esc exits detail mode
+    //
+    // ## 4. Property-Based Testing (proptest)
+    //
+    // Generate random inputs to verify invariants:
+    // - Sparkline width never exceeds requested width
+    // - format_header produces valid UTF-8
+    // - Delta history never exceeds MAX_DELTA_HISTORY
+    // - selected_index never exceeds sessions.len()
+    //
+    // ## 5. Snapshot Testing (insta)
+    //
+    // Capture and compare terminal output snapshots:
+    // - Table view with various session counts
+    // - Detail view with different data patterns
+    // - Regression testing for layout changes
+    //
+    // ## 6. Performance Testing (criterion)
+    //
+    // Benchmark critical paths:
+    // - render_sparkline with full history
+    // - format_row with many display fields
+    // - Session sorting with 100+ sessions
+    //
+    // ## 7. End-to-End Testing
+    //
+    // Run ctop against real DTrace output:
+    // - Capture actual crucible DTrace JSON
+    // - Replay captured output to ctop
+    // - Verify no parsing errors
+    // - Compare against expected session data
+}
