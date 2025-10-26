@@ -6,7 +6,7 @@ use std::fmt;
 use std::io::{self, BufRead};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 use crucible::DtraceInfo;
 

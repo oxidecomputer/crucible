@@ -1,6 +1,6 @@
 // Copyright 2024 Oxide Computer Company
 use super::datafile::DataFile;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use crucible_agent_api::*;
 use crucible_agent_types::{region, snapshot};
 use dropshot::{
@@ -8,7 +8,7 @@ use dropshot::{
     HttpResponseDeleted, HttpResponseOk, Path as TypedPath, RequestContext,
     TypedBody, VersionPolicy,
 };
-use slog::{o, Logger};
+use slog::{Logger, o};
 use std::net::SocketAddr;
 use std::result::Result as SResult;
 use std::sync::Arc;

@@ -1,12 +1,12 @@
 // Copyright 2021 Oxide Computer Company
 use std::net::SocketAddr;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use crucible::*;
 
-use nbd::server::{handshake, transmission, Export};
+use nbd::server::{Export, handshake, transmission};
 use std::net::{TcpListener, TcpStream as NetTcpStream};
 
 /*
@@ -38,7 +38,7 @@ pub struct Opt {
     key: Option<String>,
 
     #[clap(short, long, default_value = "0", action)]
-    gen: u64,
+    generation: u64,
 
     // TLS options
     #[clap(long, action)]
@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
      */
     let (guest, io) = Guest::new(None);
 
-    let _join_handle = up_main(crucible_opts, opt.gen, None, io, None)?;
+    let _join_handle = up_main(crucible_opts, opt.generation, None, io, None)?;
     println!("Crucible runtime is spawned");
 
     // NBD server

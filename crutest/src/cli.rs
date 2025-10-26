@@ -93,7 +93,7 @@ enum CliCommand {
     Activate {
         /// Specify this generation number to use when requesting activation.
         #[clap(long, short, default_value = "1", action)]
-        gen: u64,
+        generation: u64,
     },
     /// Send an activation message and don't wait for an answer.
     ///
@@ -102,7 +102,7 @@ enum CliCommand {
     ActivateRequest {
         /// Specify this generation number to use when requesting activation.
         #[clap(long, short, default_value = "1", action)]
-        gen: u64,
+        generation: u64,
     },
     /// Commit the current write_log data to the minimum expected counts.
     Commit,
@@ -466,11 +466,11 @@ async fn cmd_to_msg(
     dsc_client: &mut Option<dsc_client::Client>,
 ) -> Result<()> {
     match cmd {
-        CliCommand::Activate { gen } => {
-            fw.send(CliMessage::Activate(gen)).await?;
+        CliCommand::Activate { generation } => {
+            fw.send(CliMessage::Activate(generation)).await?;
         }
-        CliCommand::ActivateRequest { gen } => {
-            fw.send(CliMessage::ActivateRequest(gen)).await?;
+        CliCommand::ActivateRequest { generation } => {
+            fw.send(CliMessage::ActivateRequest(generation)).await?;
         }
         CliCommand::Commit => {
             fw.send(CliMessage::Commit).await?;
@@ -742,16 +742,16 @@ async fn process_cli_command(
     verify_output: Option<PathBuf>,
 ) -> Result<()> {
     match cmd {
-        CliMessage::Activate(gen) => {
-            match volume.activate_with_gen(gen).await {
+        CliMessage::Activate(generation) => {
+            match volume.activate_with_gen(generation).await {
                 Ok(_) => fw.send(CliMessage::DoneOk).await,
                 Err(e) => fw.send(CliMessage::Error(e)).await,
             }
         }
-        CliMessage::ActivateRequest(gen) => {
+        CliMessage::ActivateRequest(generation) => {
             let gc = volume.clone();
             let _handle = tokio::spawn(async move {
-                match gc.activate_with_gen(gen).await {
+                match gc.activate_with_gen(generation).await {
                     Ok(_) => {
                         println!("Activate Successful");
                     }
@@ -901,12 +901,9 @@ async fn process_cli_command(
                      * seems like once we go active we won't need to run
                      * it again.
                      */
-                    if !*wc_filled {
-                        if let Some(vi) = verify_input {
-                            load_write_log(volume, &mut new_di, vi, false)
-                                .await?;
-                            *wc_filled = true;
-                        }
+                    if !*wc_filled && let Some(vi) = verify_input {
+                        load_write_log(volume, &mut new_di, vi, false).await?;
+                        *wc_filled = true;
                     }
                     *di_option = Some(new_di.clone());
                     fw.send(CliMessage::Info(new_di.volume_info)).await
