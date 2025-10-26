@@ -31,16 +31,24 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Notify, RwLock};
 
+/// Default dtrace command - embedded one-liner that matches upstairs_raw.d
+///
+/// This command:
+/// - Uses -Z to continue even if no probes match
+/// - Uses -q for quiet mode (no dtrace header)
+/// - Sets strsize=2k for 2KB string buffers
+/// - Probes crucible_upstairs*:::up-status
+/// - Outputs JSON with pid and status
+const DEFAULT_DTRACE_CMD: &str =
+    r#"dtrace -Z -q -x strsize=2k -n 'crucible_upstairs*:::up-status { printf("{\"pid\":%d,\"status\":%s}\n", pid, json(copyinstr(arg1), "ok")); }'"#;
+
 /// Crucible top - monitor crucible upstairs via dtrace
 #[derive(Parser, Debug)]
 #[clap(name = "ctop", term_width = 80)]
 #[clap(about = "Curses-based crucible monitor", long_about = None)]
 struct Args {
     /// Command to run to generate dtrace output
-    #[clap(
-        long,
-        default_value = "dtrace -s /opt/oxide/crucible_dtrace/upstairs_raw.d"
-    )]
+    #[clap(long, default_value = DEFAULT_DTRACE_CMD)]
     dtrace_cmd: String,
 }
 

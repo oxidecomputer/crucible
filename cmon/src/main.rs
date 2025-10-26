@@ -8,8 +8,6 @@ use std::io::{self, BufRead};
 use strum::IntoEnumIterator;
 use tokio::time::{Duration, sleep};
 
-mod ctop;
-
 /// Connect to crucible control server
 #[derive(Parser, Debug)]
 #[clap(name = "cmon", term_width = 80)]
@@ -42,15 +40,6 @@ enum Action {
     Jobs,
     /// Show the status of various LiveRepair stats
     Repair,
-    /// Curses-based top-like display of dtrace data
-    Ctop {
-        /// Command to run to generate dtrace output
-        #[clap(
-            long,
-            default_value = "dtrace -s /opt/oxide/crucible_dtrace/upstairs_raw.d"
-        )]
-        dtrace_cmd: String,
-    },
 }
 
 // Show the downstairs work queue
@@ -478,11 +467,6 @@ async fn main() {
         }
         Action::Repair => {
             show_repair_stats(args).await;
-        }
-        Action::Ctop { dtrace_cmd } => {
-            if let Err(e) = ctop::ctop_loop(dtrace_cmd).await {
-                eprintln!("Error running ctop: {}", e);
-            }
         }
     }
 }
