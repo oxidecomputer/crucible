@@ -1,26 +1,28 @@
 #!/bin/bash
 #
-# Build a tar archive with selected DTrace scripts.
+# Build a tar archive with selected DTrace scripts and other utilities
+# deemed useful to contain on the sled.
 # This archive is used to install DTrace scripts on the global zone of each
 # sled.  As such, the scripts here should match the probes that exist for
 # any consumer of the upstairs, like propolis, the pantry, or crucible agent.
 set -eux
 
-rm -f out/crucible-dtrace.tar 2> /dev/null
+rm -f out/crucible-utils.tar 2> /dev/null
 
 mkdir -p out
 
 
-echo "$(date) Create DTrace archive on $(hostname)" > /tmp/dtrace-info.txt
-echo "git log -1:" >> dtrace-info.txt
-git log -1 >> dtrace-info.txt
-echo "git status:" >> dtrace-info.txt
-git status >> dtrace-info.txt
-mv dtrace-info.txt tools/dtrace
+echo "$(date) Create tools archive on $(hostname)" > utils-info.txt
+echo "git log -1:" >> utils-info.txt
+git log -1 >> utils-info.txt
+echo "git status:" >> utils-info.txt
+git status >> utils-info.txt
+mv utils-info.txt tools/dtrace
 
+# Add all the DTrace scripts and tools
 pushd tools/dtrace
-tar cvf ../../out/crucible-dtrace.tar \
-    dtrace-info.txt \
+tar cvf ../../out/crucible-utils.tar \
+    utils-info.txt \
     README.md \
     all_downstairs.d \
     downstairs_count.d \
@@ -52,6 +54,13 @@ tar cvf ../../out/crucible-dtrace.tar \
     upstairs_raw.d \
     upstairs_repair.d
 
-rm dtrace-info.txt
+rm utils-info.txt
 popd
-ls -l out/crucible-dtrace.tar
+
+# Add crucible-verify-raw
+pushd target/release
+tar -rf ../../out/crucible-utils.tar \
+    crucible-verify-raw
+popd
+
+ls -l out/crucible-utils.tar
