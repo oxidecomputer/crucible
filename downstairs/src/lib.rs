@@ -54,6 +54,8 @@ use region::Region;
 pub use admin::run_dropshot;
 pub use dump::{dump_region, extent_info, verify_region};
 pub use dynamometer::*;
+pub use extent::extent_path;
+pub use extent::Extent;
 pub use stats::{DsCountStat, DsStatOuter};
 
 /// Single IO operation
