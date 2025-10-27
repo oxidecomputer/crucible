@@ -38,7 +38,7 @@ struct OnDiskDownstairsBlockContext {
 ///
 /// This must be large enough to fit an `Option<OnDiskDownstairsBlockContext>`
 /// serialized using `bincode`.
-const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
+pub const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
 
 /// Number of extra syscalls per read / write that triggers defragmentation
 const DEFRAGMENT_THRESHOLD: u64 = 3;
@@ -238,7 +238,7 @@ impl std::ops::Index<u64> for ActiveContextSlots {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum ContextSlot {
+pub enum ContextSlot {
     A,
     B,
 }
@@ -1346,7 +1346,7 @@ impl RawInner {
 }
 
 /// Data structure that implements the on-disk layout of a raw extent file
-struct RawLayout {
+pub struct RawLayout {
     extent_size: Block,
 }
 
@@ -1359,7 +1359,7 @@ impl std::fmt::Debug for RawLayout {
 }
 
 impl RawLayout {
-    fn new(extent_size: Block) -> Self {
+    pub fn new(extent_size: Block) -> Self {
         RawLayout { extent_size }
     }
 
@@ -1379,7 +1379,7 @@ impl RawLayout {
     /// Returns the total size of the raw data file
     ///
     /// This includes block data, context slots, active slot array, and metadata
-    fn file_size(&self) -> u64 {
+    pub fn file_size(&self) -> u64 {
         let block_count = self.block_count();
         self.block_size().checked_mul(block_count).unwrap()
             + BLOCK_META_SIZE_BYTES
@@ -1388,7 +1388,7 @@ impl RawLayout {
     }
 
     /// Returns the beginning of supplementary data in the file
-    fn supplementary_data_offset(&self) -> u64 {
+    pub fn supplementary_data_offset(&self) -> u64 {
         self.block_count() * self.block_size()
     }
 
@@ -1398,33 +1398,33 @@ impl RawLayout {
     /// are two context slots arrays, each of which contains one context slot
     /// per block.  We use a ping-pong strategy to ensure that one of them is
     /// always valid (i.e. matching the data in the file).
-    fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
+    pub fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
         self.supplementary_data_offset()
             + (self.block_count() * slot as u64 + block)
                 * BLOCK_CONTEXT_SLOT_SIZE_BYTES
     }
 
     /// Number of blocks in the extent file
-    fn block_count(&self) -> u64 {
+    pub fn block_count(&self) -> u64 {
         self.extent_size.value
     }
 
     /// Returns the byte offset of the `active_context` bitpacked array
-    fn active_context_offset(&self) -> u64 {
+    pub fn active_context_offset(&self) -> u64 {
         self.supplementary_data_offset()
             + self.block_count() * 2 * BLOCK_CONTEXT_SLOT_SIZE_BYTES
     }
 
-    fn active_context_size(&self) -> u64 {
+    pub fn active_context_size(&self) -> u64 {
         self.block_count().div_ceil(8)
     }
 
-    fn metadata_offset(&self) -> u64 {
+    pub fn metadata_offset(&self) -> u64 {
         self.active_context_offset() + self.active_context_size()
     }
 
     /// Number of bytes in each block
-    fn block_size(&self) -> u64 {
+    pub fn block_size(&self) -> u64 {
         self.extent_size.block_size_in_bytes() as u64
     }
 
