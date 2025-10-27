@@ -10,14 +10,13 @@ use crate::{
     },
     integrity_hash, mkdir_for_file,
     region::JobOrReconciliationId,
-    Block, BlockContext, CrucibleError, ExtentReadRequest, ExtentReadResponse,
-    ExtentWrite, JobId, RegionDefinition,
+    Block, CrucibleError, ExtentReadRequest, ExtentReadResponse, ExtentWrite,
+    JobId, RegionDefinition,
 };
 use crucible_common::ExtentId;
 use crucible_protocol::ReadBlockContext;
 
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
 use slog::{error, Logger};
 
 use std::collections::HashSet;
@@ -26,19 +25,10 @@ use std::io::{BufReader, Read};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 
-/// Equivalent to `DownstairsBlockContext`, but without one's own block number
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct OnDiskDownstairsBlockContext {
-    block_context: BlockContext,
-    on_disk_hash: u64,
-    flush_id: u16,
-}
-
-/// Size of backup data
-///
-/// This must be large enough to fit an `Option<OnDiskDownstairsBlockContext>`
-/// serialized using `bincode`.
-pub const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
+// Re-exports
+pub use crucible_raw_extent::{
+    OnDiskDownstairsBlockContext, BLOCK_CONTEXT_SLOT_SIZE_BYTES,
+};
 
 /// Number of extra syscalls per read / write that triggers defragmentation
 const DEFRAGMENT_THRESHOLD: u64 = 3;
@@ -1609,7 +1599,7 @@ mod test {
     use anyhow::Result;
     use bytes::{Bytes, BytesMut};
     use crucible_common::BlockOffset;
-    use crucible_protocol::EncryptionContext;
+    use crucible_protocol::{BlockContext, EncryptionContext};
     use tempfile::tempdir;
 
     const IOV_MAX_TEST: usize = 1000;
