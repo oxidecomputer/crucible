@@ -6,7 +6,6 @@ use std::fs::File;
 use anyhow::{anyhow, bail, Result};
 use nix::unistd::{sysconf, SysconfVar};
 
-use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::region::JobOrReconciliationId;
@@ -135,7 +134,7 @@ pub enum ExtentState {
     Closed,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug)]
 pub struct ExtentMeta {
     /**
      * Version information regarding the extent structure.
@@ -471,7 +470,8 @@ impl Extent {
                 Box::new(inner)
             } else {
                 match extent_inner_raw_common::OnDiskMeta::get_version_tag(
-                    dir, number,
+                    &extent_path(dir, number),
+                    number,
                 )? {
                     EXTENT_META_RAW => {
                         Box::new(extent_inner_raw::RawInner::open(
