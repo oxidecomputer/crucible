@@ -805,7 +805,7 @@ async fn display_task(
             execute!(stdout, cursor::MoveTo(0, 0))?;
             write!(
                 stdout,
-                "cmon ctop - Unix timestamp: {}",
+                "ctop - Unix timestamp: {}",
                 duration.as_secs()
             )?;
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
