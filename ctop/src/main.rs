@@ -39,8 +39,7 @@ use tokio::sync::{Notify, RwLock};
 /// - Sets strsize=2k for 2KB string buffers
 /// - Probes crucible_upstairs*:::up-status
 /// - Outputs JSON with pid and status
-const DEFAULT_DTRACE_CMD: &str =
-    r#"dtrace -Z -q -x strsize=2k -n 'crucible_upstairs*:::up-status { printf("{\"pid\":%d,\"status\":%s}\n", pid, json(copyinstr(arg1), "ok")); }'"#;
+const DEFAULT_DTRACE_CMD: &str = r#"dtrace -Z -q -x strsize=2k -n 'crucible_upstairs*:::up-status { printf("{\"pid\":%d,\"status\":%s}\n", pid, json(copyinstr(arg1), "ok")); }'"#;
 
 /// Crucible top - monitor crucible upstairs via dtrace
 #[derive(Parser, Debug)]
@@ -53,6 +52,7 @@ struct Args {
 }
 
 const STALE_THRESHOLD_SECS: u64 = 10;
+const REMOVE_THRESHOLD_SECS: u64 = 60;
 const MAX_DELTA_HISTORY: usize = 100;
 
 /// Data for a single session
@@ -71,6 +71,7 @@ struct SessionData {
 struct CtopState {
     sessions: HashMap<String, SessionData>,
     selected_index: usize,
+    scroll_offset: usize,
     detail_mode: bool,
     normalize_detail: bool, // Use global min/max for detail view scaling
 }
@@ -735,6 +736,32 @@ async fn display_task(
         // Get terminal size
         let terminal_size = crossterm::terminal::size()?;
 
+        // Clean up sessions that haven't been updated in REMOVE_THRESHOLD_SECS
+        {
+            let mut state_guard = state.write().await;
+            let sessions_before = state_guard.sessions.len();
+
+            state_guard.sessions.retain(|_, session_data| {
+                now.duration_since(session_data.last_updated)
+                    <= Duration::from_secs(REMOVE_THRESHOLD_SECS)
+            });
+
+            let sessions_after = state_guard.sessions.len();
+
+            // Adjust selected_index if sessions were removed
+            if sessions_after < sessions_before && sessions_after > 0 {
+                state_guard.selected_index =
+                    state_guard.selected_index.min(sessions_after - 1);
+                state_guard.scroll_offset =
+                    state_guard.scroll_offset.min(sessions_after - 1);
+            } else if sessions_after == 0 {
+                state_guard.selected_index = 0;
+                state_guard.scroll_offset = 0;
+            }
+
+            drop(state_guard);
+        }
+
         // Read state to check mode
         let state_guard = state.read().await;
         let in_detail_mode = state_guard.detail_mode;
@@ -803,11 +830,7 @@ async fn display_task(
 
             // Display header (clear line first to remove artifacts)
             execute!(stdout, cursor::MoveTo(0, 0))?;
-            write!(
-                stdout,
-                "ctop - Unix timestamp: {}",
-                duration.as_secs()
-            )?;
+            write!(stdout, "ctop - Unix timestamp: {}", duration.as_secs())?;
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
             write!(stdout, "\r\n")?;
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
@@ -818,7 +841,7 @@ async fn display_task(
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
             write!(stdout, "\r\n")?;
 
-            let (terminal_width, _) = terminal_size;
+            let (terminal_width, terminal_height) = terminal_size;
 
             // Read state and display sessions sorted by PID (then session_id)
             let state_guard = state.read().await;
@@ -836,8 +859,42 @@ async fn display_task(
                 .unwrap_or(1);
 
             let selected_index = state_guard.selected_index;
+            let scroll_offset = state_guard.scroll_offset;
 
-            for (idx, session_data) in sessions.iter().enumerate() {
+            // Calculate visible window
+            // Terminal layout: 1 header + 1 blank + 1 column headers + sessions + 1 blank + 1 footer
+            // Plus optional scroll indicators (1 line each if present)
+            let total_sessions = sessions.len();
+            let has_more_above = scroll_offset > 0;
+            let has_more_below_tentative = scroll_offset + 1 < total_sessions;
+
+            let fixed_lines = 5
+                + if has_more_above { 1 } else { 0 }
+                + if has_more_below_tentative { 1 } else { 0 };
+
+            let visible_rows = if terminal_height > fixed_lines as u16 {
+                (terminal_height - fixed_lines as u16) as usize
+            } else {
+                1 // Minimum of 1 row to avoid crashes
+            };
+
+            let scroll_end = (scroll_offset + visible_rows).min(total_sessions);
+            let has_more_below = scroll_end < total_sessions;
+
+            // Display scroll indicator if there are sessions above
+            if has_more_above {
+                write!(stdout, "  ↑ More above")?;
+                execute!(stdout, Clear(ClearType::UntilNewLine))?;
+                write!(stdout, "\r\n")?;
+            }
+
+            // Display visible sessions
+            for (idx, session_data) in sessions
+                .iter()
+                .enumerate()
+                .skip(scroll_offset)
+                .take(visible_rows)
+            {
                 let is_stale = now.duration_since(session_data.last_updated)
                     > Duration::from_secs(STALE_THRESHOLD_SECS);
 
@@ -880,6 +937,15 @@ async fn display_task(
                 execute!(stdout, Clear(ClearType::UntilNewLine))?;
                 write!(stdout, "\r\n")?;
             }
+
+            // Display scroll indicator if there are sessions below
+            if has_more_below {
+                let num_more = total_sessions - scroll_end;
+                write!(stdout, "  ↓ More below ({} more)", num_more)?;
+                execute!(stdout, Clear(ClearType::UntilNewLine))?;
+                write!(stdout, "\r\n")?;
+            }
+
             drop(state_guard);
 
             // Display footer
@@ -887,8 +953,8 @@ async fn display_task(
             write!(stdout, "\r\n")?;
             write!(
                 stdout,
-                "[↑↓: Select | 'd': Details | 'q': Quit] > = selected, * = stale ({}s)",
-                STALE_THRESHOLD_SECS
+                "[↑↓/PgUp/PgDn: Navigate | 'd': Details | 'q': Quit] > = selected, * = stale ({}s, removed at {}s)",
+                STALE_THRESHOLD_SECS, REMOVE_THRESHOLD_SECS
             )?;
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
             write!(stdout, "\r\n")?;
@@ -940,9 +1006,19 @@ async fn display_task(
                     ..
                 } => {
                     // Move selection up (only in table mode)
-                    if !state_guard.detail_mode && num_sessions > 0 {
-                        state_guard.selected_index =
-                            state_guard.selected_index.saturating_sub(1);
+                    if !state_guard.detail_mode
+                        && num_sessions > 0
+                        && state_guard.selected_index > 0
+                    {
+                        state_guard.selected_index -= 1;
+
+                        // Scroll up if selection moves above visible window
+                        if state_guard.selected_index
+                            < state_guard.scroll_offset
+                        {
+                            state_guard.scroll_offset =
+                                state_guard.selected_index;
+                        }
                     }
                 }
                 KeyEvent {
@@ -951,10 +1027,95 @@ async fn display_task(
                     ..
                 } => {
                     // Move selection down (only in table mode)
+                    if !state_guard.detail_mode
+                        && num_sessions > 0
+                        && state_guard.selected_index < num_sessions - 1
+                    {
+                        state_guard.selected_index += 1;
+
+                        // Calculate visible rows to determine scroll behavior
+                        let has_more_above = state_guard.scroll_offset > 0;
+                        let has_more_below_tentative =
+                            state_guard.scroll_offset + 1 < num_sessions;
+                        let fixed_lines = 5
+                            + if has_more_above { 1 } else { 0 }
+                            + if has_more_below_tentative { 1 } else { 0 };
+                        let visible_rows =
+                            if terminal_size.1 > fixed_lines as u16 {
+                                (terminal_size.1 - fixed_lines as u16) as usize
+                            } else {
+                                1
+                            };
+
+                        // Scroll down if selection moves below visible window
+                        let scroll_end =
+                            state_guard.scroll_offset + visible_rows;
+                        if state_guard.selected_index >= scroll_end {
+                            state_guard.scroll_offset += 1;
+                        }
+                    }
+                }
+                KeyEvent {
+                    code: KeyCode::PageUp,
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    // Page up (only in table mode)
                     if !state_guard.detail_mode && num_sessions > 0 {
+                        // Calculate visible rows
+                        let has_more_above = state_guard.scroll_offset > 0;
+                        let has_more_below_tentative =
+                            state_guard.scroll_offset + 1 < num_sessions;
+                        let fixed_lines = 5
+                            + if has_more_above { 1 } else { 0 }
+                            + if has_more_below_tentative { 1 } else { 0 };
+                        let visible_rows =
+                            if terminal_size.1 > fixed_lines as u16 {
+                                (terminal_size.1 - fixed_lines as u16) as usize
+                            } else {
+                                1
+                            };
+
+                        // Move up by visible_rows
+                        state_guard.selected_index = state_guard
+                            .selected_index
+                            .saturating_sub(visible_rows);
+                        state_guard.scroll_offset = state_guard
+                            .scroll_offset
+                            .saturating_sub(visible_rows);
+                    }
+                }
+                KeyEvent {
+                    code: KeyCode::PageDown,
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    // Page down (only in table mode)
+                    if !state_guard.detail_mode && num_sessions > 0 {
+                        // Calculate visible rows
+                        let has_more_above = state_guard.scroll_offset > 0;
+                        let has_more_below_tentative =
+                            state_guard.scroll_offset + 1 < num_sessions;
+                        let fixed_lines = 5
+                            + if has_more_above { 1 } else { 0 }
+                            + if has_more_below_tentative { 1 } else { 0 };
+                        let visible_rows =
+                            if terminal_size.1 > fixed_lines as u16 {
+                                (terminal_size.1 - fixed_lines as u16) as usize
+                            } else {
+                                1
+                            };
+
+                        // Move down by visible_rows
+                        let new_selected =
+                            state_guard.selected_index + visible_rows;
                         state_guard.selected_index =
-                            (state_guard.selected_index + 1)
-                                .min(num_sessions.saturating_sub(1));
+                            new_selected.min(num_sessions - 1);
+
+                        let new_scroll =
+                            state_guard.scroll_offset + visible_rows;
+                        state_guard.scroll_offset = new_scroll
+                            .min(num_sessions.saturating_sub(visible_rows));
                     }
                 }
                 KeyEvent {
