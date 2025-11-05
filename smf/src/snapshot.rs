@@ -5,8 +5,8 @@ use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Instance, Iter, PropertyGroup, PropertyGroups, Result,
-    ScfError,
+    Instance, Iter, PropertyGroup, PropertyGroups, Result, ScfError, buf_for,
+    str_from,
 };
 
 #[derive(Debug)]

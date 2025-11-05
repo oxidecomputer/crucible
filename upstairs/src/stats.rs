@@ -2,8 +2,8 @@
 use super::*;
 
 use oximeter::{
-    types::{Cumulative, Sample},
     Metric, MetricsError, Producer, Target,
+    types::{Cumulative, Sample},
 };
 
 // These structs are used to construct the desired stats for Oximeter.

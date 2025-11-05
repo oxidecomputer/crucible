@@ -1,7 +1,7 @@
 use std::os::fd::AsFd;
 
 // Re-export from `crucible_raw_extent`
-pub use crucible_raw_extent::{OnDiskMeta, BLOCK_META_SIZE_BYTES};
+pub use crucible_raw_extent::{BLOCK_META_SIZE_BYTES, OnDiskMeta};
 
 /// Call `pread` repeatedly to read an entire buffer
 ///

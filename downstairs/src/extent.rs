@@ -3,8 +3,8 @@ use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs::File;
 
-use anyhow::{anyhow, bail, Result};
-use nix::unistd::{sysconf, SysconfVar};
+use anyhow::{Result, anyhow, bail};
+use nix::unistd::{SysconfVar, sysconf};
 
 use tracing::instrument;
 
@@ -482,7 +482,7 @@ impl Extent {
                         return Err(CrucibleError::IoError(format!(
                             "raw extent {number} has unknown tag {i}"
                         ))
-                        .into())
+                        .into());
                     }
                 }
             }
@@ -505,11 +505,11 @@ impl Extent {
 
     /// Close an extent, returning a tuple of `(gen, flush, dirty)`
     pub fn close(self) -> Result<(u64, u64, bool), CrucibleError> {
-        let gen = self.inner.gen_number().unwrap();
+        let generation = self.inner.gen_number().unwrap();
         let flush = self.inner.flush_number().unwrap();
         let dirty = self.inner.dirty().unwrap();
 
-        Ok((gen, flush, dirty))
+        Ok((generation, flush, dirty))
     }
 
     /// Validates the extent data

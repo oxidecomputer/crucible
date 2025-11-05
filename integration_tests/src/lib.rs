@@ -8,7 +8,7 @@ mod integration_tests {
     use std::sync::Arc;
 
     use anyhow::*;
-    use base64::{engine, Engine};
+    use base64::{Engine, engine};
     use crucible::volume::VolumeBuilder;
     use crucible::*;
     use crucible_client_types::RegionExtentInfo;
@@ -16,10 +16,10 @@ mod integration_tests {
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
-    use httptest::{matchers::*, responders::*, Expectation, Server};
+    use httptest::{Expectation, Server, matchers::*, responders::*};
     use repair_client::Client;
     use sha2::Digest;
-    use slog::{info, o, warn, Drain, Logger};
+    use slog::{Drain, Logger, info, o, warn};
     use tempfile::*;
     use tokio::sync::mpsc;
     use uuid::*;
@@ -351,14 +351,14 @@ mod integration_tests {
 
     impl<T: TestDownstairsDataset> Drop for TestDownstairs<T> {
         fn drop(&mut self) {
-            if self.dataset.stop_downstairs_during_drop() {
-                if let Some(downstairs) = self.downstairs.take() {
-                    tokio::task::block_in_place(move || {
-                        tokio::runtime::Handle::current()
-                            .block_on(async move { downstairs.stop().await })
-                            .unwrap();
-                    });
-                }
+            if self.dataset.stop_downstairs_during_drop()
+                && let Some(downstairs) = self.downstairs.take()
+            {
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current()
+                        .block_on(async move { downstairs.stop().await })
+                        .unwrap();
+                });
             }
         }
     }
@@ -744,7 +744,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -793,7 +793,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -849,7 +849,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1000,7 +1000,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1080,7 +1080,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Volume {
@@ -1139,7 +1139,7 @@ mod integration_tests {
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
                     opts,
-                    gen: 1,
+                    generation: 1,
                 },
             )),
         };
@@ -1183,7 +1183,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1249,7 +1249,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1317,7 +1317,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1382,7 +1382,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -1391,7 +1391,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -1439,8 +1439,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_volume_write_unwritten_subvols_sparse(
-    ) -> Result<()> {
+    async fn integration_test_volume_write_unwritten_subvols_sparse()
+    -> Result<()> {
         // Test a single layer volume with two subvolumes,
         // verify a first write_unwritten that crosses the subvols
         // works as expected.
@@ -1464,7 +1464,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -1473,7 +1473,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -1565,7 +1565,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -1574,7 +1574,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -2112,7 +2112,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -2121,7 +2121,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -2192,8 +2192,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_volume_subvols_parent_scrub_sparse_2(
-    ) -> Result<()> {
+    async fn integration_test_volume_subvols_parent_scrub_sparse_2()
+    -> Result<()> {
         // Test a volume with two sub volumes, and 3/4th RO parent
         // Write a few spots, one spanning the sub vols.
         // Verify scrubber and everything works as expected.
@@ -2236,7 +2236,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -2245,7 +2245,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -2348,7 +2348,7 @@ mod integration_tests {
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
                     opts: opts.clone(),
-                    gen: 1,
+                    generation: 1,
                 },
             )),
         };
@@ -2366,7 +2366,7 @@ mod integration_tests {
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
                     opts,
-                    gen: 1,
+                    generation: 1,
                 },
             )),
         };
@@ -2532,13 +2532,15 @@ mod integration_tests {
 
             assert_eq!(&buffer[..], random_buffer);
 
-            assert!(volume
-                .write(
-                    BlockIndex(0),
-                    BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
-                )
-                .await
-                .is_err());
+            assert!(
+                volume
+                    .write(
+                        BlockIndex(0),
+                        BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
+                    )
+                    .await
+                    .is_err()
+            );
 
             volume.flush(None).await?;
         }
@@ -2557,7 +2559,7 @@ mod integration_tests {
                 blocks_per_extent: top_layer_tds.blocks_per_extent(),
                 extent_count: top_layer_tds.extent_count(),
                 opts: top_layer_opts,
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Volume {
@@ -2569,7 +2571,7 @@ mod integration_tests {
                             .blocks_per_extent(),
                         extent_count: test_downstairs_set.extent_count(),
                         opts: bottom_layer_opts,
-                        gen: 3,
+                        generation: 3,
                     }],
                     read_only_parent: None,
                 },
@@ -2628,12 +2630,14 @@ mod integration_tests {
             DefaultTestDownstairsSet::small_sqlite(false).await?;
 
         // This must be a SQLite extent!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -2670,12 +2674,14 @@ mod integration_tests {
         test_downstairs_set.reboot_read_only().await?;
 
         // This must still be a SQLite backend!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         // Validate that this now accepts reads and flushes, but rejects writes
         {
@@ -2704,13 +2710,15 @@ mod integration_tests {
 
             assert_eq!(&buffer[..], random_buffer);
 
-            assert!(volume
-                .write(
-                    BlockIndex(0),
-                    BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
-                )
-                .await
-                .is_err());
+            assert!(
+                volume
+                    .write(
+                        BlockIndex(0),
+                        BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
+                    )
+                    .await
+                    .is_err()
+            );
 
             volume.flush(None).await?;
         }
@@ -2722,12 +2730,14 @@ mod integration_tests {
         let bottom_layer_opts = test_downstairs_set.opts();
 
         // The new volume is **not** using the SQLite backend!
-        assert!(!top_layer_tds
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            !top_layer_tds
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let vcr = VolumeConstructionRequest::Volume {
             id: Uuid::new_v4(),
@@ -2737,7 +2747,7 @@ mod integration_tests {
                 blocks_per_extent: top_layer_tds.blocks_per_extent(),
                 extent_count: top_layer_tds.extent_count(),
                 opts: top_layer_opts,
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Volume {
@@ -2749,7 +2759,7 @@ mod integration_tests {
                             .blocks_per_extent(),
                         extent_count: test_downstairs_set.extent_count(),
                         opts: bottom_layer_opts,
-                        gen: 3,
+                        generation: 3,
                     }],
                     read_only_parent: None,
                 },
@@ -2805,12 +2815,14 @@ mod integration_tests {
         let mut test_downstairs_set =
             DefaultTestDownstairsSet::small_sqlite(false).await?;
         // This must be a SQLite extent!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -2845,21 +2857,25 @@ mod integration_tests {
         drop(volume);
 
         // This must still be a SQLite extent!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         test_downstairs_set.reboot_read_write().await?;
         // This should now be migrated, and the DB file should be deleted
-        assert!(!test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            !test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3060,12 +3076,14 @@ mod integration_tests {
             DefaultTestDownstairsSet::small_sqlite(false).await?;
 
         // This must be a SQLite extent!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3794,8 +3812,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_volume_replace_downstairs_then_takeover(
-    ) -> Result<()> {
+    async fn integration_test_volume_replace_downstairs_then_takeover()
+    -> Result<()> {
         let log = csl();
         // Replace a downstairs with a new one which will kick off
         // LiveRepair. Then spin up a new Upstairs with a newer
@@ -4515,8 +4533,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_guest_downstairs_unwritten_sparse_mid(
-    ) -> Result<()> {
+    async fn integration_test_guest_downstairs_unwritten_sparse_mid()
+    -> Result<()> {
         // Test using the guest layer to verify a new region is
         // what we expect, and a write_unwritten and read work as expected,
         // this time with sparse writes where the middle block is written
@@ -4572,8 +4590,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_guest_downstairs_unwritten_sparse_end(
-    ) -> Result<()> {
+    async fn integration_test_guest_downstairs_unwritten_sparse_end()
+    -> Result<()> {
         // Test write_unwritten and read work as expected,
         // this time with sparse writes where the last block is written
         const BLOCK_SIZE: usize = 512;
@@ -4821,7 +4839,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -4924,7 +4942,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -5024,7 +5042,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -5077,7 +5095,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: None,
         };
@@ -5161,7 +5179,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -5220,7 +5238,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -5356,7 +5374,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: read_only_parent.clone(),
         };
@@ -5398,7 +5416,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent,
         };
@@ -5447,7 +5465,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: None,
         };
@@ -5925,7 +5943,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -5969,7 +5987,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: new_opts.clone(),
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: None,
         };
@@ -6003,7 +6021,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -6044,7 +6062,7 @@ mod integration_tests {
             blocks_per_extent: tds.blocks_per_extent(),
             extent_count: tds.extent_count(),
             opts: opts.clone(),
-            gen: 2,
+            generation: 2,
         });
 
         let new_sub_vol = vec![VolumeConstructionRequest::Region {
@@ -6052,7 +6070,7 @@ mod integration_tests {
             blocks_per_extent: sv_tds.blocks_per_extent(),
             extent_count: sv_tds.extent_count(),
             opts: sv_opts.clone(),
-            gen: 1,
+            generation: 1,
         }];
 
         let new_vol = VolumeConstructionRequest::Volume {
@@ -6081,7 +6099,7 @@ mod integration_tests {
             blocks_per_extent: tds.blocks_per_extent(),
             extent_count: tds.extent_count(),
             opts: new_opts.clone(),
-            gen: 3,
+            generation: 3,
         });
 
         // Our "new" VCR must have a new downstairs in the opts, and have
@@ -6143,7 +6161,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -6179,7 +6197,7 @@ mod integration_tests {
                 blocks_per_extent: child.blocks_per_extent(),
                 extent_count: child.extent_count(),
                 opts: child.opts(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -6217,7 +6235,7 @@ mod integration_tests {
                 blocks_per_extent: child.blocks_per_extent(),
                 extent_count: child.extent_count(),
                 opts: child.opts(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };

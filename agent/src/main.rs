@@ -1,10 +1,10 @@
 // Copyright 2021 Oxide Computer Company
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use clap::Parser;
 use crucible_agent_types::smf::SmfProperty;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
-use slog::{debug, error, info, o, Logger};
+use slog::{Logger, debug, error, info, o};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -1195,7 +1195,7 @@ mod test {
     use crate::snapshot_interface::TestSnapshotInterface;
 
     use crucible_agent_types::{region::*, snapshot::*};
-    use slog::{o, Drain, Logger};
+    use slog::{Drain, Logger, o};
     use std::collections::BTreeMap;
     use tempfile::*;
     use uuid::Uuid;

@@ -89,10 +89,10 @@ pub mod repair_test {
         client::ClientAction,
         downstairs::DownstairsAction,
         upstairs::{
+            Upstairs, UpstairsAction,
             test::{
                 create_test_upstairs, start_up_and_repair, to_live_repair_ready,
             },
-            Upstairs, UpstairsAction,
         },
     };
 

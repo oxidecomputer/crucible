@@ -1,23 +1,22 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt,
+    Block, CrucibleError, ExtentReadRequest, ExtentReadResponse, ExtentWrite,
+    JobId, RegionDefinition, cdt,
     extent::{
-        check_input, extent_path, DownstairsBlockContext, ExtentInner,
-        EXTENT_META_RAW,
+        DownstairsBlockContext, EXTENT_META_RAW, ExtentInner, check_input,
+        extent_path,
     },
     extent_inner_raw_common::{
-        pread_all, pwrite_all, OnDiskMeta, BLOCK_META_SIZE_BYTES,
+        BLOCK_META_SIZE_BYTES, OnDiskMeta, pread_all, pwrite_all,
     },
     integrity_hash, mkdir_for_file,
     region::JobOrReconciliationId,
-    Block, CrucibleError, ExtentReadRequest, ExtentReadResponse, ExtentWrite,
-    JobId, RegionDefinition,
 };
 use crucible_common::ExtentId;
 use crucible_protocol::ReadBlockContext;
 
 use itertools::Itertools;
-use slog::{error, Logger};
+use slog::{Logger, error};
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -27,7 +26,7 @@ use std::path::Path;
 
 // Re-exports
 pub use crucible_raw_extent::{
-    OnDiskDownstairsBlockContext, BLOCK_CONTEXT_SLOT_SIZE_BYTES,
+    BLOCK_CONTEXT_SLOT_SIZE_BYTES, OnDiskDownstairsBlockContext,
 };
 
 /// Number of extra syscalls per read / write that triggers defragmentation
@@ -697,7 +696,7 @@ impl RawInner {
         layout.write_context_slots_contiguous(
             file,
             0,
-            std::iter::repeat(None).take(block_count),
+            std::iter::repeat_n(None, block_count),
             ContextSlot::B,
             0,
         )?;

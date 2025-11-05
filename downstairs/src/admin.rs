@@ -58,7 +58,7 @@ impl CrucibleDownstairsAdminApi for CrucibleDownstairsAdminImpl {
                     "must provide all of cert_pem, key_pem, root_cert_pem \
                      if any are provided"
                         .to_owned(),
-                ))
+                ));
             }
         };
 

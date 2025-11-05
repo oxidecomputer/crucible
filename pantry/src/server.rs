@@ -4,8 +4,8 @@ use super::pantry::Pantry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
-use base64::{engine, Engine};
+use anyhow::{Result, anyhow};
+use base64::{Engine, engine};
 use crucible_pantry_api::*;
 use crucible_pantry_types::*;
 use dropshot::{
@@ -13,7 +13,7 @@ use dropshot::{
     HttpResponseDeleted, HttpResponseOk, HttpResponseUpdatedNoContent,
     Path as TypedPath, RequestContext, TypedBody, VersionPolicy,
 };
-use slog::{info, o, Logger};
+use slog::{Logger, info, o};
 use std::result::Result as SResult;
 
 #[derive(Debug)]

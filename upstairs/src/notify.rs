@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use rand::prelude::*;
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{Logger, debug, error, info, o, warn};
 use std::net::{Ipv6Addr, SocketAddr};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -251,13 +251,13 @@ async fn notify_task_nexus(
                 upstairs_id,
                 repair_id,
                 session_id,
-                ref repairs,
+                repairs,
             }
             | NotifyRequest::ReconcileStart {
                 upstairs_id,
                 repair_id,
                 session_id,
-                ref repairs,
+                repairs,
             } => {
                 let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
                 let (description, repair_type) =
@@ -332,14 +332,14 @@ async fn notify_task_nexus(
                 repair_id,
                 session_id,
                 aborted,
-                ref repairs,
+                repairs,
             }
             | NotifyRequest::ReconcileFinish {
                 upstairs_id,
                 repair_id,
                 session_id,
                 aborted,
-                ref repairs,
+                repairs,
             } => {
                 let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
                 let (description, repair_type) =
