@@ -14,6 +14,9 @@ struct Args {
     /// Raw extent file to check
     file: std::path::PathBuf,
 
+    #[clap(long, short)]
+    verbose: bool,
+
     /// Block size in the extent (usually autodetected)
     #[clap(long)]
     block_size: Option<usize>,
@@ -21,10 +24,14 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    check_one(&args.file, args.block_size)
+    check_one(&args.file, args.block_size, args.verbose)
 }
 
-fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
+fn check_one(
+    p: &std::path::Path,
+    block_size: Option<usize>,
+    verbose: bool,
+) -> Result<()> {
     let data = std::fs::read(p)?;
     let data_len = data.len() - BLOCK_META_SIZE_BYTES as usize;
     let meta: OnDiskMeta = bincode::deserialize(&data[data_len..])?;
@@ -98,14 +105,19 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
         .enumerate()
     {
         let hash = integrity_hash(&[chunk]);
+        let mut printed = false;
+        let ra = check_block(chunk, hash, ctx_a[i]);
+        let rb = check_block(chunk, hash, ctx_b[i]);
+
         if let Some(slot_selected) = &slot_selected {
             // If the slot selected array is valid (i.e. the extent file is not
             // dirty), then it must be correct.
             let s = slot_selected[i];
             let ctx = if s { ctx_a[i] } else { ctx_b[i] };
-            let r = check_block(chunk, hash, ctx);
+            let r = if s { ra } else { rb };
             if r.is_err() {
                 failed = true;
+                printed = true;
                 print!("Error at block {:>6}:", i);
                 print!(
                     "  slot {} [selected]: {r:?}{}",
@@ -117,10 +129,11 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
                     }
                 );
                 let other_ctx = if s { ctx_b[i] } else { ctx_a[i] };
+                let other_r = if s { rb } else { ra };
                 print!(
                     " | slot {} [deselected]: {:?}{}",
                     if s { "B" } else { "A" },
-                    check_block(chunk, hash, other_ctx),
+                    other_r,
                     if let Some(ctx) = other_ctx {
                         format!(", flush id: {}", ctx.flush_id)
                     } else {
@@ -132,11 +145,12 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
                 }
                 println!();
             }
-        } else if let Err(ea) = check_block(chunk, hash, ctx_a[i])
-            && let Err(eb) = check_block(chunk, hash, ctx_b[i])
+        } else if let Err(ea) = ra
+            && let Err(eb) = rb
         {
-            // Otherwise, check both context slots to see if either is valid
+            // Otherwise, both context slots are invalid, so print that
             failed = true;
+            printed = true;
             print!("Error at block {i}:");
             print!(
                 "  slot A: {ea:?}{}",
@@ -148,6 +162,49 @@ fn check_one(p: &std::path::Path, block_size: Option<usize>) -> Result<()> {
             );
             print!(
                 " | slot B: {eb:?}{}",
+                if let Some(ctx) = ctx_b[i] {
+                    format!(", flush id: {}", ctx.flush_id)
+                } else {
+                    "".to_owned()
+                }
+            );
+            if chunk.iter().all(|b| *b == 0u8) {
+                print!("  Block is all zeros");
+            }
+            println!();
+        }
+
+        // Print a log line for each block if the verbose flag is set
+        if verbose && !printed {
+            print!("Success at block {i}:");
+            print!(
+                "  slot A{}: {ra:?}{}",
+                if let Some(slot_selected) = &slot_selected {
+                    if slot_selected[i] {
+                        " [selected]"
+                    } else {
+                        " [deselected]"
+                    }
+                } else {
+                    ""
+                },
+                if let Some(ctx) = ctx_a[i] {
+                    format!(", flush id: {}", ctx.flush_id)
+                } else {
+                    "".to_owned()
+                }
+            );
+            print!(
+                " | slot B{}: {rb:?}{}",
+                if let Some(slot_selected) = &slot_selected {
+                    if !slot_selected[i] {
+                        " [selected]"
+                    } else {
+                        " [deselected]"
+                    }
+                } else {
+                    ""
+                },
                 if let Some(ctx) = ctx_b[i] {
                     format!(", flush id: {}", ctx.flush_id)
                 } else {
