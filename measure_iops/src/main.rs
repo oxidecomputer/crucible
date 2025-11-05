@@ -21,7 +21,7 @@ pub struct Opt {
     #[clap(short, long, action)]
     key: Option<String>,
 
-    #[clap(short, long, default_value = "0", action)]
+    #[clap(short, long = "gen", default_value = "0", action)]
     generation: u64,
 
     #[clap(long, action)]

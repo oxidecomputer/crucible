@@ -174,7 +174,7 @@ pub struct Opt {
     #[clap(long, global = true, action)]
     flush_timeout: Option<f32>,
 
-    #[clap(short, global = true, long, default_value_t = 0, action)]
+    #[clap(short, global = true, long = "gen", default_value_t = 0, action)]
     generation: u64,
 
     /// The key for an encrypted downstairs.
