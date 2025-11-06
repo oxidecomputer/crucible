@@ -40,7 +40,7 @@ pub struct Opt {
     key: Option<String>,
 
     /// Generation
-    #[clap(short, long, default_value = "0", action)]
+    #[clap(short, long = "gen", default_value = "0", action)]
     generation: u64,
 
     /// TLS certificate
