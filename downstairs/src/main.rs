@@ -223,6 +223,11 @@ enum Args {
         /// Directory containing a region.
         #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
+
+        /// Number of threads to use for validation.
+        /// If not specified, uses available_parallelism (all CPU cores).
+        #[clap(short, long, action)]
+        threads: Option<usize>,
     },
     /// Display extent file layout information
     ExtentInfo {
@@ -481,7 +486,7 @@ async fn main() -> Result<()> {
 
             run_dropshot(bind_addr, &log).await
         }
-        Args::Verify { data } => verify_region(data, log),
+        Args::Verify { data, threads } => verify_region(data, threads, log),
         Args::ExtentInfo { data, block } => extent_info(data, block, log),
         Args::Version => {
             let info = crucible_common::BuildInfo::default();
