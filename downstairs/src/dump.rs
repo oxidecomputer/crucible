@@ -1,6 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
-use crate::extent::ExtentMeta;
+use crate::extent::{ExtentMeta, ExtentType, extent_file_name};
 use rayon::prelude::*;
 use std::convert::TryInto;
 
@@ -53,7 +53,12 @@ pub fn verify_region(
 
     if !errors.is_empty() {
         for (number, err) in &errors {
-            println!("validation failed for extent {}: {:?}", number, err);
+            println!(
+                "validation failed for extent {} (file {}): {:?}",
+                number,
+                extent_file_name(*number, ExtentType::Data),
+                err
+            );
         }
         bail!("Region failed to verify");
     }
