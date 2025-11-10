@@ -52,7 +52,7 @@ struct Args {
 }
 
 const STALE_THRESHOLD_SECS: u64 = 10;
-const REMOVE_THRESHOLD_SECS: u64 = 60;
+const REMOVE_THRESHOLD_SECS: u64 = 30;
 const MAX_DELTA_HISTORY: usize = 100;
 
 /// Data for a single session
@@ -945,8 +945,8 @@ async fn display_task(
             write!(stdout, "\r\n")?;
             write!(
                 stdout,
-                "[↑↓/PgUp/PgDn: Navigate | 'd': Details | 'q': Quit] > = selected, * = stale ({}s, removed at {}s)",
-                STALE_THRESHOLD_SECS, REMOVE_THRESHOLD_SECS
+                "[↑↓/PgUp/PgDn: Navigate | 'd': Details | 'q': Quit] > = selected, * = stale ({}s)",
+                STALE_THRESHOLD_SECS
             )?;
             execute!(stdout, Clear(ClearType::UntilNewLine))?;
             write!(stdout, "\r\n")?;
