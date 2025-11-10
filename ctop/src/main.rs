@@ -51,7 +51,7 @@ struct Args {
     dtrace_cmd: String,
 }
 
-const STALE_THRESHOLD_SECS: u64 = 10;
+const STALE_THRESHOLD_SECS: u64 = 5;
 const REMOVE_THRESHOLD_SECS: u64 = 30;
 const MAX_DELTA_HISTORY: usize = 100;
 
