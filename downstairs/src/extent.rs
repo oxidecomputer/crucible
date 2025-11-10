@@ -480,7 +480,9 @@ impl Extent {
                     }
                     i => {
                         return Err(CrucibleError::IoError(format!(
-                            "raw extent {number} has unknown tag {i}"
+                            "raw extent {number} (file {}) has unknown \
+                            tag {i}",
+                            extent_file_name(number, ExtentType::Data)
                         ))
                         .into());
                     }
