@@ -435,8 +435,16 @@ fn render_sparkline(
     // Unicode block characters from lowest to highest
     const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-    // Take last 'width' samples (most recent first, newest on left)
-    let samples: Vec<u64> = history.iter().rev().take(width).copied().collect();
+    // Take last 'width' samples, reverse to show oldest->newest (left->right)
+    let samples: Vec<u64> = history
+        .iter()
+        .rev()
+        .take(width)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
 
     if samples.is_empty() {
         return String::new();
@@ -551,9 +559,9 @@ fn render_detail_view(
     global_max: Option<u64>,
     normalize: bool,
 ) -> io::Result<()> {
-    // Calculate statistics (reversed so newest is on left)
+    // Calculate statistics (oldest on left, newest on right)
     let history: Vec<u64> =
-        session_data.delta_history.iter().rev().copied().collect();
+        session_data.delta_history.iter().copied().collect();
     let session_max = history.iter().copied().max().unwrap_or(1);
     let session_min = history.iter().copied().min().unwrap_or(0);
     let avg = if !history.is_empty() {
@@ -1355,9 +1363,9 @@ mod tests {
         // Should have 10 characters (one per value)
         assert_eq!(sparkline.chars().count(), 10);
 
-        // First character should be higher than last (newest on left)
+        // First character should be lower than last (oldest on left, newest on right)
         let chars: Vec<char> = sparkline.chars().collect();
-        assert!(chars[0] > chars[9]);
+        assert!(chars[0] < chars[9]);
     }
 
     #[test]
