@@ -423,13 +423,15 @@ fn format_row(
 /// Uses Unicode block characters to show trend: ▁▂▃▄▅▆▇█
 /// If global_max is provided, scales relative to that value for
 /// cross-session comparison
+/// The sparkline is right-aligned: newest value at rightmost column,
+/// older values scroll left, padding with spaces on the left if needed
 fn render_sparkline(
     history: &VecDeque<u64>,
     width: usize,
     global_max: u64,
 ) -> String {
     if history.is_empty() || width == 0 {
-        return String::new();
+        return " ".repeat(width);
     }
 
     // Unicode block characters from lowest to highest
@@ -447,14 +449,14 @@ fn render_sparkline(
         .collect();
 
     if samples.is_empty() {
-        return String::new();
+        return " ".repeat(width);
     }
 
     // Use global max for scaling (minimum 1 to avoid division by zero)
     let max = global_max.max(1);
 
     // Map each value to a block character
-    samples
+    let sparkline: String = samples
         .iter()
         .map(|&val| {
             if val == 0 {
@@ -464,7 +466,15 @@ fn render_sparkline(
                 BLOCKS[normalized.min(7)]
             }
         })
-        .collect()
+        .collect();
+
+    // Right-align: pad left with spaces if we have fewer samples than width
+    if sparkline.chars().count() < width {
+        let padding = width - sparkline.chars().count();
+        format!("{}{}", " ".repeat(padding), sparkline)
+    } else {
+        sparkline
+    }
 }
 
 /// Subprocess reader task - spawns dtrace command and reads JSON output
@@ -916,20 +926,17 @@ async fn display_task(
                 );
                 write!(stdout, "{}", row)?;
 
-                // Render sparkline in remaining space
+                // Render sparkline right-aligned to fill remaining space to terminal edge
                 // Account for the indicator character (1 char)
                 let row_len = row.chars().count() + 1;
                 if terminal_width > row_len as u16 {
-                    let sparkline_width =
-                        (terminal_width as usize - row_len).saturating_sub(1);
-                    if sparkline_width > 0 {
-                        let sparkline = render_sparkline(
-                            &session_data.delta_history,
-                            sparkline_width,
-                            global_max,
-                        );
-                        write!(stdout, " {}", sparkline)?;
-                    }
+                    let sparkline_width = terminal_width as usize - row_len;
+                    let sparkline = render_sparkline(
+                        &session_data.delta_history,
+                        sparkline_width,
+                        global_max,
+                    );
+                    write!(stdout, "{}", sparkline)?;
                 }
 
                 execute!(stdout, Clear(ClearType::UntilNewLine))?;
@@ -1327,7 +1334,8 @@ mod tests {
         let history = VecDeque::new();
         let sparkline = render_sparkline(&history, 10, 100);
 
-        assert_eq!(sparkline, "");
+        // Empty history should return spaces to maintain right alignment
+        assert_eq!(sparkline, "          "); // 10 spaces
     }
 
     #[test]
@@ -1337,7 +1345,7 @@ mod tests {
         history.push_back(20);
 
         let sparkline = render_sparkline(&history, 0, 100);
-        assert_eq!(sparkline, "");
+        assert_eq!(sparkline, ""); // Empty string for 0 width
     }
 
     #[test]
@@ -1347,8 +1355,10 @@ mod tests {
 
         let sparkline = render_sparkline(&history, 10, 100);
 
-        // Should have one character
-        assert_eq!(sparkline.chars().count(), 1);
+        // Should have 10 characters total (9 spaces + 1 block, right-aligned)
+        assert_eq!(sparkline.chars().count(), 10);
+        // Last character should be the data value
+        assert_ne!(sparkline.chars().last().unwrap(), ' ');
     }
 
     #[test]
