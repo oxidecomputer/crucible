@@ -855,14 +855,12 @@ async fn display_task(
 
             // Calculate visible window
             // Terminal layout: 1 header + 1 blank + 1 column headers + sessions + 1 blank + 1 footer
-            // Plus optional scroll indicators (1 line each if present)
+            // Always reserve 2 lines for scroll indicators to prevent flickering
             let total_sessions = sessions.len();
             let has_more_above = scroll_offset > 0;
-            let has_more_below_tentative = scroll_offset + 1 < total_sessions;
 
-            let fixed_lines = 5
-                + if has_more_above { 1 } else { 0 }
-                + if has_more_below_tentative { 1 } else { 0 };
+            // Always reserve space for both scroll indicators to prevent layout changes
+            let fixed_lines = 7; // 5 base lines + 2 for scroll indicators
 
             let visible_rows = if terminal_height > fixed_lines as u16 {
                 (terminal_height - fixed_lines as u16) as usize
@@ -1026,12 +1024,8 @@ async fn display_task(
                         state_guard.selected_index += 1;
 
                         // Calculate visible rows to determine scroll behavior
-                        let has_more_above = state_guard.scroll_offset > 0;
-                        let has_more_below_tentative =
-                            state_guard.scroll_offset + 1 < num_sessions;
-                        let fixed_lines = 5
-                            + if has_more_above { 1 } else { 0 }
-                            + if has_more_below_tentative { 1 } else { 0 };
+                        // Always use fixed 7 lines to prevent flickering
+                        let fixed_lines = 7;
                         let visible_rows =
                             if terminal_size.1 > fixed_lines as u16 {
                                 (terminal_size.1 - fixed_lines as u16) as usize
@@ -1055,12 +1049,8 @@ async fn display_task(
                     // Page up (only in table mode)
                     if !state_guard.detail_mode && num_sessions > 0 {
                         // Calculate visible rows
-                        let has_more_above = state_guard.scroll_offset > 0;
-                        let has_more_below_tentative =
-                            state_guard.scroll_offset + 1 < num_sessions;
-                        let fixed_lines = 5
-                            + if has_more_above { 1 } else { 0 }
-                            + if has_more_below_tentative { 1 } else { 0 };
+                        // Always use fixed 7 lines to prevent flickering
+                        let fixed_lines = 7;
                         let visible_rows =
                             if terminal_size.1 > fixed_lines as u16 {
                                 (terminal_size.1 - fixed_lines as u16) as usize
@@ -1085,12 +1075,8 @@ async fn display_task(
                     // Page down (only in table mode)
                     if !state_guard.detail_mode && num_sessions > 0 {
                         // Calculate visible rows
-                        let has_more_above = state_guard.scroll_offset > 0;
-                        let has_more_below_tentative =
-                            state_guard.scroll_offset + 1 < num_sessions;
-                        let fixed_lines = 5
-                            + if has_more_above { 1 } else { 0 }
-                            + if has_more_below_tentative { 1 } else { 0 };
+                        // Always use fixed 7 lines to prevent flickering
+                        let fixed_lines = 7;
                         let visible_rows =
                             if terminal_size.1 > fixed_lines as u16 {
                                 (terminal_size.1 - fixed_lines as u16) as usize
