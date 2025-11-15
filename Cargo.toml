@@ -93,7 +93,7 @@ rand_chacha = "0.9.0"
 reedline = "0.39.0"
 rangemap = "1.5.1"
 reqwest = { version = "0.12", features = ["default", "blocking", "json", "stream"] }
-ringbuffer = "0.15.0"
+ringbuffer = "0.16.0"
 rusqlite = { version = "0.34" }
 rustls-pemfile = { version = "1.0.4" }
 schemars = { version = "0.8", features = [ "chrono", "uuid1" ] }
