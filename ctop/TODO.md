@@ -31,6 +31,7 @@
      3: 0 and max for all sessions (while just shown the current selections data).
 
 ### Program improvements.
+- [ ] Store 500 data points for each session.
 - [ ] Add an option to only run for a specific number of seconds then exit.
 - [ ] Add an option to keep the last state displayed, or, really, reproduce the
       final screen but after we have exited the curses window.
