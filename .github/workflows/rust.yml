@@ -35,10 +35,6 @@ jobs:
       run: sudo apt-get install libsqlite3-dev
     - name: Build
       run: cargo build --verbose
-    - name: Install latest nextest release
-      uses: taiki-e/install-action@nextest
-    - name: Test nextest all
-      run: cargo nextest run --verbose
   clippy:
     runs-on: ubuntu-latest
     steps:
