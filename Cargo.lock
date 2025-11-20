@@ -1588,7 +1588,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.11",
  "getrandom 0.3.1",
- "hashbrown 0.16.0",
+ "hashbrown 0.15.2",
  "hex",
  "hyper",
  "hyper-rustls",
