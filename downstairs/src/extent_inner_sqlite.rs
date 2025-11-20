@@ -1,20 +1,19 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt,
-    extent::{check_input, extent_path, DownstairsBlockContext, ExtentInner},
+    Block, BlockContext, CrucibleError, ExtentReadRequest, ExtentReadResponse,
+    ExtentWrite, JobId, RegionDefinition, cdt,
+    extent::{DownstairsBlockContext, ExtentInner, check_input, extent_path},
     extent_inner_raw_common::pwrite_all,
     integrity_hash,
     region::JobOrReconciliationId,
-    Block, BlockContext, CrucibleError, ExtentReadRequest, ExtentReadResponse,
-    ExtentWrite, JobId, RegionDefinition,
 };
-use crucible_common::{crucible_bail, ExtentId};
+use crucible_common::{ExtentId, crucible_bail};
 use crucible_protocol::{EncryptionContext, ReadBlockContext};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use itertools::Itertools;
-use rusqlite::{params, Connection, Transaction};
-use slog::{error, Logger};
+use rusqlite::{Connection, Transaction, params};
+use slog::{Logger, error};
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -101,6 +100,12 @@ impl ExtentInner for SqliteInner {
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
         let bc = self.0.lock().unwrap().get_block_contexts(block, count)?;
         Ok(bc)
+    }
+
+    fn validate(&self) -> Result<(), CrucibleError> {
+        Err(CrucibleError::GenericError(
+            "`validate` is not implemented for Sqlite extent".to_owned(),
+        ))
     }
 
     #[cfg(test)]
@@ -662,8 +667,7 @@ impl SqliteMoreInner {
         block: u64,
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, SqliteMoreInnerError> {
-        let stmt =
-            "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
+        let stmt = "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
              WHERE block BETWEEN ?1 AND ?2";
         let mut stmt = self.metadb.prepare_cached(stmt)?;
 
@@ -779,7 +783,7 @@ impl SqliteMoreInner {
         extent_number: ExtentId,
     ) -> Result<Self> {
         use crate::{
-            extent::{ExtentMeta, EXTENT_META_SQLITE},
+            extent::{EXTENT_META_SQLITE, ExtentMeta},
             mkdir_for_file,
         };
         let mut path = extent_path(dir, extent_number);
@@ -898,10 +902,7 @@ impl SqliteMoreInner {
 
             // write out
             metadb.close().map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("metadb.close() failed! {}", e.1),
-                )
+                std::io::Error::other(format!("metadb.close() failed! {}", e.1))
             })?;
 
             // Save it as DB seed
@@ -1021,8 +1022,7 @@ impl SqliteMoreInner {
         &self,
         block_context: &DownstairsBlockContext,
     ) -> Result<(), SqliteMoreInnerError> {
-        let stmt =
-            "INSERT OR IGNORE INTO block_context (block, hash, nonce, tag, on_disk_hash) \
+        let stmt = "INSERT OR IGNORE INTO block_context (block, hash, nonce, tag, on_disk_hash) \
              VALUES (?1, ?2, ?3, ?4, ?5)";
 
         let (nonce, tag) = if let Some(encryption_context) =
@@ -1597,8 +1597,8 @@ mod test {
     /// We should never add contexts for blocks that haven't been written by
     /// an upstairs.
     #[test]
-    fn test_fully_rehash_and_clean_does_not_mark_blocks_as_written(
-    ) -> Result<()> {
+    fn test_fully_rehash_and_clean_does_not_mark_blocks_as_written()
+    -> Result<()> {
         let dir = tempdir()?;
         let mut inner = SqliteInner::create(
             dir.as_ref(),
@@ -1694,8 +1694,8 @@ mod test {
     /// but is distinct in that it call fully_rehash directly, without closing
     /// and re-opening the extent.
     #[test]
-    fn test_fully_rehash_marks_blocks_unwritten_if_data_never_hit_disk(
-    ) -> Result<()> {
+    fn test_fully_rehash_marks_blocks_unwritten_if_data_never_hit_disk()
+    -> Result<()> {
         let dir = tempdir()?;
         let mut inner = SqliteInner::create(
             dir.as_ref(),

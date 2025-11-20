@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Iter, Result, Scf, ScfError, Service, Services,
+    Iter, Result, Scf, ScfError, Service, Services, buf_for, str_from,
 };
 
 #[derive(Debug)]
@@ -39,11 +39,11 @@ impl<'a> Scope<'a> {
         str_from(&mut buf, ret)
     }
 
-    pub fn services(&self) -> Result<Services> {
+    pub fn services(&self) -> Result<Services<'_>> {
         Services::new(self)
     }
 
-    pub fn get_service(&self, name: &str) -> Result<Option<Service>> {
+    pub fn get_service(&self, name: &str) -> Result<Option<Service<'_>>> {
         let name = CString::new(name).unwrap();
         let service = Service::new(self.scf)?;
 
@@ -65,7 +65,7 @@ impl<'a> Scope<'a> {
         }
     }
 
-    pub fn add_service(&self, name: &str) -> Result<Service> {
+    pub fn add_service(&self, name: &str) -> Result<Service<'_>> {
         let name = CString::new(name).unwrap();
         let service = Service::new(self.scf)?;
 

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use ErrorKind::NotFound;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::Drain;
@@ -16,9 +16,9 @@ use tokio::time::Duration;
 
 mod region;
 pub use region::{
-    config_path, Block, BlockIndex, BlockOffset, ExtentId, RegionDefinition,
-    RegionOptions, DATABASE_READ_VERSION, DATABASE_WRITE_VERSION,
-    MAX_BLOCK_SIZE, MAX_SHIFT, MIN_BLOCK_SIZE, MIN_SHIFT,
+    Block, BlockIndex, BlockOffset, DATABASE_READ_VERSION,
+    DATABASE_WRITE_VERSION, ExtentId, MAX_BLOCK_SIZE, MAX_SHIFT,
+    MIN_BLOCK_SIZE, MIN_SHIFT, RegionDefinition, RegionOptions, config_path,
 };
 
 pub mod impacted_blocks;
@@ -145,8 +145,8 @@ pub enum CrucibleError {
     #[error("Invalid downstairs replace {0}")]
     ReplaceRequestInvalid(String),
 
-    #[error("missing context slot for block {0}")]
-    MissingContextSlot(u64),
+    #[error("missing context slot for block {block} in extent {extent}")]
+    MissingContextSlot { block: u64, extent: u32 },
 
     #[error("metadata deserialization failed: {0}")]
     BadMetadata(String),
@@ -172,7 +172,7 @@ impl From<std::io::Error> for CrucibleError {
 
 impl From<CrucibleError> for std::io::Error {
     fn from(e: CrucibleError) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Other, e)
+        std::io::Error::other(e)
     }
 }
 
@@ -225,9 +225,7 @@ pub enum NegotiationError {
     )]
     EncryptionMismatch { expected: bool, actual: bool },
 
-    #[error(
-        "Incompatible read-only settings: wanted {expected}, got {actual}"
-    )]
+    #[error("Incompatible read-only settings: wanted {expected}, got {actual}")]
     ReadOnlyMismatch { expected: bool, actual: bool },
 
     #[error("Incompatible upstairs ID: wanted {expected}, got {actual}")]
@@ -458,7 +456,7 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::UpstairsActivateInProgress
             | CrucibleError::UpstairsDeactivating
             | CrucibleError::UuidMismatch
-            | CrucibleError::MissingContextSlot(..)
+            | CrucibleError::MissingContextSlot { .. }
             | CrucibleError::BadMetadata(..)
             | CrucibleError::BadContextSlot(..)
             | CrucibleError::MissingBlockContext

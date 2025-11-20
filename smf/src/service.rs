@@ -5,8 +5,8 @@ use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Instance, Instances, Iter, PropertyGroups, Result, Scf,
-    ScfError, Scope,
+    Instance, Instances, Iter, PropertyGroups, Result, Scf, ScfError, Scope,
+    buf_for, str_from,
 };
 
 #[derive(Debug)]
@@ -39,11 +39,11 @@ impl<'a> Service<'a> {
         str_from(&mut buf, ret)
     }
 
-    pub fn instances(&self) -> Result<Instances> {
+    pub fn instances(&self) -> Result<Instances<'_>> {
         Instances::new(self)
     }
 
-    pub fn pgs(&self) -> Result<PropertyGroups> {
+    pub fn pgs(&self) -> Result<PropertyGroups<'_>> {
         PropertyGroups::new_service(self)
     }
 
@@ -52,7 +52,7 @@ impl<'a> Service<'a> {
      * scf_service_delete(3SCF)
      */
 
-    pub fn get_instance(&self, name: &str) -> Result<Option<Instance>> {
+    pub fn get_instance(&self, name: &str) -> Result<Option<Instance<'_>>> {
         let name = CString::new(name).unwrap();
         let instance = Instance::new(self.scf)?;
 
@@ -74,7 +74,7 @@ impl<'a> Service<'a> {
         }
     }
 
-    pub fn add_instance(&self, name: &str) -> Result<Instance> {
+    pub fn add_instance(&self, name: &str) -> Result<Instance<'_>> {
         let name = CString::new(name).unwrap();
         let instance = Instance::new(self.scf)?;
 

@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use rand::prelude::*;
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{Logger, debug, error, info, o, warn};
 use std::net::{Ipv6Addr, SocketAddr};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -251,13 +251,13 @@ async fn notify_task_nexus(
                 upstairs_id,
                 repair_id,
                 session_id,
-                ref repairs,
+                repairs,
             }
             | NotifyRequest::ReconcileStart {
                 upstairs_id,
                 repair_id,
                 session_id,
-                ref repairs,
+                repairs,
             } => {
                 let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
                 let (description, repair_type) =
@@ -275,7 +275,9 @@ async fn notify_task_nexus(
                         .iter()
                         .map(|(region_uuid, target_addr)| {
                             DownstairsUnderRepair {
-                                region_uuid: (*region_uuid).into(),
+                                region_uuid: TypedUuid::from_untyped_uuid(
+                                    *region_uuid,
+                                ),
                                 target_addr: target_addr.to_string(),
                             }
                         })
@@ -330,14 +332,14 @@ async fn notify_task_nexus(
                 repair_id,
                 session_id,
                 aborted,
-                ref repairs,
+                repairs,
             }
             | NotifyRequest::ReconcileFinish {
                 upstairs_id,
                 repair_id,
                 session_id,
                 aborted,
-                ref repairs,
+                repairs,
             } => {
                 let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
                 let (description, repair_type) =
@@ -355,7 +357,9 @@ async fn notify_task_nexus(
                         .iter()
                         .map(|(region_uuid, target_addr)| {
                             DownstairsUnderRepair {
-                                region_uuid: (*region_uuid).into(),
+                                region_uuid: TypedUuid::from_untyped_uuid(
+                                    *region_uuid,
+                                ),
                                 target_addr: target_addr.to_string(),
                             }
                         })
@@ -378,7 +382,7 @@ async fn notify_task_nexus(
             }
 
             Err(e) => {
-                error!(log, "failed to notify Nexus of {s}: {e}");
+                warn!(log, "failed to notify Nexus of {s}: {e}");
 
                 // If there's a problem notifying Nexus, it could be due to
                 // Nexus being gone before the DNS was updated. If this is the
@@ -442,7 +446,7 @@ pub(crate) async fn get_nexus_client(
             }
 
             Err(e) => {
-                error!(log, "lookup Nexus address failed: {e}");
+                warn!(log, "lookup Nexus address failed: {e}");
                 return None;
             }
         };

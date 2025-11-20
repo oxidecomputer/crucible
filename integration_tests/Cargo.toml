@@ -7,7 +7,7 @@ authors = [
     "James MacMahon <james@oxide.computer>"
 ]
 license = "MPL-2.0"
-edition = "2021"
+edition = "2024"
 
 [dev-dependencies]
 anyhow.workspace = true

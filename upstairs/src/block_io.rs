@@ -141,8 +141,8 @@ impl BlockIO for FileBlockIO {
 }
 
 // Implement BlockIO over an HTTP(S) url
-use reqwest::header::{CONTENT_LENGTH, RANGE};
 use reqwest::Client;
+use reqwest::header::{CONTENT_LENGTH, RANGE};
 use std::str::FromStr;
 
 pub struct ReqwestBlockIO {

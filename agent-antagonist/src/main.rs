@@ -1,5 +1,5 @@
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use crucible_common::build_logger;
 use futures::StreamExt;
@@ -11,14 +11,14 @@ use slog::{info, warn};
 use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use uuid::Uuid;
 
 use crucible_agent_client::{
-    types::{CreateRegion, RegionId, State as RegionState},
     Client as CrucibleAgentClient,
+    types::{CreateRegion, RegionId, State as RegionState},
 };
 
 #[derive(Debug, Parser)]
@@ -718,6 +718,10 @@ async fn signal_thread(log: Logger, stop_flag: Arc<AtomicBool>) {
     }
 }
 
+#[allow(
+    clippy::disallowed_macros,
+    reason = "using `#[tokio::main]` in tests is fine"
+)]
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::try_parse()?;

@@ -23,5 +23,8 @@ platforms = [
     # "x86_64-pc-windows-msvc",
 ]
 
+[final-excludes]
+workspace-members = ["xtask"]
+
 # Write out exact versions rather than a semver range. (Defaults to false.)
 # exact-versions = true

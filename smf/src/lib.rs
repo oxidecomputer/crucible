@@ -97,8 +97,8 @@ pub enum ScfError {
 
 impl From<u32> for ScfError {
     fn from(error: u32) -> Self {
-        use scf_error_t::*;
         use ScfError::*;
+        use scf_error_t::*;
 
         match scf_error_t::from_u32(error) {
             Some(SCF_ERROR_NONE) => None,
@@ -157,7 +157,7 @@ impl Scf {
         }
     }
 
-    pub fn scope_local(&self) -> Result<Scope> {
+    pub fn scope_local(&self) -> Result<Scope<'_>> {
         let scope = Scope::new(self)?;
 
         if unsafe {
@@ -174,7 +174,7 @@ impl Scf {
         Ok(scope)
     }
 
-    pub fn scopes(&self) -> Result<Scopes> {
+    pub fn scopes(&self) -> Result<Scopes<'_>> {
         Scopes::new(self)
     }
 

@@ -3,8 +3,8 @@ name = "crucible-downstairs"
 version = "0.0.1"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer"]
 license = "MPL-2.0"
-edition = "2021"
-rust-version = "1.81"
+edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 anyhow.workspace = true
@@ -17,6 +17,7 @@ crucible-common.workspace = true
 crucible-downstairs-api.workspace = true
 crucible-downstairs-types.workspace = true
 crucible-protocol.workspace = true
+crucible-raw-extent.workspace = true
 dropshot.workspace = true
 futures-core.workspace = true
 futures.workspace = true
@@ -42,7 +43,6 @@ ringbuffer.workspace = true
 rusqlite.workspace = true
 schemars.workspace = true
 semver.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 slog-async.workspace = true
@@ -64,8 +64,6 @@ crucible-workspace-hack.workspace = true
 
 [dev-dependencies]
 expectorate.workspace = true
-openapi-lint.workspace = true
-openapiv3.workspace = true
 rand_chacha.workspace = true
 tempfile.workspace = true
 

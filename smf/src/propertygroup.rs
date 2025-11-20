@@ -5,8 +5,8 @@ use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Instance, Iter, Properties, Property, Result, Scf,
-    ScfError, Service, Snapshot, Transaction,
+    Instance, Iter, Properties, Property, Result, Scf, ScfError, Service,
+    Snapshot, Transaction, buf_for, str_from,
 };
 
 #[derive(Debug)]
@@ -54,11 +54,11 @@ impl<'a> PropertyGroup<'a> {
         str_from(&mut buf, ret)
     }
 
-    pub fn properties(&self) -> Result<Properties> {
+    pub fn properties(&self) -> Result<Properties<'_>> {
         Properties::new(self)
     }
 
-    pub fn get_property(&self, name: &str) -> Result<Option<Property>> {
+    pub fn get_property(&self, name: &str) -> Result<Option<Property<'_>>> {
         let name = CString::new(name).unwrap();
         let prop = Property::new(self.scf)?;
 
@@ -100,7 +100,7 @@ impl<'a> PropertyGroup<'a> {
         }
     }
 
-    pub fn transaction(&self) -> Result<Transaction> {
+    pub fn transaction(&self) -> Result<Transaction<'_>> {
         let tx = Transaction::new(self)?;
         Ok(tx)
     }

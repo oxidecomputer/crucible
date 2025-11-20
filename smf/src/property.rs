@@ -4,8 +4,8 @@ use std::ptr::NonNull;
 
 use super::scf_sys::*;
 use super::{
-    buf_for, str_from, Iter, PropertyGroup, Result, Scf, ScfError, Value,
-    Values,
+    Iter, PropertyGroup, Result, Scf, ScfError, Value, Values, buf_for,
+    str_from,
 };
 
 #[derive(Debug)]
@@ -54,11 +54,11 @@ impl<'a> Property<'a> {
      * scf_property_get_value(3SCF)
      */
 
-    pub fn values(&self) -> Result<Values> {
+    pub fn values(&self) -> Result<Values<'_>> {
         Values::new(self)
     }
 
-    pub fn value(&self) -> Result<Option<Value>> {
+    pub fn value(&self) -> Result<Option<Value<'_>>> {
         let mut values = Values::new(self)?.collect::<Result<Vec<_>>>()?;
         match values.len() {
             0 => Ok(None),

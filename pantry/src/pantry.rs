@@ -6,16 +6,16 @@ use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use anyhow::Result;
+use anyhow::anyhow;
 use bytes::{Bytes, BytesMut};
 use dropshot::HttpError;
 use sha2::Digest;
 use sha2::Sha256;
+use slog::Logger;
 use slog::error;
 use slog::info;
 use slog::o;
-use slog::Logger;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -25,8 +25,8 @@ use crucible::ReplaceResult;
 use crucible::SnapshotDetails;
 use crucible::Volume;
 use crucible::VolumeConstructionRequest;
-use crucible_common::crucible_bail;
 use crucible_common::CrucibleError;
+use crucible_common::crucible_bail;
 use crucible_pantry_types::{ExpectedDigest, PantryStatus, VolumeStatus};
 
 pub enum ActiveObservation {
@@ -352,7 +352,7 @@ impl PantryEntry {
             size_to_validate.unwrap_or(self.volume.total_size().await?);
 
         let block_size = self.volume.get_block_size().await?;
-        if (size_to_validate % block_size) != 0 {
+        if !size_to_validate.is_multiple_of(block_size) {
             crucible_bail!(
                 InvalidNumberOfBlocks,
                 "size to validate {} not divisible by block size {}!",
@@ -588,13 +588,7 @@ impl Pantry {
     }
 
     pub async fn status(&self) -> Result<PantryStatus, HttpError> {
-        let volumes = self
-            .entries
-            .lock()
-            .await
-            .iter()
-            .map(|(k, _)| k.clone())
-            .collect();
+        let volumes = self.entries.lock().await.keys().cloned().collect();
 
         let num_job_handles = self.jobs.lock().await.total_job_handles();
 

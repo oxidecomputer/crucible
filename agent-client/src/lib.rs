@@ -3,6 +3,6 @@
 use progenitor::generate_api;
 
 generate_api!(
-    spec = "../openapi/crucible-agent.json",
+    spec = "../openapi/crucible-agent/crucible-agent-latest.json",
     derives = [schemars::JsonSchema],
 );

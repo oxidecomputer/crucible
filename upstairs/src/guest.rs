@@ -5,19 +5,19 @@ use std::{
 };
 
 use crate::{
-    io_limits::{IOLimitView, IOLimits},
     BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, ReadBlockContext,
     ReplaceResult, UpstairsAction,
+    io_limits::{IOLimitView, IOLimits},
 };
 use crucible_client_types::RegionExtentInfo;
-use crucible_common::{build_logger, BlockIndex, CrucibleError};
+use crucible_common::{BlockIndex, CrucibleError, build_logger};
 use crucible_protocol::SnapshotDetails;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-use slog::{info, warn, Logger};
+use slog::{Logger, info, warn};
 use tokio::sync::mpsc;
-use tracing::{instrument, span, Level};
+use tracing::{Level, instrument, span};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -228,19 +228,23 @@ impl BlockIO for Guest {
         Ok(())
     }
 
-    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
+    async fn activate_with_gen(
+        &self,
+        generation: u64,
+    ) -> Result<(), CrucibleError> {
         let (rx, done) = BlockOpWaiter::pair();
-        self.send(BlockOp::GoActiveWithGen { gen, done }).await;
+        self.send(BlockOp::GoActiveWithGen { generation, done })
+            .await;
         info!(
             self.log,
-            "The guest has requested activation with gen:{}", gen
+            "The guest has requested activation with gen:{generation}"
         );
 
         rx.wait().await?;
 
         info!(
             self.log,
-            "The guest has finished waiting for activation with:{}", gen
+            "The guest has finished waiting for activation with:{generation}"
         );
 
         Ok(())
