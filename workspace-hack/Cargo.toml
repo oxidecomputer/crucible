@@ -51,9 +51,9 @@ openapiv3 = { version = "2", default-features = false, features = ["skip_seriali
 percent-encoding = { version = "2" }
 phf_shared = { version = "0.11" }
 portable-atomic = { version = "1" }
-rand = { version = "0.8", features = ["small_rng"] }
+rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
+rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8", features = ["small_rng"] }
 rand_chacha = { version = "0.9" }
-rand_core = { version = "0.9", default-features = false, features = ["os_rng", "std"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "stream"] }
@@ -117,9 +117,9 @@ openapiv3 = { version = "2", default-features = false, features = ["skip_seriali
 percent-encoding = { version = "2" }
 phf_shared = { version = "0.11" }
 portable-atomic = { version = "1" }
-rand = { version = "0.8", features = ["small_rng"] }
+rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
+rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8", features = ["small_rng"] }
 rand_chacha = { version = "0.9" }
-rand_core = { version = "0.9", default-features = false, features = ["os_rng", "std"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "stream"] }
