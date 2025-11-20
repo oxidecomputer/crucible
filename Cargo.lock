@@ -1096,7 +1096,7 @@ dependencies = [
  "tokio-util",
  "toml 0.9.8",
  "tracing",
- "usdt 0.5.0",
+ "usdt 0.6.0",
  "uuid",
  "version_check",
 ]
@@ -1286,7 +1286,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "usdt 0.5.0",
+ "usdt 0.6.0",
  "uuid",
  "version_check",
 ]
@@ -1589,7 +1589,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.11",
  "getrandom 0.3.1",
- "hashbrown 0.15.2",
+ "hashbrown 0.16.0",
  "hex",
  "hyper",
  "hyper-rustls",
@@ -1642,6 +1642,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "url",
+ "usdt 0.6.0",
  "usdt-impl 0.5.0",
  "usdt-impl 0.6.0",
  "uuid",
@@ -3480,7 +3481,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6717a8d2a5a929a1a2eb43a12812498ed141a0bcfb7e8f7844fbdbe4303bba9f"
 dependencies = [
  "equivalent",
- "hashbrown 0.15.2",
+ "hashbrown 0.16.0",
  "serde",
  "serde_core",
 ]
