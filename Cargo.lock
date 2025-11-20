@@ -1096,7 +1096,7 @@ dependencies = [
  "tokio-util",
  "toml 0.9.8",
  "tracing",
- "usdt 0.5.0",
+ "usdt 0.6.0",
  "uuid",
  "version_check",
 ]
@@ -1286,7 +1286,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "usdt 0.5.0",
+ "usdt 0.6.0",
  "uuid",
  "version_check",
 ]
@@ -1641,6 +1641,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "url",
+ "usdt 0.6.0",
  "usdt-impl 0.5.0",
  "usdt-impl 0.6.0",
  "uuid",
