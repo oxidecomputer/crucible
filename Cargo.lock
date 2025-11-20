@@ -1581,6 +1581,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "indexmap",
+ "itertools 0.12.1",
  "libc",
  "linux-raw-sys 0.4.14",
  "log",
