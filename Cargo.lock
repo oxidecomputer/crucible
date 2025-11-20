@@ -1579,6 +1579,7 @@ dependencies = [
  "crypto-common",
  "digest",
  "dof 0.3.0",
+ "dof 0.4.0",
  "either",
  "form_urlencoded",
  "futures-channel",
@@ -1641,8 +1642,8 @@ dependencies = [
  "tracing",
  "tracing-core",
  "url",
- "usdt 0.5.0",
  "usdt-impl 0.5.0",
+ "usdt-impl 0.6.0",
  "uuid",
  "winnow 0.7.13",
 ]
