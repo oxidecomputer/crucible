@@ -95,7 +95,7 @@ rangemap = "1.7.0"
 reqwest = { version = "0.12", features = ["default", "blocking", "json", "stream"] }
 ringbuffer = "0.15.0"
 rusqlite = { version = "0.37" }
-rustls-pemfile = { version = "1.0.4" }
+rustls-pemfile = { version = "2.2.0" }
 schemars = { version = "0.8", features = [ "chrono", "uuid1" ] }
 semver = "1"
 serde = { version = "1", features = [ "derive" ] }
