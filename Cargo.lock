@@ -1611,8 +1611,8 @@ dependencies = [
  "phf_shared 0.11.2",
  "portable-atomic",
  "rand 0.8.5",
+ "rand 0.9.2",
  "rand_chacha 0.9.0",
- "rand_core 0.9.3",
  "regex",
  "regex-automata 0.4.11",
  "regex-syntax 0.8.5",
@@ -8052,11 +8052,11 @@ dependencies = [
 
 [[package]]
 name = "twox-hash"
-version = "2.1.0"
+version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7b17f197b3050ba473acf9181f7b1d3b66d1cf7356c6cc57886662276e65908"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 dependencies = [
- "rand 0.8.5",
+ "rand 0.9.2",
 ]
 
 [[package]]
