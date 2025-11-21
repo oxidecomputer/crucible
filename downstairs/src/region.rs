@@ -682,6 +682,22 @@ impl Region {
             );
         }
 
+        // XXX debug code
+        // Open the extent that we just received, which checks block 0.  We do
+        // this before copying it, to check what was received on the wire.
+        info!(self.log, "Verifying extent {eid} on reception");
+        if let Err(e) = Extent::open(
+            &copy_dir,
+            &self.def(),
+            eid,
+            true, // read-only
+            &self.log.clone(),
+        ) {
+            panic!(
+                "Failed to open live-repair extent {eid} in {copy_dir:?}: {e:?}"
+            );
+        }
+
         // After we have all files: move the repair dir.
         info!(
             self.log,
