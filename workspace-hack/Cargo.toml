@@ -51,9 +51,9 @@ openapiv3 = { version = "2", default-features = false, features = ["skip_seriali
 percent-encoding = { version = "2" }
 phf_shared = { version = "0.11" }
 portable-atomic = { version = "1" }
-rand = { version = "0.8", features = ["small_rng"] }
+rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
+rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8", features = ["small_rng"] }
 rand_chacha = { version = "0.9" }
-rand_core = { version = "0.9", default-features = false, features = ["os_rng", "std"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "stream"] }
@@ -77,8 +77,9 @@ toml_datetime = { version = "0.6", default-features = false, features = ["serde"
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 url = { version = "2", features = ["serde"] }
-usdt = { version = "0.5" }
-usdt-impl = { version = "0.5", default-features = false, features = ["asm", "des"] }
+usdt = { version = "0.6" }
+usdt-impl-3b31131e45eafb45 = { package = "usdt-impl", version = "0.6", default-features = false, features = ["des"] }
+usdt-impl-d8f496e17d97b5cb = { package = "usdt-impl", version = "0.5", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 winnow = { version = "0.7" }
 
@@ -117,9 +118,9 @@ openapiv3 = { version = "2", default-features = false, features = ["skip_seriali
 percent-encoding = { version = "2" }
 phf_shared = { version = "0.11" }
 portable-atomic = { version = "1" }
-rand = { version = "0.8", features = ["small_rng"] }
+rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
+rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8", features = ["small_rng"] }
 rand_chacha = { version = "0.9" }
-rand_core = { version = "0.9", default-features = false, features = ["os_rng", "std"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "stream"] }
@@ -143,28 +144,30 @@ toml_datetime = { version = "0.6", default-features = false, features = ["serde"
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 url = { version = "2", features = ["serde"] }
-usdt = { version = "0.5" }
-usdt-impl = { version = "0.5", default-features = false, features = ["asm", "des"] }
+usdt = { version = "0.6" }
+usdt-impl-3b31131e45eafb45 = { package = "usdt-impl", version = "0.6", default-features = false, features = ["des"] }
+usdt-impl-d8f496e17d97b5cb = { package = "usdt-impl", version = "0.5", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 winnow = { version = "0.7" }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
-dof = { version = "0.3", default-features = false, features = ["des"] }
+dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
+dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 linux-raw-sys = { version = "0.4", default-features = false, features = ["elf", "errno", "general", "ioctl", "no_std", "system"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
-dof = { version = "0.3", default-features = false, features = ["des"] }
+dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
+dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
@@ -182,7 +185,6 @@ hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
 rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
 
@@ -198,14 +200,14 @@ rustls = { version = "0.23", features = ["ring"] }
 
 [target.x86_64-unknown-illumos.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
-dof = { version = "0.3", default-features = false, features = ["des"] }
+dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
+dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 itertools = { version = "0.12" }
 mio = { version = "1", features = ["net", "os-ext"] }
-nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
 nom = { version = "7" }
 regex = { version = "1" }
 rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
@@ -214,7 +216,8 @@ spin = { version = "0.9", default-features = false, features = ["once", "spin_mu
 
 [target.x86_64-unknown-illumos.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
-dof = { version = "0.3", default-features = false, features = ["des"] }
+dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
+dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
