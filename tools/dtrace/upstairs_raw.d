@@ -4,7 +4,7 @@
  * can display whatever fields of the structure you wish.
  */
 #pragma D option quiet
-#pragma D option strsize=1k
+#pragma D option strsize=2k
 crucible_upstairs*:::up-status
 {
     trace(json(copyinstr(arg1), "ok"));

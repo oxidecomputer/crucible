@@ -1,11 +1,11 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fmt::Debug;
-use std::fs::{rename, File, OpenOptions};
+use std::fs::{File, OpenOptions, rename};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use futures::TryStreamExt;
 
 use tracing::instrument;
@@ -30,8 +30,8 @@ const MIN_BLOCKING_SIZE: usize = 64 * 1024; // 64 KiB
 
 use super::*;
 use crate::extent::{
-    copy_dir, extent_dir, extent_file_name, move_replacement_extent,
-    replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
+    Extent, ExtentMeta, ExtentState, ExtentType, copy_dir, extent_dir,
+    extent_file_name, move_replacement_extent, replace_dir, sync_path,
 };
 
 /// Validate files for a repair or clone operation
@@ -1038,7 +1038,6 @@ impl Region {
     }
 
     #[cfg(not(feature = "omicron-build"))]
-    #[allow(clippy::unused_async)]
     fn flush_extents(
         &mut self,
         dirty_extents: &BTreeSet<ExtentId>,
@@ -1223,7 +1222,7 @@ impl Region {
 }
 
 #[cfg(feature = "omicron-build")]
-extern "C" {
+unsafe extern "C" {
     fn syncfs(fd: std::ffi::c_int) -> std::ffi::c_int;
 }
 
@@ -1273,8 +1272,8 @@ pub(crate) mod test {
 
     use crate::dump::dump_region;
     use crate::extent::{
-        completed_dir, copy_dir, extent_path, remove_copy_cleanup_dir,
-        DownstairsBlockContext,
+        DownstairsBlockContext, completed_dir, copy_dir, extent_path,
+        remove_copy_cleanup_dir,
     };
 
     use super::*;
@@ -1434,12 +1433,13 @@ pub(crate) mod test {
         region.extend(3, backend).unwrap();
 
         // Close extent 1
-        let (gen, flush, dirty) = region.close_extent(ExtentId(1)).unwrap();
+        let (generation, flush, dirty) =
+            region.close_extent(ExtentId(1)).unwrap();
 
         // Verify inner is gone, and we returned the expected gen, flush
         // and dirty values for a new unwritten extent.
         assert!(matches!(region.extents[1], ExtentState::Closed));
-        assert_eq!(gen, 0);
+        assert_eq!(generation, 0);
         assert_eq!(flush, 0);
         assert!(!dirty);
 
@@ -2094,7 +2094,7 @@ pub(crate) mod test {
         /*
          * Build the Vec for our region dir
          */
-        let dvec = vec![dir.into_path()];
+        let dvec = vec![dir.keep()];
 
         /*
          * Dump the region
@@ -2121,9 +2121,9 @@ pub(crate) mod test {
          * Build the Vec for our region dirs
          */
         let mut dvec = Vec::new();
-        let pdir = dir.into_path();
+        let pdir = dir.keep();
         dvec.push(pdir);
-        let pdir = dir2.into_path();
+        let pdir = dir2.keep();
         dvec.push(pdir);
 
         /*
@@ -2152,9 +2152,9 @@ pub(crate) mod test {
          * Build the Vec for our region dirs
          */
         let mut dvec = Vec::new();
-        let pdir = dir.into_path();
+        let pdir = dir.keep();
         dvec.push(pdir);
-        let pdir = dir2.into_path();
+        let pdir = dir2.keep();
         dvec.push(pdir);
 
         /*
@@ -2289,9 +2289,11 @@ pub(crate) mod test {
 
         // Assert that the .db files still exist
         for i in (0..3).map(ExtentId) {
-            assert!(extent_dir(&dir, i)
-                .join(extent_file_name(i, ExtentType::Db))
-                .exists());
+            assert!(
+                extent_dir(&dir, i)
+                    .join(extent_file_name(i, ExtentType::Db))
+                    .exists()
+            );
         }
 
         // read all using region_read
@@ -2311,9 +2313,11 @@ pub(crate) mod test {
 
         // Assert that the .db files have been deleted during the migration
         for i in (0..3).map(ExtentId) {
-            assert!(!extent_dir(&dir, i)
-                .join(extent_file_name(i, ExtentType::Db))
-                .exists());
+            assert!(
+                !extent_dir(&dir, i)
+                    .join(extent_file_name(i, ExtentType::Db))
+                    .exists()
+            );
         }
         let read_from_region = region.region_read(&req, JobId(0))?.data;
 
@@ -3154,9 +3158,11 @@ pub(crate) mod test {
         region.extend(1, backend).unwrap();
 
         // Call flush with an invalid extent
-        assert!(region
-            .region_flush(1, 2, &None, JobId(3), Some(ExtentId(2)))
-            .is_err());
+        assert!(
+            region
+                .region_flush(1, 2, &None, JobId(3), Some(ExtentId(2)))
+                .is_err()
+        );
     }
 
     fn test_extent_write_flush_close(backend: Backend) {
@@ -3202,11 +3208,11 @@ pub(crate) mod test {
         region.region_flush_extent(eid, 3, 2, JobId(1)).unwrap();
 
         // Close extent 0
-        let (gen, flush, dirty) = region.close_extent(eid).unwrap();
+        let (generation, flush, dirty) = region.close_extent(eid).unwrap();
 
         // Verify inner is gone, and we returned the expected gen, flush
         // and dirty values for the write that should be flushed now.
-        assert_eq!(gen, 3);
+        assert_eq!(generation, 3);
         assert_eq!(flush, 2);
         assert!(!dirty);
     }
@@ -3251,11 +3257,11 @@ pub(crate) mod test {
             .unwrap();
 
         // Close extent 0 without a flush
-        let (gen, flush, dirty) = region.close_extent(eid).unwrap();
+        let (generation, flush, dirty) = region.close_extent(eid).unwrap();
 
         // Because we did not flush yet, this extent should still have
         // the values for an unwritten extent, except for the dirty bit.
-        assert_eq!(gen, 0);
+        assert_eq!(generation, 0);
         assert_eq!(flush, 0);
         assert!(dirty);
 
@@ -3264,10 +3270,10 @@ pub(crate) mod test {
         // dirty).
         region.reopen_extent(eid).unwrap();
 
-        let (gen, flush, dirty) = region.close_extent(eid).unwrap();
+        let (generation, flush, dirty) = region.close_extent(eid).unwrap();
 
         // Verify everything is the same, and dirty is still set.
-        assert_eq!(gen, 0);
+        assert_eq!(generation, 0);
         assert_eq!(flush, 0);
         assert!(dirty);
 
@@ -3275,11 +3281,11 @@ pub(crate) mod test {
         region.reopen_extent(eid).unwrap();
         region.region_flush_extent(eid, 4, 9, JobId(1)).unwrap();
 
-        let (gen, flush, dirty) = region.close_extent(eid).unwrap();
+        let (generation, flush, dirty) = region.close_extent(eid).unwrap();
 
         // Verify after flush that g,f are updated, and that dirty
         // is no longer set.
-        assert_eq!(gen, 4);
+        assert_eq!(generation, 4);
         assert_eq!(flush, 9);
         assert!(!dirty);
     }

@@ -3,10 +3,9 @@ use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs::File;
 
-use anyhow::{anyhow, bail, Result};
-use nix::unistd::{sysconf, SysconfVar};
+use anyhow::{Result, anyhow, bail};
+use nix::unistd::{SysconfVar, sysconf};
 
-use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::region::JobOrReconciliationId;
@@ -35,6 +34,7 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
     fn gen_number(&self) -> Result<u64, CrucibleError>;
     fn flush_number(&self) -> Result<u64, CrucibleError>;
     fn dirty(&self) -> Result<bool, CrucibleError>;
+    fn validate(&self) -> Result<(), CrucibleError>;
 
     /// Performs any metadata updates needed before a flush
     fn pre_flush(
@@ -134,7 +134,7 @@ pub enum ExtentState {
     Closed,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug)]
 pub struct ExtentMeta {
     /**
      * Version information regarding the extent structure.
@@ -470,7 +470,8 @@ impl Extent {
                 Box::new(inner)
             } else {
                 match extent_inner_raw_common::OnDiskMeta::get_version_tag(
-                    dir, number,
+                    &extent_path(dir, number),
+                    number,
                 )? {
                     EXTENT_META_RAW => {
                         Box::new(extent_inner_raw::RawInner::open(
@@ -479,9 +480,11 @@ impl Extent {
                     }
                     i => {
                         return Err(CrucibleError::IoError(format!(
-                            "raw extent {number} has unknown tag {i}"
+                            "raw extent {number} (file {}) has unknown \
+                            tag {i}",
+                            extent_file_name(number, ExtentType::Data)
                         ))
-                        .into())
+                        .into());
                     }
                 }
             }
@@ -504,11 +507,16 @@ impl Extent {
 
     /// Close an extent, returning a tuple of `(gen, flush, dirty)`
     pub fn close(self) -> Result<(u64, u64, bool), CrucibleError> {
-        let gen = self.inner.gen_number().unwrap();
+        let generation = self.inner.gen_number().unwrap();
         let flush = self.inner.flush_number().unwrap();
         let dirty = self.inner.dirty().unwrap();
 
-        Ok((gen, flush, dirty))
+        Ok((generation, flush, dirty))
+    }
+
+    /// Validates the extent data
+    pub fn validate(&self) -> Result<(), CrucibleError> {
+        self.inner.validate()
     }
 
     /**

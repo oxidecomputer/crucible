@@ -1,7 +1,7 @@
 [package]
 name = "crucible-pantry-api"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MPL-2.0"
 
 [dependencies]
@@ -9,5 +9,6 @@ crucible-client-types.workspace = true
 crucible-pantry-types.workspace = true
 crucible-workspace-hack.workspace = true
 dropshot.workspace = true
+dropshot-api-manager-types.workspace = true
 schemars.workspace = true
 serde.workspace = true

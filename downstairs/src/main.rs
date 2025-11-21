@@ -3,17 +3,17 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use slog::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
-use crucible_common::{build_logger, ExtentId};
+use crucible_common::{ExtentId, build_logger};
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
-use crucible_protocol::{JobId, CRUCIBLE_MESSAGE_VERSION};
+use crucible_protocol::{CRUCIBLE_MESSAGE_VERSION, JobId};
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -210,7 +210,6 @@ enum Args {
         #[clap(long, default_value = "rw", action)]
         mode: Mode,
     },
-    RepairAPI,
     Serve {
         #[clap(short, long, action)]
         trace_endpoint: Option<String>,
@@ -218,6 +217,27 @@ enum Args {
         // Dropshot server details
         #[clap(long, default_value = "127.0.0.1:4567", action)]
         bind_addr: SocketAddr,
+    },
+    /// Verify region
+    Verify {
+        /// Directory containing a region.
+        #[clap(short, long, value_name = "DIRECTORY", action)]
+        data: PathBuf,
+
+        /// Number of threads to use for validation.
+        /// If not specified, uses available_parallelism (all CPU cores).
+        #[clap(short, long, action)]
+        threads: Option<usize>,
+    },
+    /// Display extent file layout information
+    ExtentInfo {
+        /// Directory containing a region.
+        #[clap(short, long, value_name = "DIRECTORY", action)]
+        data: PathBuf,
+
+        /// Show offsets for a specific block or block range (e.g., "50" or "17064-17071")
+        #[clap(short, long, value_name = "BLOCK_RANGE", action)]
+        block: Option<String>,
     },
     Version,
     /// Measure an isolated downstairs' disk usage
@@ -443,7 +463,6 @@ async fn main() -> Result<()> {
 
             downstairs.wait().await.map_err(anyhow::Error::from)
         }
-        Args::RepairAPI => repair::write_openapi(&mut std::io::stdout()),
         Args::Serve {
             trace_endpoint,
             bind_addr,
@@ -467,6 +486,8 @@ async fn main() -> Result<()> {
 
             run_dropshot(bind_addr, &log).await
         }
+        Args::Verify { data, threads } => verify_region(data, threads, log),
+        Args::ExtentInfo { data, block } => extent_info(data, block, log),
         Args::Version => {
             let info = crucible_common::BuildInfo::default();
             println!("Crucible Version: {}", info);

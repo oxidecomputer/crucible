@@ -4,8 +4,8 @@ use crucible_common::{BlockIndex, ExtentId, RegionDefinition};
 use crucible_protocol::JobId;
 
 use crate::{
-    extent_to_impacted_blocks, DownstairsIO, ExtentRepairIDs, IOop,
-    ImpactedBlocks,
+    DownstairsIO, ExtentRepairIDs, IOop, ImpactedBlocks,
+    extent_to_impacted_blocks,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -91,10 +91,9 @@ impl ActiveJobs {
                 // Other live repair jobs aren't recorded, because they're
                 // immediately masked by the ExtentLiveReopen (which is the final
                 // operation in the repair job).
-                assert!(!self
-                    .block_to_active
-                    .job_to_range
-                    .contains_key(&job_id))
+                assert!(
+                    !self.block_to_active.job_to_range.contains_key(&job_id)
+                )
             }
         };
         self.jobs.insert(job_id, io);
@@ -115,7 +114,7 @@ impl ActiveJobs {
     #[inline]
     pub fn keys(
         &self,
-    ) -> std::collections::btree_map::Keys<JobId, DownstairsIO> {
+    ) -> std::collections::btree_map::Keys<'_, JobId, DownstairsIO> {
         self.jobs.keys()
     }
 

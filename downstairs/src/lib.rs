@@ -12,22 +12,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible_common::{
-    build_logger, integrity_hash, mkdir_for_file, Block, BlockIndex,
-    BlockOffset, CrucibleError, ExtentId, RegionDefinition, VerboseTimeout,
-    MAX_BLOCK_SIZE,
+    Block, BlockIndex, BlockOffset, CrucibleError, ExtentId, MAX_BLOCK_SIZE,
+    RegionDefinition, VerboseTimeout, build_logger, integrity_hash,
+    mkdir_for_file,
 };
 use crucible_protocol::{
-    BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
-    ReadBlockContext, ReconciliationId, SnapshotDetails,
-    CRUCIBLE_MESSAGE_VERSION,
+    BlockContext, CRUCIBLE_MESSAGE_VERSION, CrucibleDecoder, JobId, Message,
+    MessageWriter, ReadBlockContext, ReconciliationId, SnapshotDetails,
 };
 use repair_client::Client;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::BytesMut;
 use futures::StreamExt;
 use rand::prelude::*;
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{Logger, debug, error, info, o, warn};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -52,7 +51,7 @@ use extent::ExtentState;
 use region::Region;
 
 pub use admin::run_dropshot;
-pub use dump::dump_region;
+pub use dump::{dump_region, extent_info, verify_region};
 pub use dynamometer::*;
 pub use stats::{DsCountStat, DsStatOuter};
 
@@ -863,7 +862,7 @@ async fn proc_stream(
 pub struct UpstairsConnection {
     upstairs_id: Uuid,
     session_id: Uuid,
-    gen: u64,
+    generation: u64,
 }
 
 /// Unique ID identifying a single connection
@@ -1030,8 +1029,8 @@ impl ActiveConnection {
     fn reply(
         &self,
         msg: Message,
-    ) -> Result<(), mpsc::error::SendError<Message>> {
-        self.data.reply_channel_tx.send(msg)
+    ) -> Result<(), Box<mpsc::error::SendError<Message>>> {
+        self.data.reply_channel_tx.send(msg).map_err(Box::new)
     }
 
     async fn handle_frame(
@@ -1728,8 +1727,12 @@ impl ActiveConnection {
                 debug!(
                     self.log,
                     "Flush     :{} extent_limit {:?} deps:{:?} res:{} f:{} g:{}",
-                    job_id, extent_limit, dependencies, result.is_ok(),
-                    flush_number, gen_number,
+                    job_id,
+                    extent_limit,
+                    dependencies,
+                    result.is_ok(),
+                    flush_number,
+                    gen_number,
                 );
 
                 Message::FlushAck {
@@ -1908,8 +1911,8 @@ impl ConnectionState {
     fn reply(
         &self,
         msg: Message,
-    ) -> Result<(), mpsc::error::SendError<Message>> {
-        self.data().reply_channel_tx.send(msg)
+    ) -> Result<(), Box<mpsc::error::SendError<Message>>> {
+        self.data().reply_channel_tx.send(msg).map_err(Box::new)
     }
 
     fn upstairs_connection(&self) -> Option<UpstairsConnection> {
@@ -2449,8 +2452,8 @@ impl Downstairs {
                     // Compare the new generaion number to what the existing
                     // connection is and take action based on that.
                     match upstairs_connection
-                        .gen
-                        .cmp(&active_upstairs_connection.gen)
+                        .generation
+                        .cmp(&active_upstairs_connection.generation)
                     {
                         Ordering::Less => {
                             // If the new connection has a lower generation
@@ -2458,8 +2461,8 @@ impl Downstairs {
                             // allow it to take over.
                             bail!(
                                 "Current gen {} is > requested gen of {}",
-                                active_upstairs_connection.gen,
-                                upstairs_connection.gen,
+                                active_upstairs_connection.generation,
+                                upstairs_connection.generation,
                             );
                         }
                         Ordering::Equal => {
@@ -2732,7 +2735,7 @@ impl Downstairs {
                 version,
                 upstairs_id,
                 session_id,
-                gen,
+                generation,
                 read_only,
                 encrypted,
                 alternate_versions,
@@ -2817,7 +2820,7 @@ impl Downstairs {
                 let upstairs_connection = UpstairsConnection {
                     upstairs_id,
                     session_id,
-                    gen,
+                    generation,
                 };
 
                 // Steal data from the connection state
@@ -2844,7 +2847,7 @@ impl Downstairs {
             Message::PromoteToActive {
                 upstairs_id,
                 session_id,
-                gen,
+                generation,
             } => {
                 let ConnectionState::Negotiating {
                     negotiated,
@@ -2880,16 +2883,16 @@ impl Downstairs {
                         session_id
                     );
                 } else {
-                    if upstairs_connection.gen != gen {
+                    if upstairs_connection.generation != generation {
                         warn!(
                             self.log,
                             "warning: generation number at negotiation was {} \
                              and {} at activation, updating",
-                            upstairs_connection.gen,
-                            gen,
+                            upstairs_connection.generation,
+                            generation,
                         );
 
-                        // Reborrow to update `upstairs_connection.gen`
+                        // Reborrow to update `upstairs_connection.generation`
                         let ConnectionState::Negotiating {
                             upstairs_connection,
                             ..
@@ -2897,7 +2900,7 @@ impl Downstairs {
                         else {
                             unreachable!()
                         };
-                        upstairs_connection.gen = gen;
+                        upstairs_connection.generation = generation;
                     }
 
                     self.promote_to_active(upstairs_connection, conn_id)?;
@@ -2915,12 +2918,12 @@ impl Downstairs {
                         unreachable!();
                     };
                     *negotiated = NegotiationState::PromotedToActive;
-                    upstairs_connection.gen = gen;
+                    upstairs_connection.generation = generation;
 
                     if let Err(e) = state.reply(Message::YouAreNowActive {
                         upstairs_id,
                         session_id,
-                        gen,
+                        generation,
                     }) {
                         bail!("Failed sending YouAreNewActive: {}", e);
                     }
@@ -3199,7 +3202,7 @@ impl Downstairs {
         if let Err(e) = state.reply(Message::YouAreNoLongerActive {
             new_upstairs_id: new_upstairs_connection.upstairs_id,
             new_session_id: new_upstairs_connection.session_id,
-            new_gen: new_upstairs_connection.gen,
+            new_gen: new_upstairs_connection.generation,
         }) {
             warn!(self.log, "Failed sending YouAreNoLongerActive: {e}");
         }
@@ -3762,7 +3765,7 @@ mod test {
     use bytes::Bytes;
     use rand_chacha::ChaCha20Rng;
     use std::net::Ipv4Addr;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
     use tokio::net::TcpSocket;
 
     // Create a simple logger
@@ -3811,10 +3814,11 @@ mod test {
 
     fn complete(work: &mut Work, ds_id: JobId, job: IOop) {
         // validate that deps are done
-        assert!(job
-            .deps()
-            .iter()
-            .all(|dep| work.completed.is_complete(*dep)));
+        assert!(
+            job.deps()
+                .iter()
+                .all(|dep| work.completed.is_complete(*dep))
+        );
 
         // Flushes and barriers both guarantee that no future jobs will depend
         // on jobs that preceded them, so we reset the completed jobs list to
@@ -3887,7 +3891,7 @@ mod test {
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 10,
+            generation: 10,
         };
 
         // Dummy connection id
@@ -3982,7 +3986,7 @@ mod test {
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 10,
+            generation: 10,
         };
 
         // Dummy ConnectionId
@@ -4055,7 +4059,7 @@ mod test {
         let block_size: u64 = 512;
         let extent_size = 4;
         let dir = tempdir()?;
-        let gen = 10;
+        let generation = 10;
 
         let mut ds = create_test_downstairs(block_size, extent_size, 5, &dir)?;
 
@@ -4063,7 +4067,7 @@ mod test {
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen,
+            generation,
         };
 
         // Dummy ConnectionId
@@ -4081,7 +4085,7 @@ mod test {
             dependencies: vec![],
             extent: ExtentId(1),
             flush_number: 1,
-            gen_number: gen,
+            gen_number: generation,
         };
         ds.active_mut(conn_id).add_work(JobId(1001), rio);
 
@@ -4223,14 +4227,14 @@ mod test {
         let block_size: u64 = 512;
         let extent_size = 4;
         let dir = tempdir()?;
-        let gen = 10;
+        let generation = 10;
 
         let mut ds = create_test_downstairs(block_size, extent_size, 5, &dir)?;
 
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen,
+            generation,
         };
 
         let conn_id = ConnectionId(0);
@@ -4251,7 +4255,7 @@ mod test {
         let rio = IOop::Flush {
             dependencies: vec![JobId(1000)],
             flush_number: 3,
-            gen_number: gen,
+            gen_number: generation,
             snapshot_details: None,
             extent_limit: None,
         };
@@ -4331,14 +4335,14 @@ mod test {
         let block_size: u64 = 512;
         let extent_size = 4;
         let dir = tempdir()?;
-        let gen = 10;
+        let generation = 10;
 
         let mut ds = create_test_downstairs(block_size, extent_size, 5, &dir)?;
 
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen,
+            generation,
         };
 
         let conn_id = ConnectionId(0);
@@ -4434,7 +4438,7 @@ mod test {
         let block_size: u64 = 512;
         let extent_size = 4;
         let dir = tempdir()?;
-        let gen = 10;
+        let generation = 10;
 
         let mut ds = create_test_downstairs(block_size, extent_size, 5, &dir)?;
 
@@ -4442,7 +4446,7 @@ mod test {
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen,
+            generation,
         };
 
         // Dummy ConnectionId
@@ -4464,7 +4468,7 @@ mod test {
             dependencies: vec![JobId(1000)],
             extent: eid,
             flush_number: 3,
-            gen_number: gen,
+            gen_number: generation,
         };
         ds.active_mut(conn_id).add_work(JobId(1001), rio);
 
@@ -4516,7 +4520,7 @@ mod test {
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1001));
                 let (g, f, d) = result.as_ref().unwrap();
-                assert_eq!(*g, gen);
+                assert_eq!(*g, generation);
                 assert_eq!(*f, 3);
                 assert!(!*d);
             }
@@ -4543,13 +4547,13 @@ mod test {
         let block_size: u64 = 512;
         let extent_size = 4;
         let dir = tempdir()?;
-        let gen = 10;
+        let generation = 10;
 
         let mut ds = create_test_downstairs(block_size, extent_size, 5, &dir)?;
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen,
+            generation,
         };
 
         let conn_id = ConnectionId(0);
@@ -4580,7 +4584,7 @@ mod test {
             dependencies: vec![JobId(1000)],
             extent: eid_one,
             flush_number: 6,
-            gen_number: gen,
+            gen_number: generation,
         };
         ds.active_mut(conn_id).add_work(JobId(1002), rio);
 
@@ -4622,7 +4626,7 @@ mod test {
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1002));
                 let (g, f, d) = result.as_ref().unwrap();
-                assert_eq!(*g, gen);
+                assert_eq!(*g, generation);
                 assert_eq!(*f, 6);
                 assert!(!*d);
             }
@@ -5563,7 +5567,7 @@ mod test {
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         ds.add_fake_connection(upstairs_connection, ConnectionId(0));
@@ -5581,7 +5585,7 @@ mod test {
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         ds.add_fake_connection(upstairs_connection, ConnectionId(0));
@@ -5593,8 +5597,8 @@ mod test {
     }
 
     #[test]
-    fn test_promote_to_active_multi_read_write_different_uuid_same_gen(
-    ) -> Result<()> {
+    fn test_promote_to_active_multi_read_write_different_uuid_same_gen()
+    -> Result<()> {
         // Attempting to activate multiple read-write (where it's different
         // Upstairs) but with the same gen should be blocked
         let mut ds = build_test_downstairs(false)?;
@@ -5602,13 +5606,13 @@ mod test {
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let upstairs_connection_2 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let id1 = ConnectionId(1);
@@ -5638,8 +5642,8 @@ mod test {
     }
 
     #[test]
-    fn test_promote_to_active_multi_read_write_different_uuid_lower_gen(
-    ) -> Result<()> {
+    fn test_promote_to_active_multi_read_write_different_uuid_lower_gen()
+    -> Result<()> {
         // Attempting to activate multiple read-write (where it's different
         // Upstairs) but with a lower gen should be blocked.
         let mut ds = build_test_downstairs(false)?;
@@ -5647,13 +5651,13 @@ mod test {
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 2,
+            generation: 2,
         };
 
         let upstairs_connection_2 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         println!("ds1: {:?}", ds);
@@ -5696,13 +5700,13 @@ mod test {
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let upstairs_connection_2 = UpstairsConnection {
             upstairs_id: upstairs_connection_1.upstairs_id,
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let id1 = ConnectionId(1);
@@ -5731,8 +5735,8 @@ mod test {
     }
 
     #[test]
-    fn test_promote_to_active_multi_read_write_same_uuid_larger_gen(
-    ) -> Result<()> {
+    fn test_promote_to_active_multi_read_write_same_uuid_larger_gen()
+    -> Result<()> {
         // Attempting to activate multiple read-write where it's the same
         // Upstairs, but a different session, and with a larger generation
         // should allow the new connection to take over.
@@ -5741,13 +5745,13 @@ mod test {
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let upstairs_connection_2 = UpstairsConnection {
             upstairs_id: upstairs_connection_1.upstairs_id,
             session_id: Uuid::new_v4(),
-            gen: 2,
+            generation: 2,
         };
 
         let id1 = ConnectionId(1);
@@ -5783,13 +5787,13 @@ mod test {
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let upstairs_connection_2 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let id1 = ConnectionId(1);
@@ -5824,13 +5828,13 @@ mod test {
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let upstairs_connection_2 = UpstairsConnection {
             upstairs_id: upstairs_connection_1.upstairs_id,
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let id1 = ConnectionId(1);
@@ -5865,13 +5869,13 @@ mod test {
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let upstairs_connection_2 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
         };
 
         let id1 = ConnectionId(1);
@@ -5977,7 +5981,7 @@ mod test {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
             read_only: false,
             encrypted: false,
             alternate_versions: Vec::new(),
@@ -6015,7 +6019,7 @@ mod test {
             version: CRUCIBLE_MESSAGE_VERSION - 1,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
             read_only: false,
             encrypted: false,
             alternate_versions: vec![CRUCIBLE_MESSAGE_VERSION - 1],
@@ -6049,7 +6053,7 @@ mod test {
             version: CRUCIBLE_MESSAGE_VERSION + 1,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
             read_only: false,
             encrypted: false,
             alternate_versions: vec![CRUCIBLE_MESSAGE_VERSION + 1],
@@ -6083,7 +6087,7 @@ mod test {
             version: CRUCIBLE_MESSAGE_VERSION + 1,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
             read_only: false,
             encrypted: false,
             alternate_versions: vec![
@@ -6124,7 +6128,7 @@ mod test {
             version: CRUCIBLE_MESSAGE_VERSION + 4,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
             read_only: false,
             encrypted: false,
             alternate_versions: vec![
@@ -6231,7 +6235,7 @@ mod test {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 1,
+            generation: 1,
             read_only: false,
             encrypted: false,
             alternate_versions: Vec::new(),

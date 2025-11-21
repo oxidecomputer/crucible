@@ -44,13 +44,13 @@
 #:
 #: [[publish]]
 #: series = "image"
-#: name = "crucible-dtrace.tar"
-#: from_output = "/out/crucible-dtrace.tar"
+#: name = "crucible-utils.tar"
+#: from_output = "/out/crucible-utils.tar"
 #:
 #: [[publish]]
 #: series = "image"
-#: name = "crucible-dtrace.sha256.txt"
-#: from_output = "/out/crucible-dtrace.sha256.txt"
+#: name = "crucible-utils.sha256.txt"
+#: from_output = "/out/crucible-utils.sha256.txt"
 #:
 
 set -o errexit
@@ -67,6 +67,9 @@ pfexec coreadm -i /tmp/core.%f.%p \
  -e log \
  -e proc-setid \
  -e global-setid
+ 
+banner prerequisites
+ptime -m ./tools/install_builder_prerequisites.sh -y
 
 banner rbuild
 ptime -m cargo build --verbose --release --all-features
@@ -107,17 +110,18 @@ banner nightly
 banner copy
 mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz
 
-# Build the dtrace archive file which should include all the dtrace scripts.
+# Build the utils archive file which should include all the dtrace scripts
+# along with other tools we want to include on the sled.
 # This needs the ./out directory created above
-banner dtrace
-./tools/make-dtrace.sh
+banner utils
+./tools/make-utils.sh
 
 banner copy
-mv out/crucible-dtrace.tar /out/crucible-dtrace.tar
+mv out/crucible-utils.tar /out/crucible-utils.tar
 
 banner checksum
 cd /out
 digest -a sha256 crucible.tar.gz > crucible.sha256.txt
 digest -a sha256 crucible-pantry.tar.gz > crucible-pantry.sha256.txt
 digest -a sha256 crucible-nightly.tar.gz > crucible-nightly.sha256.txt
-digest -a sha256 crucible-dtrace.tar > crucible-dtrace.sha256.txt
+digest -a sha256 crucible-utils.tar > crucible-utils.sha256.txt

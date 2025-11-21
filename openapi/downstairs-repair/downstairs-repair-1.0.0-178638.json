@@ -2,7 +2,11 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Downstairs Repair",
-    "version": "0.0.1"
+    "contact": {
+      "url": "https://oxide.computer",
+      "email": "api@oxide.computer"
+    },
+    "version": "1.0.0"
   },
   "paths": {
     "/extent/{eid}/files": {

@@ -6,7 +6,7 @@
 name = "crucible-workspace-hack"
 version = "0.1.0"
 description = "workspace-hack package, managed by hakari"
-edition = "2021"
+edition = "2024"
 # You can choose to publish this crate: see https://docs.rs/cargo-hakari/latest/cargo_hakari/publishing.
 publish = false
 
@@ -15,12 +15,17 @@ publish = false
 
 ### BEGIN HAKARI SECTION
 [dependencies]
+aho-corasick = { version = "1" }
 arrayvec = { version = "0.7", default-features = false, features = ["std"] }
+aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.30", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["serde"] }
+bstr = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive", "env", "wrap_help"] }
 clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "env", "std", "suggestions", "usage", "wrap_help"] }
+crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
 digest = { version = "0.10", features = ["mac", "std"] }
@@ -32,7 +37,7 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
-hashbrown = { version = "0.15" }
+hashbrown = { version = "0.16", default-features = false, features = ["allocator-api2", "inline-more"] }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
@@ -41,34 +46,47 @@ memchr = { version = "2" }
 num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
-once_cell = { version = "1" }
+once_cell = { version = "1", features = ["critical-section"] }
 openapiv3 = { version = "2", default-features = false, features = ["skip_serializing_defaults"] }
 percent-encoding = { version = "2" }
 phf_shared = { version = "0.11" }
-rand = { version = "0.8", features = ["small_rng"] }
+portable-atomic = { version = "1" }
+rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
+rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8", features = ["small_rng"] }
 rand_chacha = { version = "0.9" }
-rand_core = { version = "0.9", default-features = false, features = ["os_rng", "std"] }
-regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "stream"] }
-schemars = { version = "0.8", features = ["bytes", "chrono", "semver", "uuid1"] }
+ring = { version = "0.17" }
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-webpki = { version = "0.102", default-features = false, features = ["aws_lc_rs", "ring", "std"] }
+schemars = { version = "0.8", features = ["bytes", "chrono", "semver", "url", "uuid1"] }
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
+similar = { version = "2", features = ["bytes"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
+tokio-util = { version = "0.7", features = ["codec", "io-util", "time"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
-usdt = { version = "0.5" }
-usdt-impl = { version = "0.5", default-features = false, features = ["asm", "des"] }
+url = { version = "2", features = ["serde"] }
+usdt = { version = "0.6" }
+usdt-impl-3b31131e45eafb45 = { package = "usdt-impl", version = "0.6", default-features = false, features = ["des"] }
+usdt-impl-d8f496e17d97b5cb = { package = "usdt-impl", version = "0.5", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+winnow = { version = "0.7" }
 
 [build-dependencies]
+aho-corasick = { version = "1" }
+aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.30", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["serde"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
@@ -86,7 +104,7 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
-hashbrown = { version = "0.15" }
+hashbrown = { version = "0.16", default-features = false, features = ["allocator-api2", "inline-more"] }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
@@ -95,18 +113,25 @@ memchr = { version = "2" }
 num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
-once_cell = { version = "1" }
+once_cell = { version = "1", features = ["critical-section"] }
 openapiv3 = { version = "2", default-features = false, features = ["skip_serializing_defaults"] }
 percent-encoding = { version = "2" }
 phf_shared = { version = "0.11" }
-rand = { version = "0.8", features = ["small_rng"] }
-regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
+portable-atomic = { version = "1" }
+rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
+rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8", features = ["small_rng"] }
+rand_chacha = { version = "0.9" }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "stream"] }
-schemars = { version = "0.8", features = ["bytes", "chrono", "semver", "uuid1"] }
+ring = { version = "0.17" }
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-webpki = { version = "0.102", default-features = false, features = ["aws_lc_rs", "ring", "std"] }
+schemars = { version = "0.8", features = ["bytes", "chrono", "semver", "url", "uuid1"] }
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
@@ -114,39 +139,44 @@ syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "vis
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
+tokio-util = { version = "0.7", features = ["codec", "io-util", "time"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
-usdt = { version = "0.5" }
-usdt-impl = { version = "0.5", default-features = false, features = ["asm", "des"] }
+url = { version = "2", features = ["serde"] }
+usdt = { version = "0.6" }
+usdt-impl-3b31131e45eafb45 = { package = "usdt-impl", version = "0.6", default-features = false, features = ["des"] }
+usdt-impl-d8f496e17d97b5cb = { package = "usdt-impl", version = "0.5", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+winnow = { version = "0.7" }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
-dof = { version = "0.3", default-features = false, features = ["des"] }
+dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
+dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
+linux-raw-sys = { version = "0.4", default-features = false, features = ["elf", "errno", "general", "ioctl", "no_std", "system"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
-rustls-pki-types = { version = "1", features = ["std"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustls = { version = "0.23", features = ["ring"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
-dof = { version = "0.3", default-features = false, features = ["des"] }
+dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
+dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
+linux-raw-sys = { version = "0.4", default-features = false, features = ["elf", "errno", "general", "ioctl", "no_std", "system"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
-rustls-pki-types = { version = "1", features = ["std"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustls = { version = "0.23", features = ["ring"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.aarch64-apple-darwin.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
@@ -155,10 +185,8 @@ hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
-rustls-pki-types = { version = "1", features = ["std"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustls = { version = "0.23", features = ["ring"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
@@ -167,37 +195,39 @@ hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
-rustls-pki-types = { version = "1", features = ["std"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustls = { version = "0.23", features = ["ring"] }
 
 [target.x86_64-unknown-illumos.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
-dof = { version = "0.3", default-features = false, features = ["des"] }
+dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
+dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
+itertools = { version = "0.12" }
 mio = { version = "1", features = ["net", "os-ext"] }
-nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
-rustls-pki-types = { version = "1", features = ["std"] }
+nom = { version = "7" }
+regex = { version = "1" }
+rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustls = { version = "0.23", features = ["ring"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
-toml_edit = { version = "0.19", features = ["serde"] }
 
 [target.x86_64-unknown-illumos.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
-dof = { version = "0.3", default-features = false, features = ["des"] }
+dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
+dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
+itertools = { version = "0.12" }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
-rustls-pki-types = { version = "1", features = ["std"] }
+nom = { version = "7" }
+regex = { version = "1" }
+rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustls = { version = "0.23", features = ["ring"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
-toml_edit = { version = "0.19", features = ["serde"] }
 
 ### END HAKARI SECTION

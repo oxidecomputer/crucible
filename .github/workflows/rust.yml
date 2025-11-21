@@ -24,18 +24,17 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
     - name: Test build documentation
       run: cargo doc
-  build-and-test:
+  build:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      with:
+        # Fetch all history: the Dropshot API up-to-date check requires it.
+        fetch-depth: 0
     - name: Install dependencies
       run: sudo apt-get install libsqlite3-dev
     - name: Build
       run: cargo build --verbose
-    - name: Install latest nextest release
-      uses: taiki-e/install-action@nextest
-    - name: Test nextest all
-      run: cargo nextest run --verbose
   clippy:
     runs-on: ubuntu-latest
     steps:

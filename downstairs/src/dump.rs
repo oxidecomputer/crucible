@@ -1,6 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
-use crate::extent::ExtentMeta;
+use crate::extent::{ExtentMeta, ExtentType, extent_file_name};
+use rayon::prelude::*;
 use std::convert::TryInto;
 
 use sha2::{Digest, Sha256};
@@ -10,6 +11,59 @@ struct ExtInfo {
     ei_hm: HashMap<u32, ExtentMeta>,
 }
 
+pub fn verify_region(
+    region_dir: PathBuf,
+    thread_count: Option<usize>,
+    log: Logger,
+) -> Result<()> {
+    let region = Region::open(region_dir, false, true, &log)?;
+
+    // Configure thread pool based on parameter
+    let pool = if let Some(count) = thread_count {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(count)
+            .build()
+            .expect("Failed to build thread pool")
+    } else {
+        rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to build thread pool")
+    };
+
+    let errors: Vec<_> = pool.install(|| {
+        region
+            .extents
+            .par_iter()
+            .filter_map(|e| {
+                let extent = match e {
+                    extent::ExtentState::Opened(extent) => extent,
+                    extent::ExtentState::Closed => {
+                        panic!("dump on closed extent!")
+                    }
+                };
+
+                if let Err(err) = extent.validate() {
+                    Some((extent.number, err))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    });
+
+    if !errors.is_empty() {
+        for (number, err) in &errors {
+            println!(
+                "validation failed for extent {} (file {}): {:?}",
+                number,
+                extent_file_name(*number, ExtentType::Data),
+                err
+            );
+        }
+        bail!("Region failed to verify");
+    }
+    Ok(())
+}
 /*
  * Dump the metadata for one or more region directories.
  *
@@ -953,4 +1007,265 @@ mod test {
         let colors = color_vec(&cm);
         assert_eq!(colors, vec![32, 31, 31]);
     }
+}
+
+// Display extent file layout information
+// Reads only the region.json file and calculates the layout
+pub fn extent_info(
+    region_dir: PathBuf,
+    block: Option<String>,
+    _log: Logger,
+) -> Result<()> {
+    use crucible_common::config_path;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    // Parse block range if provided
+    let block_range = if let Some(ref block_str) = block {
+        let parts: Vec<&str> = block_str.split('-').collect();
+        match parts.len() {
+            1 => {
+                let block_num = block_str.parse::<u64>()?;
+                Some((block_num, block_num))
+            }
+            2 => {
+                let start = parts[0].parse::<u64>()?;
+                let end = parts[1].parse::<u64>()?;
+                if start > end {
+                    bail!(
+                        "Invalid block range: start ({}) > end ({})",
+                        start,
+                        end
+                    );
+                }
+                Some((start, end))
+            }
+            _ => bail!("Invalid block range format. Use 'N' or 'N-M'"),
+        }
+    } else {
+        None
+    };
+
+    // Read region.json file directly
+    let config_file = config_path(&region_dir);
+    let file = File::open(&config_file)?;
+    let reader = BufReader::new(file);
+    let def: crucible_common::RegionDefinition =
+        serde_json::from_reader(reader)?;
+
+    // Print general region information
+    println!("=== Region Information ===");
+    println!("Region directory:    {}", region_dir.display());
+    println!("UUID:                {}", def.uuid());
+    println!("Encrypted:           {}", def.get_encrypted());
+    println!("Block size:          {} bytes", def.block_size());
+    println!("Extent size:         {} blocks", def.extent_size().value);
+    println!("Extent count:        {}", def.extent_count());
+    println!(
+        "Total size:          {} bytes ({:.2} MiB)",
+        def.total_size(),
+        def.total_size() as f64 / (1024.0 * 1024.0)
+    );
+    println!("DB read version:     {}", def.database_read_version());
+    println!("DB write version:    {}", def.database_write_version());
+    println!();
+
+    // Calculate extent file layout details using RawLayout
+    use crate::extent_inner_raw::{BLOCK_CONTEXT_SLOT_SIZE_BYTES, RawLayout};
+    use crate::extent_inner_raw_common::BLOCK_META_SIZE_BYTES;
+
+    let layout = RawLayout::new(def.extent_size());
+    let block_size = layout.block_size();
+    let extent_size_blocks = layout.block_count();
+
+    // Block data size
+    let block_data_size = layout.supplementary_data_offset();
+
+    // Active context array size (bitpacked, 1 bit per block, rounded up to bytes)
+    let active_context_size = layout.active_context_size();
+
+    // Metadata size
+    let metadata_size = BLOCK_META_SIZE_BYTES;
+
+    // Total file size
+    let total_file_size = layout.file_size();
+
+    println!("=== Extent File Layout ===");
+    println!(
+        "Each extent file contains {} blocks of {} bytes each",
+        extent_size_blocks, block_size
+    );
+    println!(
+        "Total extent file size: {} bytes ({:.2} MiB)",
+        total_file_size,
+        total_file_size as f64 / (1024.0 * 1024.0)
+    );
+    println!();
+
+    // Print detailed breakdown table
+    println!("Offset Breakdown:");
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Section", "Start Offset", "Size (bytes)", "End Offset"
+    );
+    println!("{:-<80}", "");
+
+    let mut current_offset = 0u64;
+
+    // Block data
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Block Data",
+        format!("0x{:08x}", current_offset),
+        block_data_size,
+        format!("0x{:08x}", current_offset + block_data_size - 1)
+    );
+    current_offset += block_data_size;
+
+    // Context slot A
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Context Slot A",
+        format!("0x{:08x}", current_offset),
+        extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES,
+        format!(
+            "0x{:08x}",
+            current_offset + extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES
+                - 1
+        )
+    );
+    current_offset += extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
+
+    // Context slot B
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Context Slot B",
+        format!("0x{:08x}", current_offset),
+        extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES,
+        format!(
+            "0x{:08x}",
+            current_offset + extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES
+                - 1
+        )
+    );
+    current_offset += extent_size_blocks * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
+
+    // Active context slots (bitpacked)
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Active Context Array",
+        format!("0x{:08x}", current_offset),
+        active_context_size,
+        format!("0x{:08x}", current_offset + active_context_size - 1)
+    );
+    current_offset += active_context_size;
+
+    // Metadata
+    println!(
+        "{:<30} {:>15} {:>15} {:>15}",
+        "Metadata",
+        format!("0x{:08x}", current_offset),
+        metadata_size,
+        format!("0x{:08x}", current_offset + metadata_size - 1)
+    );
+
+    println!("{:-<80}", "");
+    println!("{:<30} {:>15} {:>15}", "Total", "", total_file_size);
+
+    // If a block range was requested, show offsets for that range
+    if let Some((start_block, end_block)) = block_range {
+        if start_block >= extent_size_blocks {
+            bail!(
+                "Start block {} is out of range (extent has {} blocks)",
+                start_block,
+                extent_size_blocks
+            );
+        }
+        if end_block >= extent_size_blocks {
+            bail!(
+                "End block {} is out of range (extent has {} blocks)",
+                end_block,
+                extent_size_blocks
+            );
+        }
+
+        let block_count = end_block - start_block + 1;
+        let range_str = if start_block == end_block {
+            format!("Block {}", start_block)
+        } else {
+            format!("Blocks {}-{}", start_block, end_block)
+        };
+
+        println!();
+        println!("=== {} File Offsets ===", range_str);
+        println!("{:<20}  {:>10}   {:>10}", "Section", "Start", "End");
+
+        // Block data range
+        let block_data_start = start_block * block_size;
+        let block_data_end = (end_block + 1) * block_size - 1;
+        let block_data_range_size = (end_block - start_block + 1) * block_size;
+        println!(
+            "Block Data:           0x{:08x} - 0x{:08x} ({} bytes, {} blocks)",
+            block_data_start,
+            block_data_end,
+            block_data_range_size,
+            block_count
+        );
+
+        // Context slot A range
+        use crate::extent_inner_raw::ContextSlot;
+        let context_a_start =
+            layout.context_slot_offset(start_block, ContextSlot::A);
+        let context_a_end =
+            layout.context_slot_offset(end_block + 1, ContextSlot::A) - 1;
+        let context_a_range_size =
+            (end_block - start_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
+        println!(
+            "Context Slot A:       0x{:08x} - 0x{:08x} ({} bytes, {} slots)",
+            context_a_start, context_a_end, context_a_range_size, block_count
+        );
+
+        // Context slot B range
+        let context_b_start =
+            layout.context_slot_offset(start_block, ContextSlot::B);
+        let context_b_end =
+            layout.context_slot_offset(end_block + 1, ContextSlot::B) - 1;
+        let context_b_range_size =
+            (end_block - start_block + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES;
+        println!(
+            "Context Slot B:       0x{:08x} - 0x{:08x} ({} bytes, {} slots)",
+            context_b_start, context_b_end, context_b_range_size, block_count
+        );
+
+        // Active context bits range
+        let active_context_base = layout.active_context_offset();
+        let start_byte = start_block / 8;
+        let end_byte = end_block / 8;
+        let start_bit = start_block % 8;
+        let end_bit = end_block % 8;
+        let active_context_start = active_context_base + start_byte;
+        let active_context_end = active_context_base + end_byte;
+
+        if start_byte == end_byte {
+            println!(
+                "Active Context Bits:  0x{:08x} bits {}-{} (0 = Slot A, 1 = Slot B)",
+                active_context_start, start_bit, end_bit
+            );
+        } else {
+            println!(
+                "Active Context Bits:  0x{:08x} bit {} - 0x{:08x} bit {} (0 = Slot A, 1 = Slot B)",
+                active_context_start, start_bit, active_context_end, end_bit
+            );
+        }
+
+        // Metadata is shared across all blocks
+        let metadata_offset = layout.metadata_offset();
+        println!(
+            "Extent Metadata:      0x{:08x} - 0x{:08x} (shared by all blocks)",
+            metadata_offset,
+            metadata_offset + metadata_size - 1
+        );
+    }
+
+    Ok(())
 }

@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use rand::Rng;
 use tokio::time::{Duration, Instant};
@@ -21,8 +21,8 @@ pub struct Opt {
     #[clap(short, long, action)]
     key: Option<String>,
 
-    #[clap(short, long, default_value = "0", action)]
-    gen: u64,
+    #[clap(short, long = "gen", default_value = "0", action)]
+    generation: u64,
 
     #[clap(long, action)]
     cert_pem: Option<String>,
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     let (guest, io) = Guest::new(None);
     let guest = Arc::new(guest);
 
-    let _join_handle = up_main(crucible_opts, opt.gen, None, io, None)?;
+    let _join_handle = up_main(crucible_opts, opt.generation, None, io, None)?;
     println!("Crucible runtime is spawned");
 
     guest.activate().await?;
@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
     let total_blocks: u64 = guest.total_size().await? / bsz;
 
     let io_size = if let Some(io_size_in_bytes) = opt.io_size_in_bytes {
-        if io_size_in_bytes as u64 % bsz != 0 {
+        if !(io_size_in_bytes as u64).is_multiple_of(bsz) {
             bail!(
                 "invalid io size: {io_size_in_bytes} is not divisible by {bsz}"
             );

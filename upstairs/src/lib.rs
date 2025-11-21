@@ -17,14 +17,14 @@ pub use crucible_client_types::{
 pub use crucible_common::*;
 pub use crucible_protocol::*;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 pub use bytes::{Bytes, BytesMut};
 use oximeter::types::ProducerRegistry;
 use ringbuffer::AllocRingBuffer;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slog::{error, info, o, warn, Logger};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use slog::{Logger, error, info, o, warn};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tracing::instrument;
 use usdt::register_probes;
 use uuid::Uuid;
@@ -128,7 +128,10 @@ pub mod testing {
 #[async_trait]
 pub trait BlockIO: Sync {
     async fn activate(&self) -> Result<(), CrucibleError>;
-    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError>;
+    async fn activate_with_gen(
+        &self,
+        generation: u64,
+    ) -> Result<(), CrucibleError>;
 
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
@@ -484,7 +487,7 @@ impl<T> ClientMap<T> {
     }
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (ClientId, &T)> {
         self.0
-             .0
+            .0
             .iter()
             .enumerate()
             .flat_map(|(i, v)| v.as_ref().map(|v| (ClientId::new(i as u8), v)))
@@ -583,10 +586,9 @@ impl EncryptionContext {
         ];
 
         // macos' and illumos' libc contain this
-        extern "C" {
+        unsafe extern "C" {
             pub fn arc4random_buf(buf: *mut libc::c_void, nbytes: libc::size_t);
         }
-
         unsafe {
             arc4random_buf(random_iv.as_mut_ptr() as *mut libc::c_void, 12)
         }
@@ -805,6 +807,9 @@ where
 impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DsState::Active => {
+                write!(f, "Active")
+            }
             DsState::Connecting {
                 state: NegotiationState::WaitQuorum,
                 ..
@@ -822,9 +827,6 @@ impl std::fmt::Display for DsState {
                 ..
             } => {
                 write!(f, "LiveRepairReady")
-            }
-            DsState::Active => {
-                write!(f, "Active")
             }
             DsState::Connecting {
                 mode: ConnectionMode::New,
@@ -853,9 +855,23 @@ impl std::fmt::Display for DsState {
             DsState::LiveRepair => {
                 write!(f, "LiveRepair")
             }
-            DsState::Stopping(..) => {
-                write!(f, "Stopping")
-            }
+            DsState::Stopping(r) => match r {
+                ClientStopReason::Replacing => {
+                    write!(f, "Replacing")
+                }
+                ClientStopReason::Disabled => {
+                    write!(f, "Disabled")
+                }
+                ClientStopReason::Deactivated => {
+                    write!(f, "Deactivated")
+                }
+                ClientStopReason::NegotiationFailed(_) => {
+                    write!(f, "NegotiationFailed")
+                }
+                ClientStopReason::Fault(_) => {
+                    write!(f, "Faulted")
+                }
+            },
         }
     }
 }
@@ -1496,7 +1512,7 @@ pub(crate) enum BlockOp {
         done: BlockRes,
     },
     GoActiveWithGen {
-        gen: u64,
+        generation: u64,
         done: BlockRes,
     },
     Deactivate {
@@ -1566,7 +1582,7 @@ pub struct DtraceInfo {
     /// Number of write bytes in flight
     pub write_bytes_out: u64,
     /// State of a downstairs
-    pub ds_state: [DsState; 3],
+    pub ds_state: [String; 3],
     /// Counters for each state of a downstairs job.
     pub ds_io_count: IOStateCount,
     /// Extents repaired during initial reconciliation.
@@ -1612,7 +1628,7 @@ pub(crate) fn format_job_list(ids: &[JobId]) -> String {
  */
 pub fn up_main(
     opt: CrucibleOpts,
-    gen: u64,
+    generation: u64,
     region_def: Option<RegionDefinition>,
     guest: GuestIoHandle,
     producer_registry: Option<ProducerRegistry>,
@@ -1654,8 +1670,13 @@ pub fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let mut up =
-        upstairs::Upstairs::new(&opt, gen, region_def, guest, tls_context);
+    let mut up = upstairs::Upstairs::new(
+        &opt,
+        generation,
+        region_def,
+        guest,
+        tls_context,
+    );
 
     #[cfg(test)]
     if disable_backpressure {

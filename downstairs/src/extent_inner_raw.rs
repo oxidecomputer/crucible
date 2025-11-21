@@ -1,24 +1,22 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt,
+    Block, CrucibleError, ExtentReadRequest, ExtentReadResponse, ExtentWrite,
+    JobId, RegionDefinition, cdt,
     extent::{
-        check_input, extent_path, DownstairsBlockContext, ExtentInner,
-        EXTENT_META_RAW,
+        DownstairsBlockContext, EXTENT_META_RAW, ExtentInner, check_input,
+        extent_path,
     },
     extent_inner_raw_common::{
-        pread_all, pwrite_all, OnDiskMeta, BLOCK_META_SIZE_BYTES,
+        BLOCK_META_SIZE_BYTES, OnDiskMeta, pread_all, pwrite_all,
     },
     integrity_hash, mkdir_for_file,
     region::JobOrReconciliationId,
-    Block, BlockContext, CrucibleError, ExtentReadRequest, ExtentReadResponse,
-    ExtentWrite, JobId, RegionDefinition,
 };
 use crucible_common::ExtentId;
 use crucible_protocol::ReadBlockContext;
 
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use slog::{error, Logger};
+use slog::{Logger, error};
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -26,18 +24,10 @@ use std::io::{BufReader, Read};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 
-/// Equivalent to `DownstairsBlockContext`, but without one's own block number
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct OnDiskDownstairsBlockContext {
-    block_context: BlockContext,
-    on_disk_hash: u64,
-}
-
-/// Size of backup data
-///
-/// This must be large enough to fit an `Option<OnDiskDownstairsBlockContext>`
-/// serialized using `bincode`.
-const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
+// Re-exports
+pub use crucible_raw_extent::{
+    BLOCK_CONTEXT_SLOT_SIZE_BYTES, OnDiskDownstairsBlockContext,
+};
 
 /// Number of extra syscalls per read / write that triggers defragmentation
 const DEFRAGMENT_THRESHOLD: u64 = 3;
@@ -91,32 +81,45 @@ pub struct RawInner {
     /// This allows us to only write the flag when the value changes
     dirty: bool,
 
-    /// Marks whether the given context slot is dirty
+    /// Marks whether the given block is dirty
     ///
-    /// A dirty context slot has not yet been saved to disk, and must be
-    /// synched before being overwritten.
-    context_slot_dirty: ContextSlotsDirty,
+    /// A dirty block has not yet been saved to disk, and must be synched before
+    /// being overwritten.  In other words, if we write to the same block twice
+    /// (without a flush in between), we must add a sync.
+    ///
+    /// See `crucible#1788` for details on why this is necessary
+    block_dirty: BlockBitArray,
 
     /// Total number of extra syscalls due to context slot fragmentation
     extra_syscall_count: u64,
 
     /// Denominator corresponding to `extra_syscall_count`
     extra_syscall_denominator: u64,
+
+    /// Number of times we've done a bonus sync
+    ///
+    /// The lower 32 bits are written to the metadata for debug purposes
+    bonus_sync_count: u64,
+
+    /// Number of times we've done context slot defragmentation
+    ///
+    /// The lower 32 bits are written to the metadata for debug purposes
+    defrag_count: u64,
+
+    /// Most recent flush number, written to context slots for debug purposes
+    last_flush: u64,
 }
 
-/// Data structure containing a list of active context slots
-///
-/// Under the hood, this is a bitpacked array with one bit per block; 0
-/// indicates that `ContextSlot::A` is active and 1 selects `ContextSlot::B`.
+/// Bitpacked array, with one bit per block
 #[derive(Debug)]
-struct ActiveContextSlots {
+struct BlockBitArray {
     data: Vec<u32>,
     /// Number of blocks
     block_count: u64,
 }
 
-impl ActiveContextSlots {
-    /// Builds a new list with [`ContextSlot::A`] initially active
+impl BlockBitArray {
+    /// Builds a new list with all bits set to zero
     fn new(block_count: u64) -> Self {
         Self {
             data: vec![0u32; (block_count as usize).div_ceil(32)],
@@ -135,108 +138,96 @@ impl ActiveContextSlots {
     }
 
     /// Sets the context slot for the given block
-    fn set(&mut self, block: u64, slot: ContextSlot) {
+    fn set(&mut self, block: u64, value: bool) {
         let (index, mask) = self.decode(block);
         let target = &mut self.data[index];
-        match slot {
-            ContextSlot::A => *target &= !mask, // clear the bit
-            ContextSlot::B => *target |= mask,  // set the bit
+        if value {
+            *target |= mask // set the bit
+        } else {
+            *target &= !mask // clear the bit
         }
     }
 
-    /// Swaps the active context slot for the given block
+    /// Swaps the bit for the given block
     fn swap(&mut self, block: u64) {
         let (index, mask) = self.decode(block);
         self.data[index] ^= mask;
     }
 
-    /// Iterates over context slots
-    fn iter(&self) -> impl Iterator<Item = ContextSlot> + '_ {
+    fn len(&self) -> usize {
+        self.block_count as usize
+    }
+
+    fn iter(&self) -> impl Iterator<Item = bool> + '_ {
         (0..self.block_count).map(|i| self[i])
     }
 
+    /// Sets all bits in the array to `false`, without changing its size
+    fn reset(&mut self) {
+        self.data.fill(0);
+    }
+}
+
+impl std::ops::Index<u64> for BlockBitArray {
+    type Output = bool;
+    fn index(&self, block: u64) -> &Self::Output {
+        let (index, mask) = self.decode(block);
+        if self.data[index] & mask == 0 {
+            &false
+        } else {
+            &true
+        }
+    }
+}
+
+/// Data structure containing a list of active context slots
+///
+/// Under the hood, this is a bitpacked array with one bit per block; 0
+/// indicates that `ContextSlot::A` is active and 1 selects `ContextSlot::B`.
+#[derive(Debug)]
+struct ActiveContextSlots(BlockBitArray);
+
+impl ActiveContextSlots {
+    /// Builds a new list with [`ContextSlot::A`] initially active
+    fn new(block_count: u64) -> Self {
+        Self(BlockBitArray::new(block_count))
+    }
+
+    /// Sets the context slot for the given block
+    fn set(&mut self, block: u64, slot: ContextSlot) {
+        self.0.set(block, slot == ContextSlot::B)
+    }
+
+    /// Swaps the active context slot for the given block
+    fn swap(&mut self, block: u64) {
+        self.0.swap(block)
+    }
+
+    /// Iterates over context slots
+    fn iter(&self) -> impl Iterator<Item = ContextSlot> + '_ {
+        self.0
+            .iter()
+            .map(|b| if b { ContextSlot::B } else { ContextSlot::A })
+    }
+
     fn len(&self) -> usize {
-        self.block_count as usize
+        self.0.len()
     }
 }
 
 impl std::ops::Index<u64> for ActiveContextSlots {
     type Output = ContextSlot;
     fn index(&self, block: u64) -> &Self::Output {
-        let (index, mask) = self.decode(block);
-        if self.data[index] & mask == 0 {
-            &ContextSlot::A
-        } else {
+        if self.0[block] {
             &ContextSlot::B
-        }
-    }
-}
-
-/// Data structure containing bitpacked dirty context slot flags
-///
-/// Each block has two flags, independently tracking the dirty state of context
-/// slots A and B.
-#[derive(Debug)]
-struct ContextSlotsDirty {
-    data: Vec<u32>,
-    block_count: u64,
-}
-
-impl ContextSlotsDirty {
-    fn new(block_count: u64) -> Self {
-        Self {
-            data: vec![0u32; (block_count as usize).div_ceil(16)],
-            block_count,
-        }
-    }
-
-    /// Decodes a block + slot into an index and mask
-    ///
-    /// # Panics
-    /// If the block is above our max block count
-    #[must_use]
-    fn decode(&self, block: u64, slot: ContextSlot) -> (usize, u32) {
-        assert!(block < self.block_count);
-        let b = block as usize;
-        (b / 16, 1 << (slot as usize + (b % 16) * 2))
-    }
-
-    /// Checks whether the given `(block, slot)` tuple is dirty
-    #[must_use]
-    fn get(&self, block: u64, slot: ContextSlot) -> bool {
-        let (index, mask) = self.decode(block, slot);
-        self.data[index] & mask != 0
-    }
-
-    /// Sets the given `(block, slot)` tuple as dirty
-    fn set(&mut self, block: u64, slot: ContextSlot) {
-        let (index, mask) = self.decode(block, slot);
-        self.data[index] |= mask;
-    }
-
-    /// Marks every slot as not dirty
-    fn reset(&mut self) {
-        self.data.fill(0);
-    }
-}
-
-#[cfg(test)]
-impl std::ops::Index<u64> for ContextSlotsDirty {
-    type Output = u8;
-    fn index(&self, block: u64) -> &Self::Output {
-        let lo = self.get(block, ContextSlot::A);
-        let hi = self.get(block, ContextSlot::B);
-        match (hi, lo) {
-            (false, false) => &0b00,
-            (false, true) => &0b01,
-            (true, false) => &0b10,
-            (true, true) => &0b11,
+        } else {
+            &ContextSlot::A
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum ContextSlot {
+pub enum ContextSlot {
     A,
     B,
 }
@@ -549,7 +540,7 @@ impl ExtentInner for RawInner {
                 self.extent_number,
             )));
         }
-        self.context_slot_dirty.reset();
+        self.block_dirty.reset();
         cdt::extent__flush__file__done!(|| {
             (job_id.get(), self.extent_number.0)
         });
@@ -579,6 +570,80 @@ impl ExtentInner for RawInner {
         cdt::extent__flush__done!(|| { (job_id.get(), self.extent_number.0) });
 
         r
+    }
+
+    fn validate(&self) -> Result<(), CrucibleError> {
+        let block_size = self.extent_size.block_size_in_bytes() as usize;
+
+        // Read context data to local arrays
+        let ctx_a = self.layout.read_context_slots_contiguous(
+            &self.file,
+            0,
+            self.layout.block_count(),
+            ContextSlot::A,
+        )?;
+        let ctx_b = self.layout.read_context_slots_contiguous(
+            &self.file,
+            0,
+            self.layout.block_count(),
+            ContextSlot::B,
+        )?;
+
+        // Read blocks in bulk, 128 KiB at a time
+        let nblocks = 128 * 1024 / block_size;
+        let mut buf = vec![0; block_size * nblocks];
+        for start_block in (0..self.extent_size.value).step_by(nblocks) {
+            let num_blocks =
+                ((self.extent_size.value - start_block) as usize).min(nblocks);
+
+            // Read the block data itself:
+            buf.resize(num_blocks * block_size, 0u8);
+            pread_all(
+                self.file.as_fd(),
+                &mut buf,
+                block_size as i64 * start_block as i64,
+            )
+            .map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "extent {}: reading block {start_block} data failed: {e}",
+                    self.extent_number
+                ))
+            })?;
+
+            // Hash and check individual blocks against context slots
+            for (i, data) in buf.chunks_exact(block_size).enumerate() {
+                let block = start_block as usize + i;
+                let hash = integrity_hash(&[data]);
+
+                // Pick out the active context slot
+                let context = match self.active_context[block as u64] {
+                    ContextSlot::A => &ctx_a,
+                    ContextSlot::B => &ctx_b,
+                }[block];
+
+                if let Some(context) = context {
+                    if context.on_disk_hash == hash {
+                        // great work, everyone
+                    } else {
+                        return Err(CrucibleError::GenericError(format!(
+                            "block {block} has an active slot \
+                             with mismatched hash"
+                        )));
+                    }
+                } else {
+                    // context slot is empty, hopefully data is as well!
+                    if data.iter().all(|v| *v == 0u8) {
+                        // great work, everyone
+                    } else {
+                        return Err(CrucibleError::GenericError(format!(
+                            "block {block} has an empty active slot, \
+                             but contains non-zero data",
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -626,20 +691,27 @@ impl RawInner {
             0,
             ctxs.iter().map(Option::as_ref),
             ContextSlot::A,
+            0,
         )?;
         layout.write_context_slots_contiguous(
             file,
             0,
-            std::iter::repeat(None).take(block_count),
+            std::iter::repeat_n(None, block_count),
             ContextSlot::B,
+            0,
         )?;
 
         layout.write_active_context_and_metadata(
             file,
             &ActiveContextSlots::new(layout.block_count()),
-            dirty,
-            flush_number,
-            gen_number,
+            OnDiskMeta {
+                dirty,
+                flush_number,
+                gen_number,
+                ext_version: EXTENT_META_RAW,
+                bonus_sync_count: 0,
+                defrag_count: 0,
+            },
         )?;
 
         Ok(())
@@ -672,9 +744,12 @@ impl RawInner {
             layout,
             extent_number,
             active_context: ActiveContextSlots::new(extent_size.value),
-            context_slot_dirty: ContextSlotsDirty::new(extent_size.value),
+            block_dirty: BlockBitArray::new(extent_size.value),
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
+            bonus_sync_count: 0,
+            defrag_count: 0,
+            last_flush: 0,
         };
         // Setting the flush number also writes the extent version, since
         // they're serialized together in the same block.
@@ -815,7 +890,10 @@ impl RawInner {
                     }
 
                     matching_slot.or(empty_slot).ok_or(
-                        CrucibleError::MissingContextSlot(block as u64),
+                        CrucibleError::MissingContextSlot {
+                            block: block as u64,
+                            extent: extent_number.0,
+                        },
                     )?
                 };
                 active_context.set(block as u64, slot);
@@ -830,15 +908,31 @@ impl RawInner {
             extent_number,
             extent_size: def.extent_size(),
             layout: RawLayout::new(def.extent_size()),
-            context_slot_dirty: ContextSlotsDirty::new(def.extent_size().value),
+            block_dirty: BlockBitArray::new(def.extent_size().value),
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
+            bonus_sync_count: u64::from(meta.bonus_sync_count),
+            defrag_count: u64::from(meta.defrag_count),
+            last_flush: meta.flush_number,
         })
     }
 
     fn set_dirty(&mut self) -> Result<(), CrucibleError> {
         if !self.dirty {
             self.layout.set_dirty(&self.file)?;
+            // We must sync the file after writing the dirty flag; otherwise,
+            // a later sync could merge a subsequent write to this address.
+            // This is a property of ZFS: writes are normally persisted in the
+            // same order that they're submitted, but if you write to the same
+            // location in a file twice, the later write's data will be used
+            // when persisting the earlier write to disk.  See crucible#1788 for
+            // details.
+            self.file.sync_all().map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "extent {}: sync_all failed in `set_dirty`: {e}",
+                    self.extent_number,
+                ))
+            })?;
             self.dirty = true;
         }
         Ok(())
@@ -893,9 +987,12 @@ impl RawInner {
                 empty_slot = Some(slot);
             }
         }
-        let value = matching_slot
-            .or(empty_slot)
-            .ok_or(CrucibleError::MissingContextSlot(block))?;
+        let value = matching_slot.or(empty_slot).ok_or(
+            CrucibleError::MissingContextSlot {
+                block,
+                extent: self.extent_number.0,
+            },
+        )?;
         self.active_context.set(block, value);
         Ok(())
     }
@@ -904,13 +1001,15 @@ impl RawInner {
         &mut self,
         block_contexts: &[DownstairsBlockContext],
     ) -> Result<(), CrucibleError> {
-        // If any of these block contexts will be overwriting an unsynched
-        // context slot, then we insert a sync here.
-        let needs_sync = block_contexts.iter().any(|block_context| {
-            // We'll be writing to the inactive slot
-            let slot = !self.active_context[block_context.block];
-            self.context_slot_dirty.get(block_context.block, slot)
-        });
+        // If any of these blocks is overwriting an unsynched block, then we
+        // insert a sync here.  This is because ZFS will combine writes to the
+        // same offset in the file; if you write to the same block twice, the
+        // later write could be persisted when ZFS persists the earlier write to
+        // the ZIL, which would be before the later write's context is
+        // persisted.  This would be a problem if we lost power in between!
+        let needs_sync = block_contexts
+            .iter()
+            .any(|block_context| self.block_dirty[block_context.block]);
         if needs_sync {
             self.file.sync_all().map_err(|e| {
                 CrucibleError::IoError(format!(
@@ -918,16 +1017,16 @@ impl RawInner {
                     self.extent_number,
                 ))
             })?;
-            self.context_slot_dirty.reset();
+            self.block_dirty.reset();
+            self.bonus_sync_count += 1;
         }
-        // Mark the to-be-written slots as unsynched on disk
+        // Mark the to-be-written blocks as unsynched on disk
         //
-        // It's harmless if we bail out before writing the actual context slot
-        // here, because all it will do is force a sync next time this is called
-        // (that sync is right above here!)
+        // It's harmless if we bail out before writing the actual block here,
+        // because all it will do is force a sync next time this is called (that
+        // sync is right above here!)
         for block_context in block_contexts {
-            let slot = !self.active_context[block_context.block];
-            self.context_slot_dirty.set(block_context.block, slot);
+            self.block_dirty.set(block_context.block, true);
         }
 
         let mut start = 0;
@@ -979,6 +1078,7 @@ impl RawInner {
                 start,
                 group.map(Option::Some),
                 slot,
+                self.last_flush,
             )?;
             writes += 1;
         }
@@ -1003,11 +1103,17 @@ impl RawInner {
         self.layout.write_active_context_and_metadata(
             &self.file,
             &self.active_context,
-            false, // dirty
-            new_flush,
-            new_gen,
+            OnDiskMeta {
+                dirty: false,
+                flush_number: new_flush,
+                gen_number: new_gen,
+                ext_version: EXTENT_META_RAW,
+                bonus_sync_count: self.bonus_sync_count as u32,
+                defrag_count: self.defrag_count as u32,
+            },
         )?;
         self.dirty = false;
+        self.last_flush = new_flush;
         Ok(())
     }
 
@@ -1194,10 +1300,6 @@ impl RawInner {
         for (i, block) in (counter.min_block..=counter.max_block).enumerate() {
             if self.active_context[block] == copy_from {
                 dest_slots[i] = source_slots[i];
-
-                // Mark this slot as unsynched, so that we don't overwrite
-                // it later on without a sync
-                self.context_slot_dirty.set(block, !copy_from);
             }
         }
         let r = self.layout.write_context_slots_contiguous(
@@ -1205,6 +1307,7 @@ impl RawInner {
             counter.min_block,
             dest_slots.iter().map(|v| v.as_ref()),
             !copy_from,
+            self.last_flush,
         );
 
         // If this write failed, then try recomputing every context slot
@@ -1226,12 +1329,13 @@ impl RawInner {
             // data** in both context slots, so it would still be a valid state
             // for the file.
         }
+        self.defrag_count += 1;
         r.map(|_| ())
     }
 }
 
 /// Data structure that implements the on-disk layout of a raw extent file
-struct RawLayout {
+pub struct RawLayout {
     extent_size: Block,
 }
 
@@ -1244,7 +1348,7 @@ impl std::fmt::Debug for RawLayout {
 }
 
 impl RawLayout {
-    fn new(extent_size: Block) -> Self {
+    pub fn new(extent_size: Block) -> Self {
         RawLayout { extent_size }
     }
 
@@ -1264,7 +1368,7 @@ impl RawLayout {
     /// Returns the total size of the raw data file
     ///
     /// This includes block data, context slots, active slot array, and metadata
-    fn file_size(&self) -> u64 {
+    pub fn file_size(&self) -> u64 {
         let block_count = self.block_count();
         self.block_size().checked_mul(block_count).unwrap()
             + BLOCK_META_SIZE_BYTES
@@ -1273,7 +1377,7 @@ impl RawLayout {
     }
 
     /// Returns the beginning of supplementary data in the file
-    fn supplementary_data_offset(&self) -> u64 {
+    pub fn supplementary_data_offset(&self) -> u64 {
         self.block_count() * self.block_size()
     }
 
@@ -1283,33 +1387,33 @@ impl RawLayout {
     /// are two context slots arrays, each of which contains one context slot
     /// per block.  We use a ping-pong strategy to ensure that one of them is
     /// always valid (i.e. matching the data in the file).
-    fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
+    pub fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
         self.supplementary_data_offset()
             + (self.block_count() * slot as u64 + block)
                 * BLOCK_CONTEXT_SLOT_SIZE_BYTES
     }
 
     /// Number of blocks in the extent file
-    fn block_count(&self) -> u64 {
+    pub fn block_count(&self) -> u64 {
         self.extent_size.value
     }
 
     /// Returns the byte offset of the `active_context` bitpacked array
-    fn active_context_offset(&self) -> u64 {
+    pub fn active_context_offset(&self) -> u64 {
         self.supplementary_data_offset()
             + self.block_count() * 2 * BLOCK_CONTEXT_SLOT_SIZE_BYTES
     }
 
-    fn active_context_size(&self) -> u64 {
+    pub fn active_context_size(&self) -> u64 {
         self.block_count().div_ceil(8)
     }
 
-    fn metadata_offset(&self) -> u64 {
+    pub fn metadata_offset(&self) -> u64 {
         self.active_context_offset() + self.active_context_size()
     }
 
     /// Number of bytes in each block
-    fn block_size(&self) -> u64 {
+    pub fn block_size(&self) -> u64 {
         self.extent_size.block_size_in_bytes() as u64
     }
 
@@ -1330,6 +1434,7 @@ impl RawLayout {
         block_start: u64,
         iter: I,
         slot: ContextSlot,
+        last_flush: u64,
     ) -> Result<(), CrucibleError>
     where
         I: Iterator<Item = Option<&'a DownstairsBlockContext>>,
@@ -1342,6 +1447,7 @@ impl RawLayout {
             let d = block_context.map(|b| OnDiskDownstairsBlockContext {
                 block_context: b.block_context,
                 on_disk_hash: b.on_disk_hash,
+                flush_id: last_flush as u16,
             });
             bincode::serialize_into(&mut buf[n..], &d).unwrap();
         }
@@ -1426,9 +1532,7 @@ impl RawLayout {
         &self,
         file: &File,
         active_context: &ActiveContextSlots,
-        dirty: bool,
-        flush_number: u64,
-        gen_number: u64,
+        d: OnDiskMeta,
     ) -> Result<(), CrucibleError> {
         assert_eq!(active_context.len(), self.block_count() as usize);
 
@@ -1442,12 +1546,6 @@ impl RawLayout {
             buf.push(v);
         }
 
-        let d = OnDiskMeta {
-            dirty,
-            flush_number,
-            gen_number,
-            ext_version: EXTENT_META_RAW,
-        };
         let mut meta = [0u8; BLOCK_META_SIZE_BYTES as usize];
         bincode::serialize_into(meta.as_mut_slice(), &d).unwrap();
         buf.extend(meta);
@@ -1500,7 +1598,7 @@ mod test {
     use anyhow::Result;
     use bytes::{Bytes, BytesMut};
     use crucible_common::BlockOffset;
-    use crucible_protocol::EncryptionContext;
+    use crucible_protocol::{BlockContext, EncryptionContext};
     use tempfile::tempdir;
 
     const IOV_MAX_TEST: usize = 1000;
@@ -1834,31 +1932,34 @@ mod test {
             ..write.clone()
         };
         inner.write(JobId(10), &write1, false, IOV_MAX_TEST)?;
-        assert_eq!(inner.context_slot_dirty[0], 0b00);
+        assert!(!inner.block_dirty[0]);
         assert_eq!(inner.active_context[0], ContextSlot::A);
-        assert_eq!(inner.context_slot_dirty[1], 0b10);
+        assert!(inner.block_dirty[1]);
         assert_eq!(inner.active_context[1], ContextSlot::B);
 
         // The context should be written to block 0, slot B
         inner.write(JobId(10), &write, false, IOV_MAX_TEST)?;
-        assert_eq!(inner.context_slot_dirty[0], 0b10);
+        assert!(inner.block_dirty[0]);
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.context_slot_dirty[1], 0b10); // unchanged
+        assert!(inner.block_dirty[1]); // unchanged
         assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
+        assert_eq!(inner.bonus_sync_count, 0);
 
-        // The context should be written to block 0, slot A
+        // The context should be written to block 0, slot A, forcing a sync
         inner.write(JobId(11), &write, false, IOV_MAX_TEST)?;
-        assert_eq!(inner.context_slot_dirty[0], 0b11);
+        assert!(inner.block_dirty[0]);
         assert_eq!(inner.active_context[0], ContextSlot::A);
-        assert_eq!(inner.context_slot_dirty[1], 0b10); // unchanged
+        assert!(!inner.block_dirty[1]); // synched
         assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
+        assert_eq!(inner.bonus_sync_count, 1);
 
-        // The context should be written to slot B, forcing a sync
+        // The context should be written to block 0, slot B, forcing a sync
         inner.write(JobId(12), &write, false, IOV_MAX_TEST)?;
-        assert_eq!(inner.context_slot_dirty[0], 0b10);
+        assert!(inner.block_dirty[0]);
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.context_slot_dirty[1], 0b00);
+        assert!(!inner.block_dirty[1]);
         assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
+        assert_eq!(inner.bonus_sync_count, 2);
 
         Ok(())
     }
@@ -1887,27 +1988,32 @@ mod test {
         // The context should be written to slot B
         inner.write(JobId(10), &write, false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.context_slot_dirty[0], 0b10);
+        assert!(inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 0);
 
         // Flush!  This will mark all slots as synched
         inner.flush(12, 12, JobId(11).into())?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.context_slot_dirty[0], 0b00);
+        assert!(!inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 0);
 
         // The context should be written to slot A
         inner.write(JobId(11), &write, false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
-        assert_eq!(inner.context_slot_dirty[0], 0b01);
+        assert!(inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 0);
 
-        // The context should be written to slot B
+        // The context should be written to slot B, triggering a sync
         inner.write(JobId(12), &write, false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.context_slot_dirty[0], 0b11);
+        assert!(inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 1);
 
-        // The context should be written to slot A, forcing a sync
+        // The context should be written to slot A; the block remains dirty
         inner.write(JobId(12), &write, false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
-        assert_eq!(inner.context_slot_dirty[0], 0b01);
+        assert!(inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 2);
 
         Ok(())
     }
@@ -1936,32 +2042,38 @@ mod test {
         // The context should be written to slot B
         inner.write(JobId(10), &write, false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.context_slot_dirty[0], 0b10);
+        assert!(inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 0);
 
-        // The context should be written to slot A
+        // The context should be written to slot A, triggering a sync
         inner.write(JobId(11), &write, false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
-        assert_eq!(inner.context_slot_dirty[0], 0b11);
+        assert!(inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 1);
 
         // Flush!  This will mark all slots as synched
         inner.flush(12, 12, JobId(11).into())?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
-        assert_eq!(inner.context_slot_dirty[0], 0b00);
+        assert!(!inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 1);
 
-        // The context should be written to slot B
+        // The context should be written to slot B, triggering a sync
         inner.write(JobId(12), &write, false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.context_slot_dirty[0], 0b10);
+        assert!(inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 1);
 
-        // The context should be written to slot A
+        // The context should be written to slot A, requiring a sync
         inner.write(JobId(12), &write, false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
-        assert_eq!(inner.context_slot_dirty[0], 0b11);
+        assert!(inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 2);
 
         // The context should be written to slot B, forcing a sync
         inner.write(JobId(11), &write, false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.context_slot_dirty[0], 0b10);
+        assert!(inner.block_dirty[0]);
+        assert_eq!(inner.bonus_sync_count, 3);
 
         Ok(())
     }
@@ -2073,7 +2185,7 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 5);
         inner.flush(10, 10, JobId(10).into())?;
-        assert!(inner.context_slot_dirty.data.iter().all(|v| *v == 0));
+        assert!(inner.block_dirty.data.iter().all(|v| *v == 0));
 
         // This should not have changed active context slots!
         for i in 0..10 {
@@ -2471,6 +2583,7 @@ mod test {
                 }),
             },
             on_disk_hash: u64::MAX,
+            flush_id: u16::MAX,
         };
         let mut ctx_buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
         bincode::serialize_into(ctx_buf.as_mut_slice(), &Some(c)).unwrap();
