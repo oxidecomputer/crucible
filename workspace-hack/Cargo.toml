@@ -55,6 +55,7 @@ schemars = { version = "0.8", features = ["bytes", "chrono", "semver", "uuid1"] 
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", default-features = false, features = ["alloc", "rc", "result", "std"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
@@ -107,6 +108,7 @@ schemars = { version = "0.8", features = ["bytes", "chrono", "semver", "uuid1"] 
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", default-features = false, features = ["alloc", "rc", "result", "std"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
@@ -130,7 +132,8 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
@@ -143,7 +146,8 @@ hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
@@ -156,7 +160,8 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
@@ -167,7 +172,8 @@ hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
@@ -180,7 +186,8 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.29", features = ["feature", "fs", "term", "uio"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
@@ -194,7 +201,8 @@ hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
