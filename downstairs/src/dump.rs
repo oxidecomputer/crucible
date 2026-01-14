@@ -1,6 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
-use crate::extent::ExtentMeta;
+use crate::extent::{ExtentMeta, ExtentType, extent_file_name};
 use rayon::prelude::*;
 use std::convert::TryInto;
 
@@ -11,28 +11,54 @@ struct ExtInfo {
     ei_hm: HashMap<u32, ExtentMeta>,
 }
 
-pub fn verify_region(region_dir: PathBuf, log: Logger) -> Result<()> {
+pub fn verify_region(
+    region_dir: PathBuf,
+    thread_count: Option<usize>,
+    log: Logger,
+) -> Result<()> {
     let region = Region::open(region_dir, false, true, &log)?;
-    let errors: Vec<_> = region
-        .extents
-        .par_iter()
-        .filter_map(|e| {
-            let extent = match e {
-                extent::ExtentState::Opened(extent) => extent,
-                extent::ExtentState::Closed => panic!("dump on closed extent!"),
-            };
 
-            if let Err(err) = extent.validate() {
-                Some((extent.number, err))
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Configure thread pool based on parameter
+    let pool = if let Some(count) = thread_count {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(count)
+            .build()
+            .expect("Failed to build thread pool")
+    } else {
+        rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to build thread pool")
+    };
+
+    let errors: Vec<_> = pool.install(|| {
+        region
+            .extents
+            .par_iter()
+            .filter_map(|e| {
+                let extent = match e {
+                    extent::ExtentState::Opened(extent) => extent,
+                    extent::ExtentState::Closed => {
+                        panic!("dump on closed extent!")
+                    }
+                };
+
+                if let Err(err) = extent.validate() {
+                    Some((extent.number, err))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    });
 
     if !errors.is_empty() {
         for (number, err) in &errors {
-            println!("validation failed for extent {}: {:?}", number, err);
+            println!(
+                "validation failed for extent {} (file {}): {:?}",
+                number,
+                extent_file_name(*number, ExtentType::Data),
+                err
+            );
         }
         bail!("Region failed to verify");
     }
@@ -1045,7 +1071,7 @@ pub fn extent_info(
     println!();
 
     // Calculate extent file layout details using RawLayout
-    use crate::extent_inner_raw::{RawLayout, BLOCK_CONTEXT_SLOT_SIZE_BYTES};
+    use crate::extent_inner_raw::{BLOCK_CONTEXT_SLOT_SIZE_BYTES, RawLayout};
     use crate::extent_inner_raw_common::BLOCK_META_SIZE_BYTES;
 
     let layout = RawLayout::new(def.extent_size());
@@ -1223,17 +1249,12 @@ pub fn extent_info(
         if start_byte == end_byte {
             println!(
                 "Active Context Bits:  0x{:08x} bits {}-{} (0 = Slot A, 1 = Slot B)",
-                active_context_start,
-                start_bit,
-                end_bit
+                active_context_start, start_bit, end_bit
             );
         } else {
             println!(
                 "Active Context Bits:  0x{:08x} bit {} - 0x{:08x} bit {} (0 = Slot A, 1 = Slot B)",
-                active_context_start,
-                start_bit,
-                active_context_end,
-                end_bit
+                active_context_start, start_bit, active_context_end, end_bit
             );
         }
 

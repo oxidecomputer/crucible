@@ -3,8 +3,8 @@ name = "crucible-downstairs"
 version = "0.0.1"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer"]
 license = "MPL-2.0"
-edition = "2021"
-rust-version = "1.81"
+edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 anyhow.workspace = true

@@ -1,7 +1,9 @@
 // Copyright 2023 Oxide Computer Company
 //! Data structures specific to Crucible's `struct Upstairs`
 use crate::{
-    cdt,
+    BlockOp, BlockRes, Buffer, ClientId, ClientMap, ConnectionMode,
+    CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
+    RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts, cdt,
     client::{
         ClientAction, ClientNegotiationFailed, ClientRunResult,
         ClientStopReason, NegotiationResult, NegotiationState,
@@ -15,9 +17,6 @@ use crate::{
     extent_from_offset,
     io_limits::IOLimitGuard,
     stats::UpStatOuter,
-    BlockOp, BlockRes, Buffer, ClientId, ClientMap, ConnectionMode,
-    CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
-    RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_client_types::RegionExtentInfo;
 use crucible_common::{BlockIndex, CrucibleError};
@@ -25,17 +24,17 @@ use serde::{Deserialize, Serialize};
 
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 use bytes::BytesMut;
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{Logger, debug, error, info, o, warn};
 use tokio::{
     sync::mpsc,
-    time::{sleep_until, Instant},
+    time::{Instant, sleep_until},
 };
 use uuid::Uuid;
 
@@ -314,7 +313,7 @@ impl UpstairsConfig {
 impl Upstairs {
     pub(crate) fn new(
         opt: &CrucibleOpts,
-        gen: u64,
+        generation: u64,
         expected_region_def: Option<RegionDefinition>,
         guest: GuestIoHandle,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
@@ -376,7 +375,7 @@ impl Upstairs {
             encryption_context,
             upstairs_id: uuid,
             session_id,
-            generation: AtomicU64::new(gen),
+            generation: AtomicU64::new(generation),
             read_only: opt.read_only,
         });
 
@@ -1018,12 +1017,12 @@ impl Upstairs {
             BlockOp::GoActive { done } => {
                 self.set_active_request(done);
             }
-            BlockOp::GoActiveWithGen { gen, done } => {
+            BlockOp::GoActiveWithGen { generation, done } => {
                 // We allow this if we are not active yet, or we are active
                 // with the requested generation number.
                 match &self.state {
                     UpstairsState::Active | UpstairsState::GoActive(..) => {
-                        if self.cfg.generation() == gen {
+                        if self.cfg.generation() == generation {
                             // Okay, we want to activate with what we already
                             // have, that's valid; let the set_active_request
                             // handle things.
@@ -1044,7 +1043,9 @@ impl Upstairs {
                     | UpstairsState::Disabled(..) => {
                         // This case, we update our generation and then
                         // let set_active_request handle the rest.
-                        self.cfg.generation.store(gen, Ordering::Release);
+                        self.cfg
+                            .generation
+                            .store(generation, Ordering::Release);
                         self.set_active_request(done);
                     }
                 }
@@ -2249,10 +2250,10 @@ impl Upstairs {
 pub(crate) mod test {
     use super::*;
     use crate::{
-        client::{ClientFaultReason, ClientStopReason},
-        test::{make_encrypted_upstairs, make_upstairs},
         Block, BlockOp, BlockOpWaiter, DsStateData, JobId,
         NegotiationStateData, RegionMetadata,
+        client::{ClientFaultReason, ClientStopReason},
+        test::{make_encrypted_upstairs, make_upstairs},
     };
     use bytes::BytesMut;
     use crucible_common::integrity_hash;

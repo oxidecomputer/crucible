@@ -120,7 +120,7 @@ pub const SCF_DECODE_FMRI_REQUIRE_NO_INSTANCE: c_int = 0x00000008;
 
 #[cfg(target_os = "illumos")]
 #[link(name = "scf")]
-extern "C" {
+unsafe extern "C" {
     pub fn scf_handle_create(version: scf_version_t) -> *mut scf_handle_t;
     pub fn scf_handle_destroy(handle: *mut scf_handle_t);
     pub fn scf_handle_bind(handle: *mut scf_handle_t) -> c_int;
@@ -293,7 +293,7 @@ extern "C" {
     ) -> c_int;
 
     pub fn scf_pg_create(handle: *mut scf_handle_t)
-        -> *mut scf_propertygroup_t;
+    -> *mut scf_propertygroup_t;
     pub fn scf_pg_destroy(pg: *mut scf_propertygroup_t);
 
     pub fn scf_pg_get_name(
@@ -420,7 +420,7 @@ extern "C" {
     ) -> c_int;
 
     pub fn smf_disable_instance(instance: *const c_char, flags: c_int)
-        -> c_int;
+    -> c_int;
     pub fn smf_enable_instance(instance: *const c_char, flags: c_int) -> c_int;
     pub fn smf_refresh_instance(instance: *const c_char) -> c_int;
 
