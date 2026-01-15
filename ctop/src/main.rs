@@ -1,4 +1,4 @@
-// Copyright 2025 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 //! Standalone ctop - curses-based top-like display of crucible dtrace data
 
@@ -417,6 +417,28 @@ fn format_row(
         }
     }
     result
+}
+
+/// Calculate the number of visible rows for session display
+///
+/// Terminal layout (total FIXED_LINES = 7):
+///   1 header (timestamp)
+///   1 blank line
+///   1 column headers
+///   N session lines (variable, returned by this function)
+///   1 scroll indicator (↑ more above)
+///   1 scroll indicator (↓ more below)
+///   1 blank line
+///   1 footer (help text)
+///
+/// Returns at least 1 visible row to prevent crashes.
+fn calculate_visible_rows(terminal_height: u16) -> usize {
+    const FIXED_LINES: u16 = 7;
+    if terminal_height > FIXED_LINES {
+        (terminal_height - FIXED_LINES) as usize
+    } else {
+        1 // Minimum to avoid crashes
+    }
 }
 
 /// Render a sparkline from delta history
@@ -872,19 +894,9 @@ async fn display_task(
             let scroll_offset = state_guard.scroll_offset;
 
             // Calculate visible window
-            // Terminal layout: 1 header + 1 blank + 1 column headers + sessions + 1 blank + 1 footer
-            // Always reserve 2 lines for scroll indicators to prevent flickering
             let total_sessions = sessions.len();
             let has_more_above = scroll_offset > 0;
-
-            // Always reserve space for both scroll indicators to prevent layout changes
-            let fixed_lines = 7; // 5 base lines + 2 for scroll indicators
-
-            let visible_rows = if terminal_height > fixed_lines as u16 {
-                (terminal_height - fixed_lines as u16) as usize
-            } else {
-                1 // Minimum of 1 row to avoid crashes
-            };
+            let visible_rows = calculate_visible_rows(terminal_height);
 
             let scroll_end = (scroll_offset + visible_rows).min(total_sessions);
             let has_more_below = scroll_end < total_sessions;
@@ -1039,14 +1051,8 @@ async fn display_task(
                         state_guard.selected_index += 1;
 
                         // Calculate visible rows to determine scroll behavior
-                        // Always use fixed 7 lines to prevent flickering
-                        let fixed_lines = 7;
                         let visible_rows =
-                            if terminal_size.1 > fixed_lines as u16 {
-                                (terminal_size.1 - fixed_lines as u16) as usize
-                            } else {
-                                1
-                            };
+                            calculate_visible_rows(terminal_size.1);
 
                         // Scroll down if selection moves below visible window
                         let scroll_end =
@@ -1064,14 +1070,8 @@ async fn display_task(
                     // Page up (only in table mode)
                     if !state_guard.detail_mode && num_sessions > 0 {
                         // Calculate visible rows
-                        // Always use fixed 7 lines to prevent flickering
-                        let fixed_lines = 7;
                         let visible_rows =
-                            if terminal_size.1 > fixed_lines as u16 {
-                                (terminal_size.1 - fixed_lines as u16) as usize
-                            } else {
-                                1
-                            };
+                            calculate_visible_rows(terminal_size.1);
 
                         // Move up by visible_rows
                         state_guard.selected_index = state_guard
@@ -1090,14 +1090,8 @@ async fn display_task(
                     // Page down (only in table mode)
                     if !state_guard.detail_mode && num_sessions > 0 {
                         // Calculate visible rows
-                        // Always use fixed 7 lines to prevent flickering
-                        let fixed_lines = 7;
                         let visible_rows =
-                            if terminal_size.1 > fixed_lines as u16 {
-                                (terminal_size.1 - fixed_lines as u16) as usize
-                            } else {
-                                1
-                            };
+                            calculate_visible_rows(terminal_size.1);
 
                         // Move down by visible_rows
                         let new_selected =

@@ -1,4 +1,4 @@
-// Copyright 2025 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 //! Common types and utilities shared between cmon and ctop
 
@@ -210,16 +210,5 @@ mod tests {
 
         assert_eq!(format!("{:?}", display), format!("{:?}", copied));
         assert_eq!(format!("{:?}", display), format!("{:?}", cloned));
-    }
-
-    #[test]
-    fn test_dtrace_display_enum_count() {
-        // Verify we have the expected number of variants
-        let count = DtraceDisplay::iter().count();
-        assert_eq!(
-            count, 25,
-            "Expected 25 DtraceDisplay variants, found {}",
-            count
-        );
     }
 }

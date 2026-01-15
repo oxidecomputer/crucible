@@ -1,4 +1,4 @@
-// Copyright 2025 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 //! Integration tests for ctop
 //!
@@ -83,6 +83,7 @@
 //! cargo test -p ctop --test integration_test test_parse_dtrace_json_format
 //! ```
 
+use cmon_common::DtraceWrapper;
 use serde_json;
 
 /// Test that we can parse valid DTrace JSON output
@@ -132,19 +133,19 @@ fn test_parse_dtrace_json_format() {
         }
     }"#;
 
-    // Attempt to parse - this validates the JSON structure matches what
-    // cmon_common::DtraceWrapper expects
-    let result: Result<serde_json::Value, _> =
-        serde_json::from_str(sample_json);
+    // Parse into the actual DtraceWrapper type used in production
+    // This ensures the test catches real compatibility issues
+    let result: Result<DtraceWrapper, _> = serde_json::from_str(sample_json);
     assert!(
         result.is_ok(),
-        "Sample dtrace JSON should parse successfully"
+        "Sample dtrace JSON should parse into DtraceWrapper: {:?}",
+        result.err()
     );
 
     let parsed = result.unwrap();
-    assert_eq!(parsed["pid"], 12345);
-    assert_eq!(parsed["status"]["session_id"], "session-456");
-    assert_eq!(parsed["status"]["ds_state"][0], "Active");
+    assert_eq!(parsed.pid, 12345);
+    assert_eq!(parsed.status.session_id, "session-456");
+    assert_eq!(parsed.status.ds_state[0], "Active");
 }
 
 /// Test handling of invalid JSON

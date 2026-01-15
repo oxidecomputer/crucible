@@ -6,7 +6,6 @@ use crucible_control_client::Client;
 use crucible_protocol::ClientId;
 use std::io::{self, BufRead};
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
 use tokio::time::{Duration, sleep};
 
 /// Connect to crucible control server
