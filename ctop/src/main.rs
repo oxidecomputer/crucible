@@ -1392,9 +1392,10 @@ mod tests {
         history.push_back(0);
         history.push_back(100);
 
-        let sparkline = render_sparkline(&history, 10, 100);
+        // Use width=2 to match data size (no padding)
+        let sparkline = render_sparkline(&history, 2, 100);
 
-        // Should use valid unicode block characters
+        // Should use valid unicode block characters (no spaces since width matches data)
         for c in sparkline.chars() {
             assert!(
                 ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'].contains(&c),
@@ -1402,6 +1403,14 @@ mod tests {
                 c
             );
         }
+
+        // Verify correct blocks: 0 maps to lowest, 100 maps to highest
+        let chars: Vec<char> = sparkline.chars().collect();
+        assert_eq!(chars[0], '▁', "Value 0 should map to lowest block");
+        assert_eq!(
+            chars[1], '█',
+            "Value 100 (max) should map to highest block"
+        );
     }
 
     #[test]
@@ -1418,19 +1427,33 @@ mod tests {
         history.push_back(100);
 
         // Test with global max = 200 (should scale differently than 100)
-        let sparkline1 = render_sparkline(&history, 10, 200);
-        let sparkline2 = render_sparkline(&history, 10, 100);
+        // Use width=2 to avoid padding and test actual data
+        let sparkline1 = render_sparkline(&history, 2, 200);
+        let sparkline2 = render_sparkline(&history, 2, 100);
 
         // With higher global max, the values should appear relatively lower
         let chars1: Vec<char> = sparkline1.chars().collect();
         let chars2: Vec<char> = sparkline2.chars().collect();
 
-        // Second sparkline should use higher blocks (value 100 is max in range 0-100,
-        // but only midpoint in range 0-200)
+        // Sparkline1 (max=200): value 100 is only halfway, so should use lower blocks
+        // Sparkline2 (max=100): value 100 is the maximum, so should use highest block
+        //
+        // For value 100:
+        //   normalized1 = 100/200 * 7 = 3.5 → index 3 = '▄'
+        //   normalized2 = 100/100 * 7 = 7.0 → index 7 = '█'
+        //
+        // Therefore chars1[1] should be '▄' and chars2[1] should be '█'
         assert!(
             chars1[1] < chars2[1],
-            "Expected normalization to affect block height"
+            "Expected normalization to affect block height: \
+             sparkline1[1]='{}' should be < sparkline2[1]='{}'",
+            chars1[1],
+            chars2[1]
         );
+
+        // Verify the actual characters are as expected
+        assert_eq!(chars1[1], '▄', "Value 100 with max=200 should be ▄");
+        assert_eq!(chars2[1], '█', "Value 100 with max=100 should be █");
     }
 
     // ============================================================================
