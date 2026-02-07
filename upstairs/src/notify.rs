@@ -142,7 +142,9 @@ async fn notify_task_nexus(
     // Store high QoS messages if they can't be sent
     let mut stored_notification: Option<Notification> = None;
 
-    let reqwest_client = reqwest::ClientBuilder::new()
+    // Use reqwest 0.12 for the client passed to nexus_client, which is
+    // consumed via git dep from omicron and still expects reqwest 0.12 types.
+    let reqwest_client = reqwest012::ClientBuilder::new()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -413,7 +415,7 @@ async fn notify_task_nexus(
 /// Gets a Nexus client based on any rack-internal IPv6 address
 pub(crate) async fn get_nexus_client(
     log: &Logger,
-    client: reqwest::Client,
+    client: reqwest012::Client,
     addr: Ipv6Addr,
 ) -> Option<nexus_client::Client> {
     use internal_dns_resolver::Resolver;
