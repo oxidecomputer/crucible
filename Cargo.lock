@@ -1620,6 +1620,7 @@ dependencies = [
  "clap_builder",
  "crossbeam-epoch",
  "crossbeam-utils",
+ "crossterm",
  "crypto-common",
  "digest",
  "dof 0.3.0",
