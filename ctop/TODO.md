@@ -15,13 +15,6 @@
 - [ ] Display detailed graph for all selected sessions simultaneously
 - [ ] Show visual indicator for which sessions are selected in the main list
 
-### Screen Scrolling
-- [ ] Add ability to scroll the session list when there are more sessions than
-      can fit on screen
-- [ ] Implement scroll indicators (e.g., "↑ More above", "↓ More below")
-- [ ] Consider adding Page Up/Page Down support for faster navigation
-- [ ] Remove sessions that have not updated after 60 seconds
-
 ### Normalization Improvements
 - [ ] Change normalization toggle.
   - Make the same key rotate between the three options.
@@ -40,31 +33,3 @@
 - [ ] Allow some downstairs individual stats to be combined into a "sum", like
       connections for each downstairs summed into a single value.  Not all
       dtrace probes could do this, so give just options for ones we can.
-
-## Implementation Notes
-
-### Session Selection
-- Maintain a `HashSet<String>` of selected session IDs in `CtopState`
-- Space key toggles selection of currently highlighted session
-- Selected sessions marked with `[*]` or similar indicator
-- Detail view shows all selected sessions' sparklines stacked or overlaid
-
-### Scrolling
-- Track `scroll_offset` in display state
-- Calculate visible window based on terminal height
-- Adjust rendering to show sessions from `scroll_offset` to
-  `scroll_offset + visible_rows`
-- Update scroll offset on up/down arrow keys
-
-### Normalization
-- Modify `render_detail_view()` and sparkline rendering
-- For zero-based normalization: always use `min = 0`, compute `max` from data
-- For selection-based normalization: filter sessions to only selected ones
-  before computing min/max
-- Add visual indicator in detail view header showing normalization mode
-
-## UI/UX Considerations
-- Document new keyboard shortcuts in help or header
-- Ensure selected sessions are visually distinct
-- Consider performance impact of rendering multiple detailed graphs
-- Test with many sessions (10+, 50+, 100+) to ensure scrolling performs well
