@@ -230,7 +230,6 @@ fn format_row(
     d_out: &DtraceInfo,
     precomputed_delta: Option<u64>,
     dd: &[DtraceDisplay],
-    _is_stale: bool,
 ) -> String {
     let mut result = String::new();
 
@@ -624,17 +623,11 @@ fn render_detail_view(
 
         // Format the session data row
         let display_fields = default_display_fields();
-        let is_stale = session_data
-            .last_updated
-            .elapsed()
-            .as_secs()
-            > STALE_THRESHOLD_SECS;
         let row_data = format_row(
             session_data.pid,
             &session_data.dtrace_info,
             session_data.current_delta,
             &display_fields,
-            is_stale,
         );
 
         // Render session data at top
@@ -934,7 +927,6 @@ async fn display_task(
                     &session_data.dtrace_info,
                     session_data.current_delta,
                     &display_fields,
-                    is_stale,
                 );
                 write!(stdout, "{}", row)?;
 
