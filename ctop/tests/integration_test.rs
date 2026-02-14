@@ -84,7 +84,6 @@
 //! ```
 
 use cmon_common::DtraceWrapper;
-use serde_json;
 
 /// Test that we can parse valid DTrace JSON output
 #[test]

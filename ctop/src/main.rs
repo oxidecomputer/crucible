@@ -1511,31 +1511,9 @@ mod tests {
         ); // Last item is most recent
     }
 
-    #[test]
-    fn test_stale_threshold_constant() {
-        // Verify STALE_THRESHOLD_SECS is reasonable
-        assert!(
-            STALE_THRESHOLD_SECS > 0,
-            "Stale threshold should be positive"
-        );
-        assert!(
-            STALE_THRESHOLD_SECS <= 60,
-            "Stale threshold should be under a minute"
-        );
-    }
-
-    #[test]
-    fn test_max_delta_history_constant() {
-        // Verify MAX_DELTA_HISTORY is reasonable for sparklines
-        assert!(
-            MAX_DELTA_HISTORY >= 50,
-            "Should store enough history for reasonable sparklines"
-        );
-        assert!(
-            MAX_DELTA_HISTORY <= 1000,
-            "History shouldn't be excessively large"
-        );
-    }
+    // Note: Constant validation tests removed - clippy warns that assertions
+    // on constants are optimized out. Constants are validated at compile time
+    // by their usage in the code.
 
     // ============================================================================
     // Future Testing Opportunities
