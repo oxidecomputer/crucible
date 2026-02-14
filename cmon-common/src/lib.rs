@@ -206,7 +206,7 @@ mod tests {
         // Verify Copy and Clone work correctly
         let display = DtraceDisplay::Pid;
         let copied = display;
-        let cloned = display.clone();
+        let cloned = display; // Copy trait, no need for .clone()
 
         assert_eq!(format!("{:?}", display), format!("{:?}", copied));
         assert_eq!(format!("{:?}", display), format!("{:?}", cloned));
