@@ -58,6 +58,7 @@ uuid.workspace = true
 aes-gcm-siv.workspace = true
 rand_chacha.workspace = true
 reqwest.workspace = true
+reqwest012.workspace = true
 crucible-workspace-hack.workspace = true
 nexus-client.workspace = true
 omicron-uuid-kinds.workspace = true
