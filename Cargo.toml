@@ -113,7 +113,7 @@ static_assertions = "1.1.0"
 statistical = "1.0.0"
 subprocess = "0.2.9"
 strum = { version = "0.27", features = ["derive"] }
-strum_macros = "0.27"
+strum_macros = "0.28"
 tempfile = "3"
 test-strategy = "0.4.3"
 thiserror = "2"
