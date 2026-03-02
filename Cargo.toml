@@ -130,7 +130,7 @@ usdt = "0.6.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
 
 # git
-dropshot = { version = "0.16.5", features = [ "usdt-probes" ] }
+dropshot = { version = "0.16.7", features = [ "usdt-probes" ] }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 nexus-client = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 internal-dns-resolver = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
