@@ -48,7 +48,6 @@ pub fn all_apis() -> anyhow::Result<ManagedApis> {
                 ..Default::default()
             },
             api_description: crucible_agent_api_mod::stub_api_description,
-            extra_validation: None,
         },
         ManagedApiConfig {
             ident: "crucible-pantry",
@@ -62,7 +61,6 @@ pub fn all_apis() -> anyhow::Result<ManagedApis> {
                 ..Default::default()
             },
             api_description: crucible_pantry_api_mod::stub_api_description,
-            extra_validation: None,
         },
         ManagedApiConfig {
             ident: "downstairs-repair",
@@ -78,12 +76,12 @@ pub fn all_apis() -> anyhow::Result<ManagedApis> {
             },
             api_description:
                 crucible_downstairs_repair_api_mod::stub_api_description,
-            extra_validation: None,
         },
     ];
 
     let apis = ManagedApis::new(apis)
         .context("error creating ManagedApis")?
+        .with_git_stub_storage()
         .with_unknown_apis(["crucible-control", "dsc-control"])
         .with_validation(validate);
     Ok(apis)

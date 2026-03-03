@@ -57,8 +57,9 @@ clearscreen = "4.0.2"
 crossterm = { version = "0.28.1" }
 crucible-workspace-hack = "0.1.0"  # see [patch.crates-io.crucible-workspace-hack] for more
 csv = "1.4.0"
-dropshot-api-manager = "0.2.4"
-dropshot-api-manager-types = "0.2.4"
+dropshot = { version = "0.16.7", features = [ "usdt-probes" ] }
+dropshot-api-manager = "0.5.2"
+dropshot-api-manager-types = "0.5.2"
 expectorate = "1.2.0"
 fakedata_generator = "0.5"
 futures = "0.3"
@@ -130,7 +131,6 @@ usdt = "0.6.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
 
 # git
-dropshot = { version = "0.16.5", features = [ "usdt-probes" ] }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 nexus-client = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 internal-dns-resolver = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
