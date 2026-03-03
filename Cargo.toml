@@ -61,7 +61,7 @@ dropshot = { version = "0.16.7", features = [ "usdt-probes" ] }
 dropshot-api-manager = "0.5.2"
 dropshot-api-manager-types = "0.5.2"
 expectorate = "1.2.0"
-fakedata_generator = "0.5"
+fakedata_generator = "0.7"
 futures = "0.3"
 futures-core = "0.3"
 hex = "0.4"
