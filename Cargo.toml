@@ -95,7 +95,7 @@ reedline = "0.43.0"
 rangemap = "1.7.0"
 reqwest = { version = "0.13", features = ["default", "blocking", "json", "stream"] }
 reqwest012 = { package = "reqwest", version = "0.12", features = ["default", "json", "stream"] }
-ringbuffer = "0.15.0"
+ringbuffer = "0.16.0"
 rusqlite = { version = "0.37" }
 rustls-pemfile = { version = "1.0.4" }
 schemars = { version = "0.8", features = [ "chrono", "uuid1" ] }
