@@ -4,7 +4,7 @@
  * If you want a specific UUID only, do something like
  * this to the volume-*-start:
  *
- * /json(copyinstr(arg1), "ok")] == "SOME_UUID_YOU_WANT"/
+ * /json(copyinstr(arg1), "ok") == "SOME_UUID_YOU_WANT"/
  */
 crucible_upstairs*:::volume-*-start
 {
@@ -18,10 +18,11 @@ crucible_upstairs*:::volume-*-done
     this->cmd = strtok(NULL, "-");
     this->uuid = json(copyinstr(arg1), "ok");
     @time[this->uuid, this->cmd] = quantize(timestamp - start[arg0, this->uuid]);
+    @count[this->uuid, this->cmd] = count();
     start[arg0, this->uuid] = 0;
 }
 
 tick-5s
 {
-    printa(@time)
+    printa("%s %20s %@8d\n%@d\n", @count, @time);
 }
