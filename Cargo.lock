@@ -1163,12 +1163,10 @@ dependencies = [
 name = "crucible-agent-api"
 version = "0.1.0"
 dependencies = [
- "crucible-agent-types",
+ "crucible-agent-types-versions",
  "crucible-workspace-hack",
  "dropshot",
  "dropshot-api-manager-types",
- "schemars 0.8.22",
- "serde",
 ]
 
 [[package]]
@@ -1190,12 +1188,22 @@ dependencies = [
 name = "crucible-agent-types"
 version = "0.1.0"
 dependencies = [
- "chrono",
+ "crucible-agent-types-versions",
  "crucible-smf 0.0.0",
  "crucible-workspace-hack",
  "schemars 0.8.22",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "crucible-agent-types-versions"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crucible-workspace-hack",
+ "schemars 0.8.22",
+ "serde",
 ]
 
 [[package]]

@@ -1,8 +1,10 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 use anyhow::{Result, anyhow, bail};
 use clap::Parser;
+use crucible_agent_types::region::region_smf_properties;
 use crucible_agent_types::smf::SmfProperty;
+use crucible_agent_types::snapshot::running_snapshot_smf_properties;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
 use slog::{Logger, debug, error, info, o};
 use std::collections::HashSet;
@@ -484,7 +486,7 @@ where
         dir.push(&r.id.0);
 
         let properties = {
-            let mut properties = r.get_smf_properties(&dir);
+            let mut properties = region_smf_properties(r, &dir);
 
             // Instruct downstairs process to listen on the same IP as the
             // agent, because there is currently only one address in the
@@ -658,7 +660,8 @@ where
             dir.push(snapshot.name.clone());
 
             let properties = {
-                let mut properties = snapshot.get_smf_properties(&dir);
+                let mut properties =
+                    running_snapshot_smf_properties(snapshot, &dir);
 
                 // Instruct downstairs process to listen on the same IP as the
                 // agent, because there is currently only one address in the
