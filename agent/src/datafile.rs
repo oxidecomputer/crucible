@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 use anyhow::{Result, anyhow, bail};
 use crucible_agent_types::{region::*, snapshot::*};
@@ -187,7 +187,7 @@ impl DataFile {
          * Look for a region with this ID.
          */
         if let Some(r) = inner.regions.get(&create.id) {
-            if let Some(mis) = create.mismatch(r) {
+            if let Some(mis) = create_region_mismatch(&create, r) {
                 bail!(
                     "requested region {} already exists, with {}",
                     create.id.0,
