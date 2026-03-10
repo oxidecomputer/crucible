@@ -379,7 +379,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use rand::Rng;
+    use rand::RngExt;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_pseudo_file_sane() -> Result<()> {

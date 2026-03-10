@@ -5253,7 +5253,7 @@ mod test {
         let mut random_data = vec![0; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0);
 
-        let mut rng = ChaCha20Rng::from_os_rng();
+        let mut rng = rand::make_rng::<ChaCha20Rng>();
         rng.fill_bytes(&mut random_data);
 
         // write random_data to file
@@ -5321,7 +5321,7 @@ mod test {
         let mut random_data = vec![0; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0);
 
-        let mut rng = ChaCha20Rng::from_os_rng();
+        let mut rng = rand::make_rng::<ChaCha20Rng>();
         rng.fill_bytes(&mut random_data);
 
         // write random_data to file
@@ -5403,7 +5403,7 @@ mod test {
         let mut random_data = vec![0; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0);
 
-        let mut rng = ChaCha20Rng::from_os_rng();
+        let mut rng = rand::make_rng::<ChaCha20Rng>();
         rng.fill_bytes(&mut random_data);
 
         // write random_data to file
@@ -5486,7 +5486,7 @@ mod test {
         let mut random_data = vec![0u8; total_bytes as usize];
         random_data.resize(total_bytes as usize, 0u8);
 
-        let mut rng = ChaCha20Rng::from_os_rng();
+        let mut rng = rand::make_rng::<ChaCha20Rng>();
         rng.fill_bytes(&mut random_data);
 
         // write random_data to file

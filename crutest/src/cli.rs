@@ -260,7 +260,7 @@ async fn rand_write(
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
 
     /*
      * Once we have our IO size, decide where the starting offset should
@@ -913,7 +913,7 @@ async fn process_cli_command(
         }
         CliMessage::RandRead => {
             if let Some(di) = di_option {
-                let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+                let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
                 let size = 1;
                 let block_max = di.volume_info.total_blocks() - size + 1;
                 let offset = rng.random_range(0..block_max);

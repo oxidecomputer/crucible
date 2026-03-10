@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);
     }
 
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
 
     let rounds = 1500;

@@ -810,7 +810,7 @@ async fn do_dsc_work(
     work: DscCmd,
     action_tx_list: &[mpsc::Sender<DownstairsAction>],
 ) {
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(rand::random());
 
     match work {
         DscCmd::Start(cid) => {
@@ -979,7 +979,7 @@ async fn start_dsc(
         }
     }
 
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(rand::random());
     let mut timeout_deadline = Instant::now() + Duration::from_secs(5);
     let mut shutdown_sent = false;
     let mut random_restart = false;

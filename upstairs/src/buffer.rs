@@ -374,7 +374,7 @@ impl UninitializedBuffer {
 #[cfg(test)]
 mod test {
     use super::*;
-    use rand::RngCore;
+    use rand::Rng;
 
     #[test]
     fn test_buffer_sane() {

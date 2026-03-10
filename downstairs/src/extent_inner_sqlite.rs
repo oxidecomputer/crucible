@@ -1289,7 +1289,7 @@ mod test {
     use super::*;
     use bytes::{Bytes, BytesMut};
     use crucible_common::BlockOffset;
-    use rand::RngCore;
+    use rand::Rng;
     use tempfile::tempdir;
 
     const IOV_MAX_TEST: usize = 1000;

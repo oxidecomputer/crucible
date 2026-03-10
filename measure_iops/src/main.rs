@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use clap::Parser;
-use rand::Rng;
+use rand::RngExt;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 

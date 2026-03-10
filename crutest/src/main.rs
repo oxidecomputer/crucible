@@ -8,7 +8,6 @@ use human_bytes::human_bytes;
 use indicatif::{ProgressBar, ProgressStyle};
 use oximeter::types::ProducerRegistry;
 use rand::prelude::*;
-use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
@@ -2021,7 +2020,7 @@ async fn fill_sparse_workload(
     volume: &Volume,
     di: &mut DiskInfo,
 ) -> Result<()> {
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
 
     let mut extent_block_start = 0;
     // We loop over all sub volumes, doing one write to each extent.
@@ -2073,7 +2072,7 @@ async fn generic_workload(
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
 
     let count_width = match wtq {
         WhenToQuit::Count { count } => count.to_string().len(),
@@ -2249,7 +2248,7 @@ async fn yolo_workload(
     range: bool,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
 
     let total_blocks = di.volume_info.total_blocks();
 
@@ -2418,7 +2417,7 @@ async fn replay_workload(
     dsc_client: Client,
     ds_count: u32,
 ) -> Result<()> {
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
     let mut generic_wtq = WhenToQuit::Count { count: 300 };
 
     for c in 1.. {
@@ -3013,7 +3012,7 @@ async fn dirty_workload(
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
 
     /*
      * To store our write requests
@@ -3150,7 +3149,7 @@ async fn rand_read_write_workload(
                 RandReadWriteMode::Write => {
                     let mut buf = BytesMut::new();
                     buf.resize(cfg.blocks_per_io * block_size, 0u8);
-                    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+                    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
                     rng.fill_bytes(&mut buf);
                     while !stop.load(Ordering::Acquire) {
                         let offset = rng
@@ -3164,7 +3163,7 @@ async fn rand_read_write_workload(
                 }
                 RandReadWriteMode::Read => {
                     let mut buf = Buffer::new(cfg.blocks_per_io, block_size);
-                    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+                    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
                     while !stop.load(Ordering::Acquire) {
                         let offset = rng
                             .random_range(0..=total_blocks - cfg.blocks_per_io);
@@ -3314,7 +3313,7 @@ async fn bufferbloat_workload(
         let handle = tokio::spawn(async move {
             let mut buf = BytesMut::new();
             buf.resize(cfg.blocks_per_io * block_size, 0u8);
-            let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+            let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
             rng.fill_bytes(&mut buf);
             while !stop.load(Ordering::Acquire) {
                 let offset =
@@ -3391,7 +3390,7 @@ async fn one_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
 
     /*
      * Once we have our IO size, decide where the starting offset should
@@ -3525,7 +3524,7 @@ async fn write_flush_read_workload(
     /*
      * TODO: Allow the user to specify a seed here.
      */
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
 
     let count_width = count.to_string().len();
     let block_size = di.volume_info.block_size;
@@ -3650,7 +3649,7 @@ async fn repair_workload(
     di: &mut DiskInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
 
     // TODO: Allow user to request r/w/f percentage (how???)
     // We want at least one write, otherwise there will be nothing to
@@ -3761,7 +3760,7 @@ async fn demo_workload(
     di: &mut DiskInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
-    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+    let mut rng = rand::make_rng::<rand_chacha::ChaCha8Rng>();
 
     // Because this workload issues a bunch of IO all at the same time,
     // we can't be sure the order will be preserved for our IOs.

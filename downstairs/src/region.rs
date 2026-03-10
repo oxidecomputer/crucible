@@ -1266,7 +1266,7 @@ pub(crate) mod test {
     use std::fs::rename;
     use std::path::PathBuf;
 
-    use rand::RngCore;
+    use rand::Rng;
     use tempfile::tempdir;
     use uuid::Uuid;
 

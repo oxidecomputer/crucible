@@ -35,7 +35,7 @@ pub fn dynamometer(
 
     // Fill test: write bytes in whole region
 
-    let mut rng = SmallRng::from_os_rng();
+    let mut rng: SmallRng = rand::make_rng();
 
     'outer: loop {
         let block = (0..ddef.block_size() as usize)
