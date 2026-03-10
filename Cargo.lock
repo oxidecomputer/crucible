@@ -1105,7 +1105,7 @@ dependencies = [
  "rand 0.9.2",
  "rand_chacha 0.9.0",
  "rayon",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "reqwest 0.13.2",
  "ringbuffer",
  "schemars 0.8.22",
@@ -1645,7 +1645,7 @@ dependencies = [
  "regex",
  "regex-automata",
  "regex-syntax",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "reqwest 0.13.2",
  "rustix 0.38.37",
  "rustls 0.23.31",
@@ -2666,7 +2666,7 @@ dependencies = [
  "omicron-workspace-hack",
  "progenitor 0.10.0",
  "rand 0.9.2",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -3653,7 +3653,7 @@ dependencies = [
  "omicron-uuid-kinds",
  "omicron-workspace-hack",
  "qorb",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "slog",
  "thiserror 2.0.18",
 ]
@@ -4134,7 +4134,7 @@ dependencies = [
  "chrono",
  "percent-encoding",
  "progenitor 0.11.2",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -4309,7 +4309,7 @@ dependencies = [
  "oxnet",
  "progenitor 0.10.0",
  "regress",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -4674,7 +4674,7 @@ dependencies = [
  "protocol",
  "rand 0.9.2",
  "regress",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "schemars 0.8.22",
  "semver 1.0.27",
  "serde",
@@ -4740,7 +4740,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "semver 1.0.27",
  "serde",
  "serde_derive",
@@ -5067,7 +5067,7 @@ dependencies = [
  "qorb",
  "quote",
  "regex",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -5643,7 +5643,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "percent-encoding",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -5658,7 +5658,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "percent-encoding",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -6286,9 +6286,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.12.24"
+version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d0946410b9f7b082a427e4ef5c8ff541a88b357bc6c637c40db3a68ac70a36f"
+checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -7372,7 +7372,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -8220,7 +8220,7 @@ dependencies = [
  "olpc-cjson",
  "pem",
  "percent-encoding",
- "reqwest 0.12.24",
+ "reqwest 0.12.28",
  "rustls 0.23.31",
  "serde",
  "serde_json",
