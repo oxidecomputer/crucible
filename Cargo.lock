@@ -1656,6 +1656,7 @@ dependencies = [
  "serde_core",
  "serde_json",
  "similar",
+ "slab",
  "slog",
  "smallvec",
  "spin",
