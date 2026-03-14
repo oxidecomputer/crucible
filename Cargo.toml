@@ -66,7 +66,7 @@ futures = "0.3"
 futures-core = "0.3"
 hex = "0.4"
 http = "1.4.0"
-httptest = "0.16.3"
+httptest = "0.16.4"
 human_bytes = "0.4.3"
 humantime = "2.3.0"
 hyper = { version = "1", features = [ "full" ] }
