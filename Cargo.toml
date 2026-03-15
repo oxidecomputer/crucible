@@ -113,7 +113,7 @@ slog-term = { version = "2.9" }
 static_assertions = "1.1.0"
 statistical = "1.0.0"
 subprocess = "1.0.0"
-strum = { version = "0.27", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
 tempfile = "3"
 test-strategy = "0.4.5"
