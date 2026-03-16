@@ -581,7 +581,7 @@ impl Extent {
     /// returned.  Otherwise, the value in `ExtentReadResponse::data` is
     /// guaranteed to be fully initialized and of the requested length.
     #[instrument]
-    pub fn read(
+    pub(crate) fn read(
         &mut self,
         job_id: JobId,
         req: ExtentReadRequest,
@@ -597,7 +597,7 @@ impl Extent {
     }
 
     #[instrument]
-    pub fn write(
+    pub(crate) fn write(
         &mut self,
         job_id: JobId,
         write: &ExtentWrite,
