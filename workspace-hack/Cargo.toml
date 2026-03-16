@@ -155,6 +155,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 hyper-util = { version = "0.1", features = ["full"] }
 linux-raw-sys = { version = "0.4", default-features = false, features = ["elf", "errno", "general", "ioctl", "no_std", "system"] }
 mio = { version = "1", features = ["net", "os-ext"] }
+nix = { version = "0.31", features = ["feature", "fs", "term", "uio"] }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
@@ -187,6 +188,7 @@ hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
+nix = { version = "0.31", features = ["feature", "fs", "term", "uio"] }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
@@ -217,6 +219,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 hyper-util = { version = "0.1", features = ["full"] }
 itertools = { version = "0.12" }
 mio = { version = "1", features = ["net", "os-ext"] }
+nix = { version = "0.31", features = ["feature", "fs", "term", "uio"] }
 nom = { version = "7" }
 regex = { version = "1" }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }

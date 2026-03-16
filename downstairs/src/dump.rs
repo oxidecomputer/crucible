@@ -924,98 +924,6 @@ fn show_extent_block(
 
     Ok(())
 }
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn color_compare() {
-        // All the same, all green
-        let cm = vec![2, 2, 2];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![32, 32, 32]);
-    }
-    #[test]
-    fn color_compare_one() {
-        // All the same, all green, size 1
-        let cm = vec![2];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![32]);
-    }
-    #[test]
-    fn color_compare_two() {
-        // All the same, all green size 2
-        let cm = vec![2, 2];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![32, 32]);
-    }
-    #[test]
-    fn color_compare_two_red0() {
-        let cm = vec![2, 3];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![31, 32]);
-    }
-    #[test]
-    fn color_compare_two_red1() {
-        let cm = vec![4, 2];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![32, 31]);
-    }
-    #[test]
-    fn color_compare_red0() {
-        let cm = vec![1, 2, 2];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![31, 32, 32]);
-    }
-    #[test]
-    fn color_compare_red1() {
-        let cm = vec![4, 2, 4];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![32, 31, 32]);
-    }
-    #[test]
-    fn color_compare_red2() {
-        let cm = vec![8, 8, 2];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![32, 32, 31]);
-    }
-    #[test]
-    fn color_compare_red02() {
-        let cm = vec![1, 3, 2];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![31, 32, 31]);
-    }
-    #[test]
-    fn color_compare_red02_2() {
-        let cm = vec![2, 3, 1];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![31, 32, 31]);
-    }
-    #[test]
-    fn color_compare_red01() {
-        let cm = vec![3, 2, 4];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![31, 31, 32]);
-    }
-    #[test]
-    fn color_compare_red01_2() {
-        let cm = vec![2, 3, 4];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![31, 31, 32]);
-    }
-    #[test]
-    fn color_compare_red12() {
-        let cm = vec![5, 3, 4];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![32, 31, 31]);
-    }
-    #[test]
-    fn color_compare_red12_2() {
-        let cm = vec![5, 4, 3];
-        let colors = color_vec(&cm);
-        assert_eq!(colors, vec![32, 31, 31]);
-    }
-}
 
 // Display extent file layout information
 // Reads only the region.json file and calculates the layout
@@ -1276,4 +1184,97 @@ pub fn extent_info(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn color_compare() {
+        // All the same, all green
+        let cm = vec![2, 2, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 32, 32]);
+    }
+    #[test]
+    fn color_compare_one() {
+        // All the same, all green, size 1
+        let cm = vec![2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32]);
+    }
+    #[test]
+    fn color_compare_two() {
+        // All the same, all green size 2
+        let cm = vec![2, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 32]);
+    }
+    #[test]
+    fn color_compare_two_red0() {
+        let cm = vec![2, 3];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 32]);
+    }
+    #[test]
+    fn color_compare_two_red1() {
+        let cm = vec![4, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 31]);
+    }
+    #[test]
+    fn color_compare_red0() {
+        let cm = vec![1, 2, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 32, 32]);
+    }
+    #[test]
+    fn color_compare_red1() {
+        let cm = vec![4, 2, 4];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 31, 32]);
+    }
+    #[test]
+    fn color_compare_red2() {
+        let cm = vec![8, 8, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 32, 31]);
+    }
+    #[test]
+    fn color_compare_red02() {
+        let cm = vec![1, 3, 2];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 32, 31]);
+    }
+    #[test]
+    fn color_compare_red02_2() {
+        let cm = vec![2, 3, 1];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 32, 31]);
+    }
+    #[test]
+    fn color_compare_red01() {
+        let cm = vec![3, 2, 4];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 31, 32]);
+    }
+    #[test]
+    fn color_compare_red01_2() {
+        let cm = vec![2, 3, 4];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![31, 31, 32]);
+    }
+    #[test]
+    fn color_compare_red12() {
+        let cm = vec![5, 3, 4];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 31, 31]);
+    }
+    #[test]
+    fn color_compare_red12_2() {
+        let cm = vec![5, 4, 3];
+        let colors = color_vec(&cm);
+        assert_eq!(colors, vec![32, 31, 31]);
+    }
 }

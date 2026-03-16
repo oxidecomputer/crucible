@@ -841,7 +841,7 @@ impl Region {
     }
 
     #[instrument]
-    pub fn region_write(
+    pub(crate) fn region_write(
         &mut self,
         writes: &RegionWrite,
         job_id: JobId,
@@ -885,7 +885,7 @@ impl Region {
     }
 
     #[instrument]
-    pub fn region_read(
+    pub(crate) fn region_read(
         &mut self,
         req: &RegionReadRequest,
         job_id: JobId,

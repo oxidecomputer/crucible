@@ -66,7 +66,7 @@ futures = "0.3"
 futures-core = "0.3"
 hex = "0.4"
 http = "1.4.0"
-httptest = "0.16.3"
+httptest = "0.16.4"
 human_bytes = "0.4.3"
 humantime = "2.3.0"
 hyper = { version = "1", features = [ "full" ] }
@@ -76,7 +76,7 @@ itertools = "0.14.0"
 libc = "0.2"
 mime_guess = "2.0.5"
 nbd = "0.3.1"
-nix = { version = "0.30", features = [ "feature", "uio" ] }
+nix = { version = "0.31", features = [ "feature", "uio" ] }
 num_enum = "0.7"
 num-derive = "0.4"
 num-traits = "0.2"
