@@ -341,7 +341,7 @@ impl Region {
     ///
     /// Any error other than `MissingContextSlot` (e.g. missing files, I/O
     /// errors, version mismatches) is still fatal.
-    pub fn open_for_dump<P: AsRef<Path>>(
+    pub(crate) fn open_for_dump<P: AsRef<Path>>(
         dir: P,
         log: &Logger,
     ) -> Result<(Region, Vec<(ExtentId, CrucibleError)>)> {
