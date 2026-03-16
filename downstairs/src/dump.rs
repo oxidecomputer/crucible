@@ -589,9 +589,12 @@ fn show_extent(
          * in the Vec based on index.
          */
         for (index, dir) in region_dir.iter().enumerate() {
-            // Open Region read only, tolerating MissingContextSlot on
-            // extents other than the one we're comparing.
-            let (mut region, _) = Region::open_for_dump(dir, &log)?;
+            let (mut region, open_errors) = Region::open_for_dump(dir, &log)?;
+            if let Some((_eid, err)) =
+                open_errors.iter().find(|(e, _)| *e == cmp_extent)
+            {
+                bail!("extent {} could not be opened: {}", cmp_extent, err);
+            }
 
             let response = region.region_read(
                 &RegionReadRequest(vec![RegionReadReq {
@@ -702,9 +705,12 @@ fn show_extent_block(
      * in the Vec based on index.
      */
     for (index, dir) in region_dir.iter().enumerate() {
-        // Open Region read only, tolerating MissingContextSlot on
-        // extents other than the one we're comparing.
-        let (mut region, _) = Region::open_for_dump(dir, &log)?;
+        let (mut region, open_errors) = Region::open_for_dump(dir, &log)?;
+        if let Some((_eid, err)) =
+            open_errors.iter().find(|(e, _)| *e == cmp_extent)
+        {
+            bail!("extent {} could not be opened: {}", cmp_extent, err);
+        }
 
         let response = region.region_read(
             &RegionReadRequest(vec![RegionReadReq {
