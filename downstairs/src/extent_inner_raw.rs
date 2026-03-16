@@ -572,6 +572,65 @@ impl ExtentInner for RawInner {
         r
     }
 
+    fn validate_block(&self, block: u64) -> Result<(), CrucibleError> {
+        let block_size = self.extent_size.block_size_in_bytes() as usize;
+
+        // Read context data to local arrays
+        let ctx_a = self.layout.read_context_slots_contiguous(
+            &self.file,
+            block,
+            1,
+            ContextSlot::A,
+        )?[0];
+        let ctx_b = self.layout.read_context_slots_contiguous(
+            &self.file,
+            block,
+            1,
+            ContextSlot::B,
+        )?[0];
+
+        let mut data = vec![0; block_size];
+        pread_all(
+            self.file.as_fd(),
+            &mut data,
+            block_size as i64 * block as i64,
+        )
+        .map_err(|e| {
+            CrucibleError::IoError(format!(
+                "extent {}: reading block {block} data failed: {e}",
+                self.extent_number
+            ))
+        })?;
+
+        let hash = integrity_hash(&[&data]);
+
+        // Pick out the active context slot
+        let context = match self.active_context[block] {
+            ContextSlot::A => ctx_a,
+            ContextSlot::B => ctx_b,
+        };
+
+        if let Some(context) = context {
+            if context.on_disk_hash == hash {
+                Ok(())
+            } else {
+                Err(CrucibleError::GenericError(format!(
+                    "block {block} has an active slot with mismatched hash"
+                )))
+            }
+        } else {
+            // context slot is empty, hopefully data is as well!
+            if data.iter().all(|v| *v == 0u8) {
+                Ok(())
+            } else {
+                Err(CrucibleError::GenericError(format!(
+                    "block {block} has an empty active slot, \
+                     but contains non-zero data",
+                )))
+            }
+        }
+    }
+
     fn validate(&self) -> Result<(), CrucibleError> {
         let block_size = self.extent_size.block_size_in_bytes() as usize;
 
