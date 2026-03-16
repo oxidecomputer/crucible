@@ -4,6 +4,7 @@ members = [
     "agent-api",
     "agent-client",
     "agent-types",
+    "agent-types/versions",
     "crucible-client-types",
     "common",
     "control-client",
@@ -145,6 +146,7 @@ crucible = { path = "./upstairs" }
 crucible-agent-api = { path = "./agent-api" }
 crucible-agent-client = { path = "./agent-client" }
 crucible-agent-types = { path = "./agent-types" }
+crucible-agent-types-versions = { path = "./agent-types/versions" }
 crucible-client-types = { path = "./crucible-client-types" }
 crucible-common = { path = "./common" }
 crucible-control-client = { path = "./control-client" }
