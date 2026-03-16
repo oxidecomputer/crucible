@@ -378,26 +378,12 @@ impl Region {
     ///
     /// Returns an error if extent files are missing.
     fn open_extents(&mut self) -> Result<()> {
-        let next_eid = self.extents.len() as u32;
-
-        let eid_range = next_eid..self.def.extent_count();
-        for eid in eid_range.map(ExtentId) {
-            let extent = Extent::open(
-                &self.dir,
-                &self.def,
-                eid,
-                self.read_only,
-                &self.log,
-            )?;
-
-            if extent.dirty() {
-                self.dirty_extents.insert(eid);
-            }
-            self.extents.push(ExtentState::Opened(extent));
+        let errs = self.try_open_extents()?;
+        if let Some((_id, err)) = errs.first() {
+            Err(err.clone().into())
+        } else {
+            Ok(())
         }
-        self.check_extents();
-
-        Ok(())
     }
 
     /// Like [`open_extents`], but tolerates
