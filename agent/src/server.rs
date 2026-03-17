@@ -282,6 +282,7 @@ pub async fn run_server(
         default_request_body_max_bytes: 1024 * 10,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
+        compression: dropshot::CompressionConfig::None,
     })
     .version_policy(VersionPolicy::Dynamic(Box::new(
         ClientSpecifiesVersionInHeader::new(

@@ -262,6 +262,7 @@ pub fn run_server(
             + crate::pantry::PantryEntry::MAX_CHUNK_SIZE * 2,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
+        compression: dropshot::CompressionConfig::None,
     })
     .version_policy(VersionPolicy::Dynamic(Box::new(
         ClientSpecifiesVersionInHeader::new(

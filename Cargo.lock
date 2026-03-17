@@ -192,6 +192,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
 
 [[package]]
+name = "async-compression"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93c1f86859c1af3d514fa19e8323147ff10ea98684e6c7b307912509f50e67b2"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "futures-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "async-recursion"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -885,6 +898,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "compression-codecs"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "680dc087785c5230f8e8843e2e57ac7c1c90488b6a91b88caa265410568f441b"
+dependencies = [
+ "compression-core",
+ "flate2",
+ "memchr",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75984efb6ed102a0d42db99afb6c1948f0380d1d91808d5529916e6c08b49d8d"
+
+[[package]]
 name = "console"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1111,7 +1141,7 @@ dependencies = [
  "crucible-common",
  "crucible-protocol",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "expectorate",
  "fakedata_generator",
  "futures",
@@ -1169,7 +1199,7 @@ dependencies = [
  "crucible-common",
  "crucible-smf 0.0.0",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "expectorate",
  "futures",
  "http",
@@ -1193,7 +1223,7 @@ version = "0.1.0"
 dependencies = [
  "crucible-agent-types",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "dropshot-api-manager-types",
  "schemars 0.8.22",
  "serde",
@@ -1245,7 +1275,7 @@ dependencies = [
  "anyhow",
  "atty",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "nix",
  "proptest",
  "rustls-pemfile 1.0.4",
@@ -1299,7 +1329,7 @@ dependencies = [
  "crucible-protocol",
  "crucible-raw-extent",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "expectorate",
  "futures",
  "futures-core",
@@ -1354,7 +1384,7 @@ dependencies = [
  "crucible-common",
  "crucible-downstairs-types",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "dropshot-api-manager-types",
  "hyper",
  "schemars 0.8.22",
@@ -1423,7 +1453,7 @@ dependencies = [
  "crucible-pantry",
  "crucible-pantry-client",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "futures",
  "futures-core",
  "hex",
@@ -1491,7 +1521,7 @@ dependencies = [
  "crucible-pantry-types",
  "crucible-smf 0.0.0",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "expectorate",
  "futures",
  "hex",
@@ -1518,7 +1548,7 @@ dependencies = [
  "crucible-client-types",
  "crucible-pantry-types",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "dropshot-api-manager-types",
  "schemars 0.8.22",
  "serde",
@@ -2156,7 +2186,7 @@ dependencies = [
  "camino",
  "chrono",
  "debug-ignore",
- "dropshot_endpoint",
+ "dropshot_endpoint 0.16.7",
  "form_urlencoded",
  "futures",
  "hostname 0.4.2",
@@ -2195,10 +2225,63 @@ dependencies = [
 ]
 
 [[package]]
-name = "dropshot-api-manager"
-version = "0.5.2"
+name = "dropshot"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c38a99616a680fafd8b7a03cc300aab80b0bbf0fb17c6baac53431d9d12b64b5"
+checksum = "409eb76c7ea1623d270393248ff55ec436841fcd724c2e1c9de294291edd35f5"
+dependencies = [
+ "async-compression",
+ "async-stream",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "camino",
+ "chrono",
+ "debug-ignore",
+ "dropshot_endpoint 0.17.0",
+ "form_urlencoded",
+ "futures",
+ "hostname 0.4.2",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "indexmap",
+ "multer",
+ "openapiv3",
+ "paste",
+ "percent-encoding",
+ "rustls 0.22.4",
+ "rustls-pemfile 2.2.0",
+ "schemars 0.8.22",
+ "scopeguard",
+ "semver 1.0.27",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
+ "sha1",
+ "slog",
+ "slog-async",
+ "slog-bunyan",
+ "slog-json",
+ "slog-term",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls 0.25.0",
+ "tokio-util",
+ "toml 1.0.6+spec-1.1.0",
+ "usdt 0.6.0",
+ "uuid",
+ "version_check",
+ "waitgroup",
+]
+
+[[package]]
+name = "dropshot-api-manager"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27edffb6c55e640e420fb4a03ac0a066449100e936457e2db074ab8f5f208c8a"
 dependencies = [
  "anyhow",
  "atomicwrites",
@@ -2206,7 +2289,7 @@ dependencies = [
  "clap",
  "debug-ignore",
  "drift",
- "dropshot",
+ "dropshot 0.17.0",
  "dropshot-api-manager-types",
  "fs-err",
  "git-stub",
@@ -2229,9 +2312,9 @@ dependencies = [
 
 [[package]]
 name = "dropshot-api-manager-types"
-version = "0.5.2"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5116e3d69b975bb89824a721d0326707b8643e4fd3ba69ca880de1aada768cf"
+checksum = "63d655f88937cd3cc3a99b81f731af996084f2f16d0067b2cfad43411ad4317f"
 dependencies = [
  "anyhow",
  "camino",
@@ -2256,6 +2339,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dropshot_endpoint"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "906c3adfd4472030607130ed763e9af1b85f7e18832dd22998379d42ff81c28d"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "semver 1.0.27",
+ "serde",
+ "serde_tokenstream",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "dsc"
 version = "0.1.0"
 dependencies = [
@@ -2266,7 +2364,7 @@ dependencies = [
  "crucible-common",
  "crucible-workspace-hack",
  "csv",
- "dropshot",
+ "dropshot 0.17.0",
  "dsc-client",
  "expectorate",
  "openapi-lint",
@@ -2409,7 +2507,7 @@ name = "ereport-types"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?branch=main#4d5bdc6d348b27761348d763c4085f060bcefc18"
 dependencies = [
- "dropshot",
+ "dropshot 0.16.7",
  "omicron-uuid-kinds",
  "omicron-workspace-hack",
  "schemars 0.8.22",
@@ -2759,7 +2857,7 @@ version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?branch=main#4d5bdc6d348b27761348d763c4085f060bcefc18"
 dependencies = [
  "daft",
- "dropshot",
+ "dropshot 0.16.7",
  "gateway-messages",
  "hex",
  "omicron-common",
@@ -3579,7 +3677,7 @@ dependencies = [
  "cfg-if",
  "crucible-smf 0.0.0 (git+https://github.com/oxidecomputer/crucible?rev=65ca41e821ef53ec9c28909357f23e3348169e4f)",
  "debug-ignore",
- "dropshot",
+ "dropshot 0.16.7",
  "futures",
  "http",
  "ipnetwork",
@@ -4426,7 +4524,7 @@ dependencies = [
  "daft",
  "derive-where",
  "derive_more 0.99.20",
- "dropshot",
+ "dropshot 0.16.7",
  "futures",
  "gateway-client",
  "gateway-types",
@@ -4711,7 +4809,7 @@ dependencies = [
  "camino",
  "chrono",
  "daft",
- "dropshot",
+ "dropshot 0.16.7",
  "futures",
  "hex",
  "http",
@@ -5103,7 +5201,7 @@ dependencies = [
  "clickward",
  "const_format",
  "debug-ignore",
- "dropshot",
+ "dropshot 0.16.7",
  "futures",
  "gethostname",
  "highway",
@@ -5156,7 +5254,7 @@ version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?branch=main#4d5bdc6d348b27761348d763c4085f060bcefc18"
 dependencies = [
  "chrono",
- "dropshot",
+ "dropshot 0.16.7",
  "internal-dns-resolver",
  "internal-dns-types",
  "nexus-client",
@@ -7991,9 +8089,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.49.0"
+version = "1.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72a2903cd7736441aac9df9d7688bd0ce48edccaadf181c3b90be801e81d3d86"
+checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
 dependencies = [
  "bytes",
  "libc",
@@ -8849,9 +8947,9 @@ checksum = "711b9620af191e0cdc7468a8d14e709c3dcdb115b36f838e601583af800a370a"
 
 [[package]]
 name = "uuid"
-version = "1.21.0"
+version = "1.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b672338555252d43fd2240c714dc444b8c6fb0a5c5335e65a07bba7742735ddb"
+checksum = "a68d3c8f01c0cfa54a75291d83601161799e4a89a39e0929f4b0354d88757a37"
 dependencies = [
  "getrandom 0.4.1",
  "js-sys",
