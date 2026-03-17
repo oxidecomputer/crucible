@@ -213,6 +213,9 @@ while [[ $count -lt $loops ]]; do
         ds2_pid=$!
     fi
 
+    # Wait for it to start up
+    sleep 10
+
     cp "$verify_file" ${verify_file}.last
     echo "Verifying data now"
     echo ${ct} verify ${target_args} --verify-out "$verify_file" --verify-in "$verify_file" --range -q -g "$generation" > "$test_log"
@@ -220,7 +223,7 @@ while [[ $count -lt $loops ]]; do
     then
         echo "Exit on verify fail, loop: $count, choice: $choice"
         echo "Check $test_log for details"
-	cleanup
+        cleanup
         exit 1
     fi
     set +o errexit
