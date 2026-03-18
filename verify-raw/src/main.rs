@@ -128,7 +128,7 @@ fn check_one(
         .collect::<Vec<Option<OnDiskDownstairsBlockContext>>>();
     let (ctx_a, ctx_b) = context_slots.split_at(block_count);
 
-    let filename = p.display().to_string();
+    let filename = csv_quote(&p.display().to_string());
     let mut failed = false;
     // Check each block and emit one output line per block
     for (i, chunk) in data[..block_size * block_count]
@@ -308,6 +308,15 @@ enum Success {
 enum Failure {
     SlotHashMismatch,
     EmptySlotWithNonzeroData,
+}
+
+/// Wrap a string in double quotes, escaping internal double quotes for CSV
+fn csv_quote(s: &str) -> String {
+    if s.contains([',', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_owned()
+    }
 }
 
 /// Brute force strategy to get block count
