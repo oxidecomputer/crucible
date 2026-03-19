@@ -17,6 +17,11 @@ struct Args {
     #[clap(long, short)]
     verbose: bool,
 
+    /// Output CSV to stdout with one row per block; metadata is
+    /// written as #-prefixed comment lines
+    #[clap(long, conflicts_with = "verbose")]
+    verbose_csv: bool,
+
     /// Block size in the extent (usually autodetected)
     #[clap(long)]
     block_size: Option<usize>,
@@ -24,13 +29,14 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    check_one(&args.file, args.block_size, args.verbose)
+    check_one(&args.file, args.block_size, args.verbose, args.verbose_csv)
 }
 
 fn check_one(
     p: &std::path::Path,
     block_size: Option<usize>,
     verbose: bool,
+    verbose_csv: bool,
 ) -> Result<()> {
     let data = std::fs::read(p)?;
     let data_len = data.len() - BLOCK_META_SIZE_BYTES as usize;
@@ -65,16 +71,39 @@ fn check_one(
                 );
             }
         })?;
-    print!("bs:{block_size} bytes  bc:{block_count:>6}");
-    println!(
-        "  dirty:{:>5} gen:{} flush_number:{:>6} ext_ver:{} bonus_sync:{} defrag:{}",
-        meta.dirty,
-        meta.gen_number,
-        meta.flush_number,
-        meta.ext_version,
-        meta.bonus_sync_count,
-        meta.defrag_count,
-    );
+
+    if verbose_csv {
+        println!(
+            "# file:{} bs:{block_size} bytes  bc:{block_count}  \
+             dirty:{} gen:{} flush_number:{} ext_ver:{} \
+             bonus_sync:{} defrag:{}",
+            p.display(),
+            meta.dirty,
+            meta.gen_number,
+            meta.flush_number,
+            meta.ext_version,
+            meta.bonus_sync_count,
+            meta.defrag_count,
+        );
+        println!(
+            "file,block,status,\
+             slot_a_result,slot_a_selected,slot_a_flush_id,slot_a_hash,\
+             slot_b_result,slot_b_selected,slot_b_flush_id,slot_b_hash,\
+             data_hash,all_zeros"
+        );
+    } else {
+        print!("bs:{block_size} bytes  bc:{block_count:>6}");
+        println!(
+            "  dirty:{:>5} gen:{} flush_number:{:>6} ext_ver:{} \
+             bonus_sync:{} defrag:{}",
+            meta.dirty,
+            meta.gen_number,
+            meta.flush_number,
+            meta.ext_version,
+            meta.bonus_sync_count,
+            meta.defrag_count,
+        );
+    }
 
     let slot_selected = if !meta.dirty {
         let mut selected = vec![];
@@ -99,122 +128,152 @@ fn check_one(
         .collect::<Vec<Option<OnDiskDownstairsBlockContext>>>();
     let (ctx_a, ctx_b) = context_slots.split_at(block_count);
 
+    let filename = csv_quote(&p.display().to_string());
     let mut failed = false;
+    // Check each block and emit one output line per block
     for (i, chunk) in data[..block_size * block_count]
         .chunks_exact(block_size)
         .enumerate()
     {
         let hash = integrity_hash(&[chunk]);
-        let mut printed = false;
         let ra = check_block(chunk, hash, ctx_a[i]);
         let rb = check_block(chunk, hash, ctx_b[i]);
+        let all_zeros = chunk.iter().all(|b| *b == 0u8);
 
-        if let Some(slot_selected) = &slot_selected {
-            // If the slot selected array is valid (i.e. the extent file is not
-            // dirty), then it must be correct.
-            let s = slot_selected[i];
-            let ctx = if s { ctx_a[i] } else { ctx_b[i] };
-            let r = if s { ra } else { rb };
-            if r.is_err() {
+        if verbose_csv {
+            let sel_a = slot_selected.as_ref().map(|s| s[i]);
+            let sel_b = slot_selected.as_ref().map(|s| !s[i]);
+            let status = match (&slot_selected, ra, rb) {
+                (Some(s), ra, _) if s[i] && ra.is_err() => "error",
+                (Some(s), _, rb) if !s[i] && rb.is_err() => "error",
+                (None, Err(_), Err(_)) => "error",
+                _ => "ok",
+            };
+            if status == "error" {
+                failed = true;
+            }
+            println!(
+                "{filename},{i},{status},{},{},{},{},{},{},{},{},{},{all_zeros}",
+                ra.map_or_else(|e| format!("{e:?}"), |s| format!("{s:?}")),
+                sel_a.map_or("unknown".to_owned(), |s| s.to_string()),
+                ctx_a[i].map_or(String::new(), |c| c.flush_id.to_string()),
+                ctx_a[i].map_or(String::new(), |c| c.on_disk_hash.to_string()),
+                rb.map_or_else(|e| format!("{e:?}"), |s| format!("{s:?}")),
+                sel_b.map_or("unknown".to_owned(), |s| s.to_string()),
+                ctx_b[i].map_or(String::new(), |c| c.flush_id.to_string()),
+                ctx_b[i].map_or(String::new(), |c| c.on_disk_hash.to_string()),
+                hash,
+            );
+        } else {
+            let mut printed = false;
+
+            if let Some(slot_selected) = &slot_selected {
+                // If the slot selected array is valid (i.e. the extent file
+                // is not dirty), then it must be correct.
+                let s = slot_selected[i];
+                let ctx = if s { ctx_a[i] } else { ctx_b[i] };
+                let r = if s { ra } else { rb };
+                if r.is_err() {
+                    failed = true;
+                    printed = true;
+                    print!("Error at block {:>6}:", i);
+                    print!(
+                        "  slot {} [selected]: {r:?}{}",
+                        if s { "A" } else { "B" },
+                        if let Some(ctx) = ctx {
+                            format!(", flush id: {}", ctx.flush_id)
+                        } else {
+                            "".to_owned()
+                        }
+                    );
+                    let other_ctx = if s { ctx_b[i] } else { ctx_a[i] };
+                    let other_r = if s { rb } else { ra };
+                    print!(
+                        " | slot {} [deselected]: {:?}{}",
+                        if s { "B" } else { "A" },
+                        other_r,
+                        if let Some(ctx) = other_ctx {
+                            format!(", flush id: {}", ctx.flush_id)
+                        } else {
+                            "".to_owned()
+                        }
+                    );
+                    if all_zeros {
+                        print!("  Block is all zeros");
+                    }
+                    println!();
+                }
+            } else if let Err(ea) = ra
+                && let Err(eb) = rb
+            {
+                // Otherwise, both context slots are invalid, so print that
                 failed = true;
                 printed = true;
-                print!("Error at block {:>6}:", i);
+                print!("Error at block {i}:");
                 print!(
-                    "  slot {} [selected]: {r:?}{}",
-                    if s { "A" } else { "B" },
-                    if let Some(ctx) = ctx {
+                    "  slot A: {ea:?}{}",
+                    if let Some(ctx) = ctx_a[i] {
                         format!(", flush id: {}", ctx.flush_id)
                     } else {
                         "".to_owned()
                     }
                 );
-                let other_ctx = if s { ctx_b[i] } else { ctx_a[i] };
-                let other_r = if s { rb } else { ra };
                 print!(
-                    " | slot {} [deselected]: {:?}{}",
-                    if s { "B" } else { "A" },
-                    other_r,
-                    if let Some(ctx) = other_ctx {
+                    " | slot B: {eb:?}{}",
+                    if let Some(ctx) = ctx_b[i] {
                         format!(", flush id: {}", ctx.flush_id)
                     } else {
                         "".to_owned()
                     }
                 );
-                if chunk.iter().all(|b| *b == 0u8) {
+                if all_zeros {
                     print!("  Block is all zeros");
                 }
                 println!();
             }
-        } else if let Err(ea) = ra
-            && let Err(eb) = rb
-        {
-            // Otherwise, both context slots are invalid, so print that
-            failed = true;
-            printed = true;
-            print!("Error at block {i}:");
-            print!(
-                "  slot A: {ea:?}{}",
-                if let Some(ctx) = ctx_a[i] {
-                    format!(", flush id: {}", ctx.flush_id)
-                } else {
-                    "".to_owned()
-                }
-            );
-            print!(
-                " | slot B: {eb:?}{}",
-                if let Some(ctx) = ctx_b[i] {
-                    format!(", flush id: {}", ctx.flush_id)
-                } else {
-                    "".to_owned()
-                }
-            );
-            if chunk.iter().all(|b| *b == 0u8) {
-                print!("  Block is all zeros");
-            }
-            println!();
-        }
 
-        // Print a log line for each block if the verbose flag is set
-        if verbose && !printed {
-            print!("Success at block {i}:");
-            print!(
-                "  slot A{}: {ra:?}{}",
-                if let Some(slot_selected) = &slot_selected {
-                    if slot_selected[i] {
-                        " [selected]"
+            // Print a log line for each block if the verbose flag is set
+            if verbose && !printed {
+                print!("Success at block {i}:");
+                print!(
+                    "  slot A{}: {ra:?}{}",
+                    if let Some(slot_selected) = &slot_selected {
+                        if slot_selected[i] {
+                            " [selected]"
+                        } else {
+                            " [deselected]"
+                        }
                     } else {
-                        " [deselected]"
-                    }
-                } else {
-                    ""
-                },
-                if let Some(ctx) = ctx_a[i] {
-                    format!(", flush id: {}", ctx.flush_id)
-                } else {
-                    "".to_owned()
-                }
-            );
-            print!(
-                " | slot B{}: {rb:?}{}",
-                if let Some(slot_selected) = &slot_selected {
-                    if !slot_selected[i] {
-                        " [selected]"
+                        ""
+                    },
+                    if let Some(ctx) = ctx_a[i] {
+                        format!(", flush id: {}", ctx.flush_id)
                     } else {
-                        " [deselected]"
+                        "".to_owned()
                     }
-                } else {
-                    ""
-                },
-                if let Some(ctx) = ctx_b[i] {
-                    format!(", flush id: {}", ctx.flush_id)
-                } else {
-                    "".to_owned()
+                );
+                print!(
+                    " | slot B{}: {rb:?}{}",
+                    if let Some(slot_selected) = &slot_selected {
+                        if !slot_selected[i] {
+                            " [selected]"
+                        } else {
+                            " [deselected]"
+                        }
+                    } else {
+                        ""
+                    },
+                    if let Some(ctx) = ctx_b[i] {
+                        format!(", flush id: {}", ctx.flush_id)
+                    } else {
+                        "".to_owned()
+                    }
+                );
+                if all_zeros {
+                    print!("  Block is all zeros");
                 }
-            );
-            if chunk.iter().all(|b| *b == 0u8) {
-                print!("  Block is all zeros");
+                println!();
             }
-            println!();
         }
     }
 
@@ -252,6 +311,15 @@ enum Success {
 enum Failure {
     SlotHashMismatch,
     EmptySlotWithNonzeroData,
+}
+
+/// Wrap a string in double quotes, escaping internal double quotes for CSV
+fn csv_quote(s: &str) -> String {
+    if s.contains([',', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_owned()
+    }
 }
 
 /// Brute force strategy to get block count
