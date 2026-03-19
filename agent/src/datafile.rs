@@ -1,6 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use crucible_agent_types::region::CreateRegion;
 use crucible_agent_types::region::RegionId;
 use crucible_agent_types::snapshot::CreateRunningSnapshotRequest;
@@ -9,8 +9,9 @@ use crucible_agent_types::snapshot::DeleteSnapshotRequest;
 use crucible_agent_types::snapshot::Snapshot;
 use crucible_common::write_json;
 use crucible_smf::scf_type_t::*;
+use dropshot::HttpError;
 use serde::{Deserialize, Serialize};
-use slog::{Logger, crit, error, info};
+use slog::{Logger, crit, error, info, warn};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -38,6 +39,8 @@ pub struct DataFile {
 #[derive(Debug, PartialEq, Clone)]
 pub enum RegionState {
     Requested,
+    /// Region creation is occuring in the background
+    Creating,
     Created,
     Tombstoned,
     Destroyed,
@@ -48,6 +51,33 @@ impl From<RegionState> for crucible_agent_types::region::State {
     fn from(s: RegionState) -> crucible_agent_types::region::State {
         match s {
             RegionState::Requested => {
+                crucible_agent_types::region::State::Requested
+            }
+            RegionState::Creating => {
+                // The Crucible agent will only read the data file on startup,
+                // either after being updated or after crashing. There's a few
+                // considerations here that all conclude that Creating should be
+                // converted here to Requested:
+                //
+                // If this is a newer Crucible Agent that supports background
+                // creation and the in-memory type's state is Creating, then
+                // background creation of that region was occurring when the
+                // update or crash occurred, and the Agent should start again
+                // from the beginning.  Starting from the beginning is
+                // equivalent by running the worker thread and starting again
+                // from Requested.
+                //
+                // If this is an older Crucible Agent that does _not_ support
+                // background creation is the one reading the data file, it
+                // should also start from Requested in order to start over.
+                //
+                // If this From path is being invoked as part of an API
+                // response, then users of the API only care that the Region is
+                // Requested and not yet in state Created, as they have always,
+                // not what the Agent is doing behind the scenes. Said another
+                // way: a Nexus that is polling an older or newer Crucible Agent
+                // is not aware of whether or not the region creation is
+                // occurring in the background.
                 crucible_agent_types::region::State::Requested
             }
             RegionState::Created => {
@@ -945,7 +975,17 @@ impl DataFile {
                             return Ok(());
                         }
 
-                        RegionState::Requested | RegionState::Created => {
+                        RegionState::Requested | RegionState::Creating => {
+                            // According to the agent's datafile, the region was
+                            // requested and may exist. According to zfs list,
+                            // it does not yet. How was a snapshot taken?
+                            bail!(
+                                "region {} (maybe?) does not exist yet! {e}",
+                                request.id.0
+                            );
+                        }
+
+                        RegionState::Created => {
                             // This is a bug: according to the agent's datafile,
                             // the region exists, but according to zfs list, it
                             // does not
@@ -1045,7 +1085,8 @@ impl DataFile {
         let r = inner.regions.get_mut(id).unwrap();
         let nstate = RegionState::Created;
         match &r.state {
-            RegionState::Requested => (),
+            RegionState::Requested | RegionState::Creating => (),
+
             RegionState::Tombstoned => {
                 /*
                  * Nexus requested that we destroy this region before we
@@ -1053,6 +1094,7 @@ impl DataFile {
                  */
                 return Ok(());
             }
+
             x => bail!("created region in weird state {:?}", x),
         }
 
@@ -1147,8 +1189,10 @@ impl DataFile {
         let r = inner.regions.get_mut(id).unwrap();
         let nstate = RegionState::Destroyed;
         match &r.state {
-            RegionState::Requested => (),
+            RegionState::Requested | RegionState::Creating => (),
+
             RegionState::Tombstoned => (),
+
             x => bail!("region to destroy in weird state {:?}", x),
         }
 
@@ -1200,13 +1244,15 @@ impl DataFile {
     /**
      * Nexus has requested that we destroy this particular region.
      */
-    pub fn destroy(&self, id: &RegionId) -> Result<()> {
+    pub fn destroy(&self, id: &RegionId) -> Result<(), HttpError> {
         let mut inner = self.inner.lock().unwrap();
 
-        let r = inner
-            .regions
-            .get_mut(id)
-            .ok_or_else(|| anyhow!("region {} does not exist", id.0))?;
+        let r = inner.regions.get_mut(id).ok_or_else(|| {
+            HttpError::for_not_found(
+                None,
+                format!("region {} does not exist", id.0),
+            )
+        })?;
 
         match r.state {
             RegionState::Tombstoned | RegionState::Destroyed => {
@@ -1216,6 +1262,24 @@ impl DataFile {
                  * - Already destroyed; no more work to do.
                  */
             }
+
+            RegionState::Creating => {
+                // `Creating` means that some processing is occurring in the
+                // background in a region creation thread, and if we set this
+                // region's state to `Tombstoned` and allow the worker thread to
+                // operate on it, this would conflict and lead to chaos.
+                // Restrict this with a 503.
+
+                let m = format!(
+                    "cannot destroy region {:?} in state {:?}",
+                    r.id.0, r.state,
+                );
+
+                warn!(self.log, "{m}");
+
+                return Err(HttpError::for_unavail(None, m));
+            }
+
             RegionState::Requested
             | RegionState::Created
             | RegionState::Failed => {
@@ -1305,6 +1369,7 @@ impl DataFile {
 
         match region.state {
             RegionState::Requested
+            | RegionState::Creating
             | RegionState::Destroyed
             | RegionState::Tombstoned
             | RegionState::Failed => {
@@ -1335,6 +1400,27 @@ impl DataFile {
             .get_snapshots_for_dataset(dataset.dataset())?;
 
         Ok(results)
+    }
+
+    /**
+     * Mark a particular region as provisioning in the background.
+     */
+    pub fn creating(&self, id: &RegionId) {
+        let mut inner = self.inner.lock().unwrap();
+
+        let r = inner.regions.get_mut(id).unwrap();
+        let nstate = RegionState::Creating;
+        if r.state == nstate {
+            return;
+        }
+
+        info!(
+            self.log,
+            "region {} state: {:?} -> {:?}", r.id.0, r.state, nstate,
+        );
+        r.state = nstate;
+
+        self.store(inner);
     }
 }
 

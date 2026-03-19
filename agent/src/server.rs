@@ -85,10 +85,9 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
             ));
         }
 
-        match rc.context().destroy(&p.id) {
-            Ok(_) => Ok(HttpResponseDeleted()),
-            Err(e) => Err(HttpError::for_bad_request(None, e.to_string())),
-        }
+        rc.context().destroy(&p.id)?;
+
+        Ok(HttpResponseDeleted())
     }
 
     async fn region_get_snapshots(
