@@ -465,6 +465,26 @@ impl Region {
         Ok(())
     }
 
+    /**
+     * Re open an extent after live repair, then verify that all block
+     * data matches its stored hash.
+     */
+    pub fn reopen_extent_post_repair(
+        &mut self,
+        eid: ExtentId,
+    ) -> Result<(), CrucibleError> {
+        self.reopen_extent(eid)?;
+
+        info!(self.log, "Validating extent {} after live repair", eid);
+        let ExtentState::Opened(extent) = &self.extents[eid.0 as usize] else {
+            panic!("extent {eid} not open after reopen");
+        };
+        extent.validate().unwrap_or_else(|e| {
+            panic!("Extent {eid} failed validation after live repair: {e}")
+        });
+        Ok(())
+    }
+
     pub fn close_extent(
         &mut self,
         eid: ExtentId,
