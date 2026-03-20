@@ -479,7 +479,10 @@ impl Region {
         let ExtentState::Opened(extent) = &self.extents[eid.0 as usize] else {
             panic!("extent {eid} not open after reopen");
         };
-        extent.validate().unwrap()
+        extent.validate().unwrap_or_else(|e| {
+            panic!("Extent {eid} failed validation after live repair: {e}")
+        });
+        Ok(())
     }
 
     pub fn close_extent(
