@@ -1336,15 +1336,23 @@ impl Upstairs {
 
         self.need_flush = false;
 
-        /*
-         * Get the next ID for our new guest work job. Note that the flush
-         * ID and the next_id are connected here, in that all future writes
-         * should be flushed at the next flush ID.
-         */
-
         if snapshot_details.is_some() {
+            if self.cfg.read_only {
+                info!(
+                    self.log,
+                    "rejecting flush with snap request for read-only upstairs",
+                );
+
+                if let Some(res) = res {
+                    res.send_err(CrucibleError::ModifyingReadOnlyRegion);
+                }
+
+                return;
+            }
+
             info!(self.log, "flush with snap requested");
         }
+
         let ds_id =
             self.downstairs
                 .submit_flush(snapshot_details, res, io_guard);
@@ -4819,5 +4827,31 @@ pub(crate) mod test {
             * ddef.extent_size().value as usize
             * 4;
         assert_eq!(up.downstairs.reconcile_repair_needed(), expected_repairs);
+    }
+
+    #[tokio::test]
+    async fn test_reject_snapshot_of_read_only_upstairs() {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), true);
+        up.force_active().unwrap();
+
+        let (brw, res) = BlockOpWaiter::pair();
+
+        up.submit_flush(
+            Some(res),
+            Some(SnapshotDetails {
+                snapshot_name: String::from("invalid-request"),
+            }),
+            None,
+        );
+
+        assert!(matches!(
+            brw.wait().await,
+            Err(CrucibleError::ModifyingReadOnlyRegion),
+        ));
     }
 }
