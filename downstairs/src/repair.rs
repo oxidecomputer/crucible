@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crucible_downstairs_api::*;
 use crucible_downstairs_types::FileType;
 use dropshot::{
-    Body, ConfigDropshot, HandlerTaskMode, HttpError, HttpResponseOk,
-    HttpServerStarter, Path, RequestContext,
+    Body, CompressionConfig, ConfigDropshot, HandlerTaskMode, HttpError,
+    HttpResponseOk, HttpServerStarter, Path, RequestContext,
 };
 use hyper::{Response, StatusCode};
 
@@ -37,6 +37,7 @@ pub fn repair_main(
         default_request_body_max_bytes: 1024,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
+        compression: CompressionConfig::None,
     };
 
     /*
