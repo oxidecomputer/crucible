@@ -86,10 +86,10 @@ fn check_one(
             meta.defrag_count,
         );
         println!(
-            "file,block,status,\
-             slot_a_result,slot_a_selected,slot_a_flush_id,slot_a_hash,\
-             slot_b_result,slot_b_selected,slot_b_flush_id,slot_b_hash,\
-             data_hash,all_zeros"
+            "file,block,dirty,status,\
+             slot_a_result,slot_a_flush_id,slot_a_hash,\
+             slot_b_result,slot_b_flush_id,slot_b_hash,\
+             selected_slot,data_hash,all_zeros"
         );
     } else {
         print!("bs:{block_size} bytes  bc:{block_count:>6}");
@@ -142,7 +142,6 @@ fn check_one(
 
         if verbose_csv {
             let sel_a = slot_selected.as_ref().map(|s| s[i]);
-            let sel_b = slot_selected.as_ref().map(|s| !s[i]);
             let status = match (&slot_selected, ra, rb) {
                 (Some(s), ra, _) if s[i] && ra.is_err() => "error",
                 (Some(s), _, rb) if !s[i] && rb.is_err() => "error",
@@ -153,15 +152,15 @@ fn check_one(
                 failed = true;
             }
             println!(
-                "{filename},{i},{status},{},{},{},{},{},{},{},{},{},{all_zeros}",
+                "{filename},{i},{},{status},{},{},{},{},{},{},{},{},{all_zeros}",
+                meta.dirty,
                 ra.map_or_else(|e| format!("{e:?}"), |s| format!("{s:?}")),
-                sel_a.map_or("unknown".to_owned(), |s| s.to_string()),
                 ctx_a[i].map_or(String::new(), |c| c.flush_id.to_string()),
                 ctx_a[i].map_or(String::new(), |c| c.on_disk_hash.to_string()),
                 rb.map_or_else(|e| format!("{e:?}"), |s| format!("{s:?}")),
-                sel_b.map_or("unknown".to_owned(), |s| s.to_string()),
                 ctx_b[i].map_or(String::new(), |c| c.flush_id.to_string()),
                 ctx_b[i].map_or(String::new(), |c| c.on_disk_hash.to_string()),
+                sel_a.map_or("unknown".to_owned(), |s| s.to_string()),
                 hash,
             );
         } else {
