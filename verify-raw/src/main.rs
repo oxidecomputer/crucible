@@ -105,17 +105,12 @@ fn check_one(
         );
     }
 
-    let slot_selected = if !meta.dirty {
-        let mut selected = vec![];
-        for d in &data[data_len - block_count.div_ceil(8)..data_len] {
-            for i in 0..8 {
-                selected.push((d & (1 << i)) == 0);
-            }
+    let mut slot_selected = vec![];
+    for d in &data[data_len - block_count.div_ceil(8)..data_len] {
+        for i in 0..8 {
+            slot_selected.push((d & (1 << i)) == 0);
         }
-        Some(selected)
-    } else {
-        None
-    };
+    }
 
     let context_slots = (0..block_count * 2)
         .map(|i| {
@@ -141,12 +136,17 @@ fn check_one(
         let all_zeros = chunk.iter().all(|b| *b == 0u8);
 
         if verbose_csv {
-            let sel_a = slot_selected.as_ref().map(|s| s[i]);
-            let status = match (&slot_selected, ra, rb) {
-                (Some(s), ra, _) if s[i] && ra.is_err() => "error",
-                (Some(s), _, rb) if !s[i] && rb.is_err() => "error",
-                (None, Err(_), Err(_)) => "error",
-                _ => "ok",
+            let sel_a = slot_selected[i];
+            let status = if !meta.dirty {
+                if (sel_a && ra.is_err()) || (!sel_a && rb.is_err()) {
+                    "error"
+                } else {
+                    "ok"
+                }
+            } else if ra.is_err() && rb.is_err() {
+                "error"
+            } else {
+                "ok"
             };
             if status == "error" {
                 failed = true;
@@ -160,15 +160,15 @@ fn check_one(
                 rb.map_or_else(|e| format!("{e:?}"), |s| format!("{s:?}")),
                 ctx_b[i].map_or(String::new(), |c| c.flush_id.to_string()),
                 ctx_b[i].map_or(String::new(), |c| c.on_disk_hash.to_string()),
-                sel_a.map_or("unknown".to_owned(), |s| s.to_string()),
+                sel_a,
                 hash,
             );
         } else {
             let mut printed = false;
 
-            if let Some(slot_selected) = &slot_selected {
-                // If the slot selected array is valid (i.e. the extent file
-                // is not dirty), then it must be correct.
+            if !meta.dirty {
+                // If the extent is not dirty, the slot selected array is
+                // valid and must be correct.
                 let s = slot_selected[i];
                 let ctx = if s { ctx_a[i] } else { ctx_b[i] };
                 let r = if s { ra } else { rb };
@@ -236,7 +236,7 @@ fn check_one(
                 print!("Success at block {i}:");
                 print!(
                     "  slot A{}: {ra:?}{}",
-                    if let Some(slot_selected) = &slot_selected {
+                    if !meta.dirty {
                         if slot_selected[i] {
                             " [selected]"
                         } else {
@@ -253,7 +253,7 @@ fn check_one(
                 );
                 print!(
                     " | slot B{}: {rb:?}{}",
-                    if let Some(slot_selected) = &slot_selected {
+                    if !meta.dirty {
                         if !slot_selected[i] {
                             " [selected]"
                         } else {
