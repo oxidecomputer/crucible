@@ -25,6 +25,7 @@ members = [
     "pantry-api",
     "pantry-client",
     "pantry-types",
+    "pantry-types/versions",
     "protocol",
     "repair-client",
     "smf",
@@ -157,6 +158,7 @@ crucible-pantry = { path = "./pantry" }
 crucible-pantry-api = { path = "./pantry-api" }
 crucible-pantry-client = { path = "./pantry-client" }
 crucible-pantry-types = { path = "./pantry-types" }
+crucible-pantry-types-versions = { path = "./pantry-types/versions" }
 crucible-protocol = { path = "./protocol" }
 crucible-raw-extent = { path = "./raw-extent" }
 crucible-verify-raw = { path = "./verify-raw" }
