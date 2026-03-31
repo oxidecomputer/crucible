@@ -397,10 +397,11 @@ impl ExtentInner for RawInner {
         let r = self.write_inner(write, &writes_to_skip);
 
         if r.is_err() {
-            panic!(
-                "This is what James warned us about, job:{} extent:{} blocks:{}",
-                job_id.0, self.extent_number.0, num_blocks
-            );
+            // How can I log this?
+            // panic!(
+            //     "This is what James warned us about, job:{} extent:{} blocks:{}",
+            //     job_id.0, self.extent_number.0, num_blocks
+            // );
             for i in 0..write.block_contexts.len() {
                 if !writes_to_skip.contains(&i) {
                     // Try to recompute the context slot from the file.  If this
@@ -410,6 +411,11 @@ impl ExtentInner for RawInner {
                     self.recompute_slot_from_file(block).unwrap();
                 }
             }
+            // Maybe a different probe?  That seems wrong.
+            cdt::extent__write__file__done!(|| {
+                (job_id.0, self.extent_number.0, num_blocks)
+            });
+            r
         } else {
             // Now that writes have gone through, update active context slots
             for i in 0..write.block_contexts.len() {
@@ -418,13 +424,12 @@ impl ExtentInner for RawInner {
                     self.active_context.swap(write.offset.0 + i as u64);
                 }
             }
+            cdt::extent__write__file__done!(|| {
+                (job_id.0, self.extent_number.0, num_blocks)
+            });
+
+            Ok(())
         }
-
-        cdt::extent__write__file__done!(|| {
-            (job_id.0, self.extent_number.0, num_blocks)
-        });
-
-        Ok(())
     }
 
     fn read(
