@@ -1555,12 +1555,7 @@ impl RawLayout {
     ) -> Result<(), CrucibleError>
     where
         F: Fn(Option<OnDiskDownstairsBlockContext>, u64) -> T,
-        T: std::fmt::Debug,
     {
-        eprintln!(
-            "read_context_slots_contiguous_inner {block_start} {block_count} {slot:?}"
-        );
-
         let mut buf =
             vec![0u8; (BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count) as usize];
 
@@ -1578,7 +1573,6 @@ impl RawLayout {
                     CrucibleError::BadContextSlot(e.to_string())
                 })?;
             let v = f(ctx, block_start + i as u64);
-            eprintln!("v {v:?}");
             out.push(v);
         }
 
