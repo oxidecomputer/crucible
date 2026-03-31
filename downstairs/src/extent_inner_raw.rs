@@ -1167,7 +1167,6 @@ impl RawInner {
     ) -> Result<Vec<T>, CrucibleError>
     where
         F: Fn(Option<OnDiskDownstairsBlockContext>, u64) -> T,
-        T: std::fmt::Debug,
     {
         let mut out = Vec::with_capacity(count as usize);
         let mut reads = 0u64;
