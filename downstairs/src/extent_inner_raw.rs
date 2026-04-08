@@ -19,6 +19,8 @@ use itertools::Itertools;
 use slog::{Logger, error};
 
 use std::collections::HashSet;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::os::fd::{AsFd, AsRawFd};
@@ -108,6 +110,23 @@ pub struct RawInner {
 
     /// Most recent flush number, written to context slots for debug purposes
     last_flush: u64,
+
+    /// For testing purposes, change this field to simulate the pwrite
+    /// responsible for writing out the block data succeeding or failing based
+    /// on some configuration.
+    #[cfg(test)]
+    simulate_data_write_error:
+        std::sync::Mutex<VecDeque<SimulateDataWriteErrorType>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+enum SimulateDataWriteErrorType {
+    /// This write passes
+    Success,
+
+    /// This write fails
+    Fail,
 }
 
 /// Bitpacked array, with one bit per block
@@ -411,11 +430,6 @@ impl ExtentInner for RawInner {
                     self.recompute_slot_from_file(block).unwrap();
                 }
             }
-            // Maybe a different probe?  That seems wrong.
-            cdt::extent__write__file__done!(|| {
-                (job_id.0, self.extent_number.0, num_blocks)
-            });
-            r
         } else {
             // Now that writes have gone through, update active context slots
             for i in 0..write.block_contexts.len() {
@@ -424,12 +438,16 @@ impl ExtentInner for RawInner {
                     self.active_context.swap(write.offset.0 + i as u64);
                 }
             }
-            cdt::extent__write__file__done!(|| {
-                (job_id.0, self.extent_number.0, num_blocks)
-            });
-
-            Ok(())
         }
+
+        cdt::extent__write__file__done!(|| {
+            (job_id.0, self.extent_number.0, num_blocks)
+        });
+
+        // Return an error if the data write failed. It's important that the
+        // done probe fire, and that (if there was an error) the active context
+        // slot was recomputed.
+        r
     }
 
     fn read(
@@ -759,6 +777,8 @@ impl RawInner {
             bonus_sync_count: 0,
             defrag_count: 0,
             last_flush: 0,
+            #[cfg(test)]
+            simulate_data_write_error: std::sync::Mutex::new(VecDeque::new()),
         };
         // Setting the flush number also writes the extent version, since
         // they're serialized together in the same block.
@@ -923,6 +943,8 @@ impl RawInner {
             bonus_sync_count: u64::from(meta.bonus_sync_count),
             defrag_count: u64::from(meta.defrag_count),
             last_flush: meta.flush_number,
+            #[cfg(test)]
+            simulate_data_write_error: std::sync::Mutex::new(VecDeque::new()),
         })
     }
 
@@ -1199,6 +1221,35 @@ impl RawInner {
                 [..count * block_size as usize];
             let start_block = write.offset.0 + start as u64;
 
+            #[cfg(test)]
+            {
+                let mut simulate_data_write_error =
+                    self.simulate_data_write_error.lock().unwrap();
+
+                match simulate_data_write_error.pop_front() {
+                    None => {
+                        // Nothing in this list means this write succeeds
+                        eprintln!("NONE");
+                    }
+
+                    Some(v) => match v {
+                        SimulateDataWriteErrorType::Success => {
+                            // This write succeeds but future ones may fail
+                            eprintln!("SUCCESS");
+                        }
+
+                        SimulateDataWriteErrorType::Fail => {
+                            eprintln!("FAIL");
+
+                            // This write should fail
+                            return Err(CrucibleError::IoError(String::from(
+                                "simulated io error",
+                            )));
+                        }
+                    },
+                }
+            }
+
             pwrite_all(
                 self.file.as_fd(),
                 data,
@@ -1206,6 +1257,7 @@ impl RawInner {
             )
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;
         }
+
         Ok(())
     }
 
@@ -1527,6 +1579,7 @@ impl RawLayout {
             let v = f(ctx, block_start + i as u64);
             out.push(v);
         }
+
         Ok(())
     }
 
@@ -1608,6 +1661,7 @@ mod test {
     use bytes::{Bytes, BytesMut};
     use crucible_common::BlockOffset;
     use crucible_protocol::{BlockContext, EncryptionContext};
+    use rand::Rng;
     use tempfile::tempdir;
 
     const IOV_MAX_TEST: usize = 1000;
@@ -2596,5 +2650,289 @@ mod test {
         };
         let mut ctx_buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
         bincode::serialize_into(ctx_buf.as_mut_slice(), &Some(c)).unwrap();
+    }
+
+    #[derive(Debug, Clone)]
+    struct InterruptedWriteTestRun {
+        data: Bytes,
+        contexts: Vec<BlockContext>,
+        job_id: JobId,
+    }
+
+    impl InterruptedWriteTestRun {
+        fn new(job_id: JobId, blocks: usize) -> InterruptedWriteTestRun {
+            let mut data = vec![0x00u8; blocks * 512];
+            rand::rng().fill(&mut data[..]);
+
+            let contexts = (0..blocks)
+                .map(|x| BlockContext {
+                    encryption_context: Some(EncryptionContext {
+                        nonce: rand::random::<[u8; 12]>(),
+                        tag: rand::random::<[u8; 16]>(),
+                    }),
+                    hash: integrity_hash(&[&data[(x * 512)..((x + 1) * 512)]]),
+                })
+                .collect();
+
+            InterruptedWriteTestRun {
+                data: Bytes::from(data),
+                contexts,
+                job_id,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct InterruptedWriteTest {
+        #[allow(dead_code)]
+        dir: Option<tempfile::TempDir>,
+        inner: RawInner,
+        next_job_id: JobId,
+        flush: u64,
+        generation: u64,
+        history: Vec<InterruptedWriteTestRun>,
+    }
+
+    impl Drop for InterruptedWriteTest {
+        fn drop(&mut self) {
+            let dir = self.dir.take();
+            std::mem::forget(dir);
+        }
+    }
+
+    impl InterruptedWriteTest {
+        fn new() -> Result<InterruptedWriteTest> {
+            let dir = tempdir()?;
+            eprintln!("tempdir is {dir:?}");
+
+            let inner = RawInner::create(
+                dir.as_ref(),
+                &new_region_definition(),
+                ExtentId(0),
+            )?;
+
+            Ok(InterruptedWriteTest {
+                dir: Some(dir),
+                inner,
+                next_job_id: JobId(1),
+                flush: 1,
+                generation: 1,
+                history: vec![],
+            })
+        }
+
+        fn get_write(&mut self, blocks: usize) -> InterruptedWriteTestRun {
+            let write = InterruptedWriteTestRun::new(self.next_job_id, blocks);
+            self.next_job_id.0 += 1;
+            write
+        }
+
+        /// Simulate data writes experiencing various IO errors
+        fn write(
+            &mut self,
+            simulate_data_write_error: VecDeque<SimulateDataWriteErrorType>,
+            write: InterruptedWriteTestRun,
+        ) {
+            *self.inner.simulate_data_write_error.lock().unwrap() =
+                simulate_data_write_error;
+
+            self.history.push(write.clone());
+
+            let InterruptedWriteTestRun {
+                data,
+                contexts,
+                job_id,
+            } = write;
+
+            loop {
+                let extent_write = ExtentWrite {
+                    offset: BlockOffset(0),
+                    data: data.clone(),
+                    block_contexts: contexts.clone(),
+                };
+
+                let r = self.inner.write(
+                    job_id,
+                    &extent_write,
+                    false,
+                    IOV_MAX_TEST,
+                );
+
+                // If the write is reported as successful, then break. Otherwise
+                // the downstairs will retry the operation until it succeeds.
+                if r.is_ok() {
+                    break;
+                }
+            }
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            self.inner.flush(
+                self.flush,
+                self.generation,
+                self.next_job_id.into(),
+            )?;
+            self.flush += 1;
+            self.generation += 1;
+            self.next_job_id.0 += 1;
+
+            Ok(())
+        }
+
+        fn finish(&mut self) -> Result<()> {
+            // First, print out the history of writes
+            for history in &self.history {
+                eprintln!("history {history:?}");
+            }
+
+            // Run the validation routine to see if anything is caught there
+            self.inner.validate()?;
+
+            // Read the data and confirm that what was written is returned
+            let last_bytes_written = self.history.last().unwrap().data.len();
+
+            let read = ExtentReadRequest {
+                offset: BlockOffset(0),
+                data: BytesMut::with_capacity(last_bytes_written),
+            };
+
+            let resp = self.inner.read(self.next_job_id, read, IOV_MAX_TEST)?;
+            self.next_job_id.0 += 1;
+
+            let mut first = true;
+            let mut correct_data = false;
+            let mut correct_context = false;
+
+            let ExtentReadResponse { blocks, data } = resp;
+            let data = data.freeze();
+
+            for (i, write) in self.history.iter().enumerate().rev() {
+                if data == write.data {
+                    eprintln!("data matches {}/{}", i, self.history.len());
+
+                    if first {
+                        correct_data = true;
+                    }
+                }
+
+                let expected: Vec<_> = write
+                    .contexts
+                    .iter()
+                    .map(|context| ReadBlockContext::Encrypted {
+                        ctx: EncryptionContext {
+                            nonce: context.encryption_context.unwrap().nonce,
+                            tag: context.encryption_context.unwrap().tag,
+                        },
+                    })
+                    .collect();
+
+                if blocks == expected {
+                    eprintln!("context matches {}/{}", i, self.history.len());
+
+                    if first {
+                        correct_context = true;
+                    }
+                }
+
+                first = false;
+            }
+
+            assert!(correct_data);
+            assert!(correct_context);
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_interrupted_data_writes_ok() -> Result<()> {
+        // Test that the downstairs retries a single block write if the data
+        // write returns an IO error once
+        let mut test = InterruptedWriteTest::new()?;
+        let write = test.get_write(1);
+        test.write(
+            vec![
+                SimulateDataWriteErrorType::Fail,
+                SimulateDataWriteErrorType::Success,
+            ]
+            .into(),
+            write,
+        );
+        test.finish()?;
+
+        // Test that the downstairs retries a single block write if the data
+        // write returns an IO error a few times
+        let mut test = InterruptedWriteTest::new()?;
+        let write = test.get_write(1);
+        test.write(
+            vec![
+                SimulateDataWriteErrorType::Fail,
+                SimulateDataWriteErrorType::Fail,
+                SimulateDataWriteErrorType::Fail,
+                SimulateDataWriteErrorType::Success,
+            ]
+            .into(),
+            write,
+        );
+        test.finish()?;
+
+        // Test that the downstairs retries multi block writes if the data
+        // writes return an IO error for one of the later writes.
+        let mut test = InterruptedWriteTest::new()?;
+        let write = test.get_write(4);
+        test.write(
+            vec![
+                // first attempt
+                SimulateDataWriteErrorType::Success,
+                SimulateDataWriteErrorType::Success,
+                SimulateDataWriteErrorType::Fail,
+                // second attempt
+                SimulateDataWriteErrorType::Success,
+                SimulateDataWriteErrorType::Fail,
+                // third attempt
+                SimulateDataWriteErrorType::Success,
+                SimulateDataWriteErrorType::Success,
+                SimulateDataWriteErrorType::Success,
+                SimulateDataWriteErrorType::Fail,
+                // fourth attempt should succeed
+            ]
+            .into(),
+            write,
+        );
+        test.finish()?;
+
+        // Test: a write that experiences errors, a flush, a write that
+        // experiences errors, and a flush.
+        let mut test = InterruptedWriteTest::new()?;
+
+        let write = test.get_write(1);
+        test.write(
+            vec![
+                SimulateDataWriteErrorType::Fail,
+                SimulateDataWriteErrorType::Success,
+            ]
+            .into(),
+            write,
+        );
+
+        test.flush()?;
+
+        let write = test.get_write(1);
+        test.write(
+            vec![
+                SimulateDataWriteErrorType::Fail,
+                SimulateDataWriteErrorType::Fail,
+                SimulateDataWriteErrorType::Fail,
+                SimulateDataWriteErrorType::Success,
+            ]
+            .into(),
+            write,
+        );
+
+        test.flush()?;
+
+        test.finish()?;
+
+        Ok(())
     }
 }
