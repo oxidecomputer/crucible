@@ -22,7 +22,14 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
     async fn region_list(
         rqctx: RequestContext<Self::Context>,
     ) -> SResult<HttpResponseOk<Vec<region::Region>>, HttpError> {
-        Ok(HttpResponseOk(rqctx.context().regions()))
+        let regions = rqctx
+            .context()
+            .regions()
+            .into_iter()
+            .map(|r| r.into())
+            .collect();
+
+        Ok(HttpResponseOk(regions))
     }
 
     async fn region_create(
@@ -32,7 +39,7 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
         let create = body.into_inner();
 
         match rqctx.context().create_region_request(create) {
-            Ok(r) => Ok(HttpResponseOk(r)),
+            Ok(r) => Ok(HttpResponseOk(r.into())),
             Err(e) => Err(HttpError::for_internal_error(format!(
                 "region create failure: {:?}",
                 e
@@ -47,7 +54,7 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
         let p = path.into_inner();
 
         match rc.context().get(&p.id) {
-            Some(r) => Ok(HttpResponseOk(r)),
+            Some(r) => Ok(HttpResponseOk(r.into())),
             None => Err(HttpError::for_not_found(
                 None,
                 format!("region {:?} not found", p.id),
@@ -116,7 +123,10 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
 
         Ok(HttpResponseOk(GetSnapshotResponse {
             snapshots,
-            running_snapshots,
+            running_snapshots: running_snapshots
+                .into_iter()
+                .map(|(k, v)| (k, v.into()))
+                .collect(),
         }))
     }
 
@@ -226,7 +236,7 @@ impl CrucibleAgentApi for CrucibleAgentImpl {
         };
 
         match rc.context().create_running_snapshot_request(create) {
-            Ok(r) => Ok(HttpResponseOk(r)),
+            Ok(r) => Ok(HttpResponseOk(r.into())),
             Err(e) => Err(HttpError::for_internal_error(format!(
                 "running snapshot create failure: {:?}",
                 e
