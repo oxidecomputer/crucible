@@ -377,9 +377,10 @@ impl Region {
         Ok(())
     }
 
-    /// Validate every extent by hashing all blocks and checking
+    /// Validate every raw extent by hashing all blocks and checking
     /// against stored on-disk hashes. Runs up to 20 extents in
-    /// parallel.
+    /// parallel. SQLite-backed extents (read-only snapshots) are
+    /// skipped.
     fn validate_extents(&self) -> Result<()> {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(20)
@@ -396,6 +397,12 @@ impl Region {
                             panic!("validate on closed extent!")
                         }
                     };
+
+                    // SQLite extents don't support validate and
+                    // are only used for read-only snapshots.
+                    if extent.read_only() {
+                        return None;
+                    }
 
                     if let Err(err) = extent.validate() {
                         Some((extent.number, err))
