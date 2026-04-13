@@ -1851,7 +1851,7 @@ impl ActiveConnection {
                 dependencies,
                 extent,
             } => {
-                let result = region.reopen_extent_post_repair(*extent);
+                let result = region.reopen_extent(*extent);
                 debug!(
                     self.log,
                     "LiveReopen:{} extent {} deps:{:?} res:{}",

@@ -416,11 +416,6 @@ impl ExtentInner for RawInner {
         let r = self.write_inner(write, &writes_to_skip);
 
         if r.is_err() {
-            // How can I log this?
-            // panic!(
-            //     "This is what James warned us about, job:{} extent:{} blocks:{}",
-            //     job_id.0, self.extent_number.0, num_blocks
-            // );
             for i in 0..write.block_contexts.len() {
                 if !writes_to_skip.contains(&i) {
                     // Try to recompute the context slot from the file.  If this
