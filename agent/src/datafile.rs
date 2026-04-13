@@ -980,7 +980,7 @@ impl DataFile {
                             // requested and may exist. According to zfs list,
                             // it does not yet. How was a snapshot taken?
                             bail!(
-                                "region {} (maybe?) does not exist yet! {e}",
+                                "region {} not found in zfs list! {e}",
                                 request.id.0
                             );
                         }
