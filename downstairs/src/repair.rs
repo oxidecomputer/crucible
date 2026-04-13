@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crucible_downstairs_api::*;
-use crucible_downstairs_types::FileType;
+use crucible_downstairs_types::repair::{ExtentFilePath, ExtentPath, FileType};
 use dropshot::{
     Body, CompressionConfig, ConfigDropshot, HandlerTaskMode, HttpError,
     HttpResponseOk, HttpServerStarter, Path, RequestContext,

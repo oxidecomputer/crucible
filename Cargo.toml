@@ -13,6 +13,7 @@ members = [
     "downstairs",
     "downstairs-api",
     "downstairs-types",
+    "downstairs-types/versions",
     "dropshot-apis",
     "dsc",
     "dsc-client",
@@ -154,6 +155,7 @@ crucible-control-client = { path = "./control-client" }
 crucible-downstairs = { path = "./downstairs" }
 crucible-downstairs-api = { path = "./downstairs-api" }
 crucible-downstairs-types = { path = "./downstairs-types" }
+crucible-downstairs-types-versions = { path = "./downstairs-types/versions" }
 crucible-pantry = { path = "./pantry" }
 crucible-pantry-api = { path = "./pantry-api" }
 crucible-pantry-client = { path = "./pantry-client" }

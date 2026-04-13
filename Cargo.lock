@@ -1382,25 +1382,29 @@ name = "crucible-downstairs-api"
 version = "0.1.0"
 dependencies = [
  "crucible-common",
- "crucible-downstairs-types",
+ "crucible-downstairs-types-versions",
  "crucible-workspace-hack",
  "dropshot 0.17.0",
  "dropshot-api-manager-types",
  "hyper",
- "schemars 0.8.22",
- "serde",
- "uuid",
 ]
 
 [[package]]
 name = "crucible-downstairs-types"
 version = "0.1.0"
 dependencies = [
- "crucible-common",
+ "crucible-downstairs-types-versions",
+ "crucible-workspace-hack",
+]
+
+[[package]]
+name = "crucible-downstairs-types-versions"
+version = "0.1.0"
+dependencies = [
  "crucible-workspace-hack",
  "schemars 0.8.22",
  "serde",
- "serde_json",
+ "uuid",
 ]
 
 [[package]]
