@@ -59,25 +59,16 @@ impl From<RegionState> for crucible_agent_types::region::State {
                 // considerations here that all conclude that Creating should be
                 // converted here to Requested:
                 //
-                // If this is a newer Crucible Agent that supports background
-                // creation and the in-memory type's state is Creating, then
-                // background creation of that region was occurring when the
-                // update or crash occurred, and the Agent should start again
-                // from the beginning.  Starting from the beginning is
-                // equivalent by running the worker thread and starting again
-                // from Requested.
-                //
-                // If this is an older Crucible Agent that does _not_ support
-                // background creation is the one reading the data file, it
-                // should also start from Requested in order to start over.
+                // If the region was in state Creating, then background creation
+                // of that region was occurring when the update or crash
+                // occurred, and the Agent should start again from the
+                // beginning. Starting from the beginning is equivalent by
+                // running the worker thread and starting again from Requested.
                 //
                 // If this From path is being invoked as part of an API
                 // response, then users of the API only care that the Region is
                 // Requested and not yet in state Created, as they have always,
-                // not what the Agent is doing behind the scenes. Said another
-                // way: a Nexus that is polling an older or newer Crucible Agent
-                // is not aware of whether or not the region creation is
-                // occurring in the background.
+                // not what the Agent is doing behind the scenes.
                 crucible_agent_types::region::State::Requested
             }
             RegionState::Created => {
