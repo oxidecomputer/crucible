@@ -35,7 +35,7 @@ futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
-getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hashbrown = { version = "0.16" }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -64,6 +64,7 @@ serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 similar = { version = "2", features = ["bytes"] }
+slab = { version = "0.4" }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
@@ -99,7 +100,7 @@ futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
-getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hashbrown = { version = "0.16" }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -126,6 +127,7 @@ semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
+slab = { version = "0.4" }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
@@ -148,13 +150,14 @@ aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["std"] }
 dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
 dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 linux-raw-sys = { version = "0.4", default-features = false, features = ["elf", "errno", "general", "ioctl", "no_std", "system"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+nix = { version = "0.31", features = ["feature", "fs", "term", "uio"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
@@ -165,13 +168,13 @@ aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["std"] }
 dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
 dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 linux-raw-sys = { version = "0.4", default-features = false, features = ["elf", "errno", "general", "ioctl", "no_std", "system"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
@@ -181,12 +184,13 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 bitflags-dff4ba8e3ae991db = { package = "bitflags", version = "1" }
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["std"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+nix = { version = "0.31", features = ["feature", "fs", "term", "uio"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
@@ -195,12 +199,12 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 bitflags-dff4ba8e3ae991db = { package = "bitflags", version = "1" }
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["std"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
@@ -210,15 +214,16 @@ aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["std"] }
 dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
 dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
 itertools = { version = "0.12" }
 mio = { version = "1", features = ["net", "os-ext"] }
+nix = { version = "0.31", features = ["feature", "fs", "term", "uio"] }
 nom = { version = "7" }
 regex = { version = "1" }
-rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
@@ -229,7 +234,6 @@ aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["std"] }
 dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
 dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -237,7 +241,8 @@ itertools = { version = "0.12" }
 mio = { version = "1", features = ["net", "os-ext"] }
 nom = { version = "7" }
 regex = { version = "1" }
-rustix = { version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }

@@ -20,6 +20,7 @@ pub enum State {
 fn source_default() -> Option<SocketAddr> {
     None
 }
+
 // If not provided, select false as the default for read only.
 fn read_only_default() -> bool {
     false

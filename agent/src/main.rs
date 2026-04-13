@@ -1,10 +1,8 @@
-// Copyright 2026 Oxide Computer Company
+// Copyright 2021 Oxide Computer Company
 
 use anyhow::{Result, anyhow, bail};
 use clap::Parser;
-use crucible_agent_types::region::region_smf_properties;
 use crucible_agent_types::smf::SmfProperty;
-use crucible_agent_types::snapshot::running_snapshot_smf_properties;
 use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
 use slog::{Logger, debug, error, info, o};
 use std::collections::HashSet;
@@ -45,7 +43,9 @@ mod server;
 mod smf_interface;
 mod snapshot_interface;
 
-use crucible_agent_types::region::{self, State};
+use crate::datafile::Region;
+use crate::datafile::RegionState;
+use crate::datafile::RunningSnapshotState;
 use smf_interface::*;
 
 use crate::resource::Resource;
@@ -386,7 +386,7 @@ where
      */
     let expected_downstairs_instances = regions
         .iter()
-        .filter(|r| r.state == State::Created)
+        .filter(|r| r.state == RegionState::Created)
         .map(|r| format!("{}-{}", downstairs_prefix, r.id.0))
         .collect::<HashSet<_>>();
 
@@ -394,7 +394,7 @@ where
         .iter()
         .flat_map(|(_, n)| {
             n.iter()
-                .filter(|(_, rs)| rs.state == State::Created)
+                .filter(|(_, rs)| rs.state == RunningSnapshotState::Created)
                 .map(|(_, rs)| {
                     format!("{}-{}-{}", snapshot_prefix, rs.id.0, rs.name)
                 })
@@ -476,7 +476,7 @@ where
     for r in regions.iter() {
         // If the region is in state Created, then the dataset exists, so start
         // a downstairs that points to it.
-        if r.state != State::Created {
+        if r.state != RegionState::Created {
             continue;
         }
 
@@ -486,7 +486,7 @@ where
         dir.push(&r.id.0);
 
         let properties = {
-            let mut properties = region_smf_properties(r, &dir);
+            let mut properties = r.get_smf_properties(&dir);
 
             // Instruct downstairs process to listen on the same IP as the
             // agent, because there is currently only one address in the
@@ -644,7 +644,10 @@ where
             // that we have to take action on both Requested and Created for
             // running snapshots. This is in contrast to Region, which has
             // different actions for Requested and Created.
-            if !matches!(snapshot.state, State::Requested | State::Created) {
+            if !matches!(
+                snapshot.state,
+                RunningSnapshotState::Requested | RunningSnapshotState::Created
+            ) {
                 continue;
             }
 
@@ -660,8 +663,7 @@ where
             dir.push(snapshot.name.clone());
 
             let properties = {
-                let mut properties =
-                    running_snapshot_smf_properties(snapshot, &dir);
+                let mut properties = snapshot.get_smf_properties(&dir);
 
                 // Instruct downstairs process to listen on the same IP as the
                 // agent, because there is currently only one address in the
@@ -838,7 +840,13 @@ fn worker(
          * which wraps either a Region or RegionSnapshot that has changed.
          * Otherwise, first_in_states will wait on the condvar.
          */
-        let work = df.first_in_states(&[State::Tombstoned, State::Requested]);
+        let work = df.first_in_states(
+            &[RegionState::Tombstoned, RegionState::Requested],
+            &[
+                RunningSnapshotState::Tombstoned,
+                RunningSnapshotState::Requested,
+            ],
+        );
 
         match work {
             Resource::Region(r) => {
@@ -850,7 +858,7 @@ fn worker(
                  * then we finish up destroying the region.
                  */
                 match &r.state {
-                    State::Requested => 'requested: {
+                    RegionState::Requested => 'requested: {
                         /*
                          * Compute the actual size required for a full region,
                          * then add our metadata overhead to that.
@@ -949,7 +957,7 @@ fn worker(
                         }
                     }
 
-                    State::Tombstoned => 'tombstoned: {
+                    RegionState::Tombstoned => 'tombstoned: {
                         info!(log, "applying SMF actions before removal...");
                         let result = apply_smf(
                             &log,
@@ -993,6 +1001,7 @@ fn worker(
                             df.fail(&r.id);
                         }
                     }
+
                     _ => {
                         error!(
                             log,
@@ -1043,11 +1052,11 @@ fn worker(
                     // `apply_smf` returned Ok, so the desired state transition
                     // succeeded: update the datafile.
                     let res = match &rs.state {
-                        State::Requested => {
+                        RunningSnapshotState::Requested => {
                             df.created_rs(&region_id, &snapshot_name)
                         }
 
-                        State::Tombstoned => {
+                        RunningSnapshotState::Tombstoned => {
                             df.destroyed_rs(&region_id, &snapshot_name)
                         }
 
@@ -1080,7 +1089,7 @@ fn worker(
 fn worker_region_create(
     log: &Logger,
     prog: &Path,
-    region: &region::Region,
+    region: &Region,
     dir: &Path,
 ) -> Result<()> {
     let log = log.new(o!("region" => region.id.0.to_string()));
@@ -1174,7 +1183,7 @@ fn worker_region_create(
 
 fn worker_region_destroy(
     log: &Logger,
-    region: &region::Region,
+    region: &Region,
     region_dataset: ZFSDataset,
 ) -> Result<()> {
     let log = log.new(o!("region" => region.id.0.to_string()));
@@ -1858,7 +1867,7 @@ mod test {
                 running_snapshots.get(&region_id).unwrap();
             let running_snapshot =
                 region_running_snapshots.get(&snapshot_name).unwrap();
-            assert_eq!(running_snapshot.state, State::Requested);
+            assert_eq!(running_snapshot.state, RunningSnapshotState::Requested);
         }
 
         // Say a snapshot_delete saga runs now. Before the worker can call
@@ -1878,7 +1887,10 @@ mod test {
                 running_snapshots.get(&region_id).unwrap();
             let running_snapshot =
                 region_running_snapshots.get(&snapshot_name).unwrap();
-            assert_eq!(running_snapshot.state, State::Tombstoned);
+            assert_eq!(
+                running_snapshot.state,
+                RunningSnapshotState::Tombstoned
+            );
         }
 
         // worker finishes up with calling `created_rs`
@@ -1893,7 +1905,10 @@ mod test {
                 running_snapshots.get(&region_id).unwrap();
             let running_snapshot =
                 region_running_snapshots.get(&snapshot_name).unwrap();
-            assert_eq!(running_snapshot.state, State::Tombstoned);
+            assert_eq!(
+                running_snapshot.state,
+                RunningSnapshotState::Tombstoned
+            );
         }
 
         // `delete_running_snapshot_request` will notify the worker to run, so
@@ -1931,7 +1946,7 @@ mod test {
         // dataset exists.
         {
             let region = harness.df.get(&region_id).unwrap();
-            assert_eq!(region.state, State::Requested);
+            assert_eq!(region.state, RegionState::Requested);
         }
 
         // If Nexus then requests to destroy the region,
@@ -1940,7 +1955,7 @@ mod test {
         // the State will be Tombstoned
         {
             let region = harness.df.get(&region_id).unwrap();
-            assert_eq!(region.state, State::Tombstoned);
+            assert_eq!(region.state, RegionState::Tombstoned);
         }
 
         // Worker will create the child dataset, then call `df.created`:
@@ -1949,7 +1964,7 @@ mod test {
         // It should still be Tombstoned
         {
             let region = harness.df.get(&region_id).unwrap();
-            assert_eq!(region.state, State::Tombstoned);
+            assert_eq!(region.state, RegionState::Tombstoned);
         }
 
         // `apply_smf` will be called twice
