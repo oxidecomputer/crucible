@@ -1545,13 +1545,10 @@ dependencies = [
 name = "crucible-pantry-api"
 version = "0.1.0"
 dependencies = [
- "crucible-client-types",
- "crucible-pantry-types",
+ "crucible-pantry-types-versions",
  "crucible-workspace-hack",
  "dropshot 0.17.0",
  "dropshot-api-manager-types",
- "schemars 0.8.22",
- "serde",
 ]
 
 [[package]]
@@ -1574,6 +1571,15 @@ dependencies = [
 name = "crucible-pantry-types"
 version = "0.1.0"
 dependencies = [
+ "crucible-pantry-types-versions",
+ "crucible-workspace-hack",
+]
+
+[[package]]
+name = "crucible-pantry-types-versions"
+version = "0.1.0"
+dependencies = [
+ "crucible-client-types",
  "crucible-workspace-hack",
  "schemars 0.8.22",
  "serde",
