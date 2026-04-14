@@ -44,6 +44,7 @@ resolver = "2"
 # crates.io
 aes-gcm-siv = "0.11.1"
 anyhow = "1"
+async-channel = "2.5.0"
 async-recursion = "1.1.1"
 async-trait = "0.1.89"
 atty = "0.2.14"

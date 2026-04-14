@@ -37,6 +37,11 @@ const SERVICE: &str = "oxide/crucible/downstairs";
 const RESERVATION_FACTOR: f64 = 1.25;
 const QUOTA_FACTOR: u64 = 3;
 
+// The number of tasks spawned to handle region clone operations.
+//
+// TODO does this need to be variable?
+const WORKER_COUNT: usize = 64;
+
 mod datafile;
 mod resource;
 mod server;
@@ -75,7 +80,7 @@ enum Args {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ZFSDataset {
     dataset: String,
 }
@@ -315,7 +320,7 @@ async fn main() -> Result<()> {
              */
             let log0 = log.new(o!("component" => "worker"));
             let df0 = Arc::clone(&df);
-            std::thread::spawn(|| {
+            tokio::spawn(async {
                 worker(
                     log0,
                     df0,
@@ -324,6 +329,7 @@ async fn main() -> Result<()> {
                     downstairs_prefix,
                     snapshot_prefix,
                 )
+                .await
             });
 
             server::run_server(&log, listen, df).await
@@ -809,7 +815,7 @@ where
  *
  * For region with state Requested, create the region.
  */
-fn worker(
+async fn worker(
     log: Logger,
     df: Arc<datafile::DataFile>,
     regions_dataset: ZFSDataset,
@@ -826,6 +832,39 @@ fn worker(
             );
         }
     };
+
+    // Note that this channel is unbounded as the number of concurrent region
+    // creation requests will be controlled by Nexus.
+    let (region_create_tx, region_create_rx) = async_channel::unbounded();
+
+    for tid in 0..WORKER_COUNT {
+        let df = df.clone();
+        let regions_dataset = regions_dataset.clone();
+        let regions_dataset_path = regions_dataset_path.clone();
+        let downstairs_program = downstairs_program.clone();
+        let downstairs_prefix = downstairs_prefix.clone();
+        let snapshot_prefix = snapshot_prefix.clone();
+
+        let region_create_rx = region_create_rx.clone();
+        let log = log.new(o!("agent_region_create" => tid));
+
+        tokio::spawn(async move {
+            loop {
+                while let Ok(region) = region_create_rx.recv().await {
+                    agent_region_create(
+                        &log,
+                        &df,
+                        &regions_dataset,
+                        &regions_dataset_path,
+                        &downstairs_program,
+                        &downstairs_prefix,
+                        &snapshot_prefix,
+                        region,
+                    );
+                }
+            }
+        });
+    }
 
     loop {
         /*
@@ -858,102 +897,50 @@ fn worker(
                  * then we finish up destroying the region.
                  */
                 match &r.state {
-                    RegionState::Requested => 'requested: {
-                        /*
-                         * Compute the actual size required for a full region,
-                         * then add our metadata overhead to that.
-                         */
-                        let region_size = r.block_size
-                            * r.extent_size
-                            * r.extent_count as u64;
-                        let reservation =
-                            (region_size as f64 * RESERVATION_FACTOR).round()
-                                as u64;
-                        let quota = region_size * QUOTA_FACTOR;
+                    RegionState::Requested => {
+                        let read_only = r.source.is_some();
 
-                        info!(
-                            log,
-                            "Region size:{} reservation:{} quota:{}",
-                            region_size,
-                            reservation,
-                            quota,
-                        );
+                        if read_only {
+                            // If the region we're requesting is read-only then
+                            // background the creation as it will involve
+                            // cloning from a remote address, and this could
+                            // take a long while.
+                            let region_id = r.id.clone();
 
-                        // If regions need to be created, do that before
-                        // apply_smf.
-                        let region_dataset = match regions_dataset
-                            .ensure_child_dataset(
-                                &r.id.0,
-                                Some(reservation),
-                                Some(quota),
-                                &log,
-                            ) {
-                            Ok(region_dataset) => region_dataset,
-                            Err(e) => {
+                            // Set the region's ID to creating before enqueuing
+                            // the region for background creation to avoid
+                            // racing with how the background tasks can change
+                            // the region's state.
+                            //
+                            // Note the additional state `Creating` was required
+                            // because if it did not exist then another
+                            // iteration of this worker loop would see the same
+                            // Region in Requested and repeatedly enqueue region
+                            // create requests.
+                            df.creating(&region_id);
+
+                            if let Err(e) = region_create_tx.send(r).await {
                                 error!(
                                     log,
-                                    "Dataset {} creation failed: {}",
-                                    &r.id.0,
-                                    e,
+                                    "could not send region for creation: {:?}",
+                                    e
                                 );
-                                df.fail(&r.id);
-                                break 'requested;
+
+                                std::process::exit(1);
                             }
-                        };
-
-                        let dataset_path = match region_dataset.path() {
-                            Ok(dataset_path) => dataset_path,
-                            Err(e) => {
-                                error!(
-                                    log,
-                                    "Failed to find path for dataset {}: {}",
-                                    &r.id.0,
-                                    e,
-                                );
-                                df.fail(&r.id);
-                                break 'requested;
-                            }
-                        };
-
-                        // It's important that a region transition to "Created"
-                        // only after it has been created as a dataset:
-                        // after the crucible agent restarts, `apply_smf` will
-                        // only start downstairs services for those in
-                        // "Created". If the `df.created` is moved to after this
-                        // function's `apply_smf` call, and there is a crash
-                        // before that moved `df.created` is set, then the agent
-                        // will not start a downstairs service for this region
-                        // when rebooted.
-                        let res = worker_region_create(
-                            &log,
-                            &downstairs_program,
-                            &r,
-                            &dataset_path,
-                        )
-                        .and_then(|_| df.created(&r.id));
-
-                        if let Err(e) = res {
-                            error!(
-                                log,
-                                "region {:?} create failed: {:?}", r.id.0, e
-                            );
-                            df.fail(&r.id);
-                            break 'requested;
-                        }
-
-                        info!(log, "applying SMF actions post create...");
-                        let result = apply_smf(
-                            &log,
-                            &df,
-                            regions_dataset_path.clone(),
-                            &downstairs_prefix,
-                            &snapshot_prefix,
-                        );
-
-                        if let Err(e) = result {
-                            error!(log, "SMF application failure: {:?}", e);
                         } else {
-                            info!(log, "SMF ok!");
+                            // If the region we're creating is not read-only,
+                            // then create it right here.
+                            agent_region_create(
+                                &log,
+                                &df,
+                                &regions_dataset,
+                                &regions_dataset_path,
+                                &downstairs_program,
+                                &downstairs_prefix,
+                                &snapshot_prefix,
+                                r,
+                            );
                         }
                     }
 
@@ -1083,6 +1070,88 @@ fn worker(
                 }
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn agent_region_create(
+    log: &Logger,
+    df: &Arc<datafile::DataFile>,
+    regions_dataset: &ZFSDataset,
+    regions_dataset_path: &Path,
+    downstairs_program: &Path,
+    downstairs_prefix: &str,
+    snapshot_prefix: &str,
+    r: Region,
+) {
+    /*
+     * Compute the actual size required for a full region, then add our metadata
+     * overhead to that.
+     */
+    let region_size = r.block_size * r.extent_size * r.extent_count as u64;
+    let reservation = (region_size as f64 * RESERVATION_FACTOR).round() as u64;
+    let quota = region_size * QUOTA_FACTOR;
+
+    info!(
+        log,
+        "Region size:{} reservation:{} quota:{}",
+        region_size,
+        reservation,
+        quota,
+    );
+
+    // If regions need to be created, do that before apply_smf.
+    let region_dataset = match regions_dataset.ensure_child_dataset(
+        &r.id.0,
+        Some(reservation),
+        Some(quota),
+        log,
+    ) {
+        Ok(region_dataset) => region_dataset,
+        Err(e) => {
+            error!(log, "Dataset {} creation failed: {}", &r.id.0, e,);
+            df.fail(&r.id);
+            return;
+        }
+    };
+
+    let dataset_path = match region_dataset.path() {
+        Ok(dataset_path) => dataset_path,
+        Err(e) => {
+            error!(log, "Failed to find path for dataset {}: {}", &r.id.0, e,);
+            df.fail(&r.id);
+            return;
+        }
+    };
+
+    // It's important that a region transition to "Created" only after it has
+    // been created as a dataset: after the crucible agent restarts, `apply_smf`
+    // will only start downstairs services for those in "Created". If the
+    // `df.created` is moved to after this function's `apply_smf` call, and
+    // there is a crash before that moved `df.created` is set, then the agent
+    // will not start a downstairs service for this region when rebooted.
+    let res = worker_region_create(log, downstairs_program, &r, &dataset_path)
+        .and_then(|_| df.created(&r.id));
+
+    if let Err(e) = res {
+        error!(log, "region {:?} create failed: {:?}", r.id.0, e);
+        df.fail(&r.id);
+        return;
+    }
+
+    info!(log, "applying SMF actions post create...");
+    let result = apply_smf(
+        log,
+        df,
+        regions_dataset_path.to_path_buf(),
+        downstairs_prefix,
+        snapshot_prefix,
+    );
+
+    if let Err(e) = result {
+        error!(log, "SMF application failure: {:?}", e);
+    } else {
+        info!(log, "SMF ok!");
     }
 }
 
