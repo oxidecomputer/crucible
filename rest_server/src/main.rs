@@ -1,16 +1,16 @@
 // Copyright 2021 Oxide Computer Company
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::net::SocketAddr;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 
 use crucible::*;
 use std::io::Read;
-use std::io::Write;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::io::Write;
 
 use dropshot::endpoint;
 use dropshot::ApiDescription;
@@ -73,11 +73,11 @@ pub fn opts() -> Result<Opt> {
  */
 #[tokio::main]
 async fn main() -> Result<()> {
-
     // For simplicity, we'll configure an "info"-level logger that writes to
     // stderr assuming that it's a terminal.
-    let config_logging =
-        ConfigLogging::StderrTerminal { level: ConfigLoggingLevel::Info };
+    let config_logging = ConfigLogging::StderrTerminal {
+        level: ConfigLoggingLevel::Info,
+    };
     let log = config_logging
         .to_logger("example-basic")
         .context("Failed to create logger")?;
@@ -127,13 +127,14 @@ async fn main() -> Result<()> {
     // uses port 0, which allows the operating system to pick any available
     // port.
 
-
     let server = ServerBuilder::new(api, api_context, log)
         .config(dropshot::ConfigDropshot {
-                bind_address: opt.listen,
-                default_request_body_max_bytes: 8 * 1024,
-                default_handler_task_mode: HandlerTaskMode::Detached,
-                log_headers: vec![]})
+            bind_address: opt.listen,
+            default_request_body_max_bytes: 8 * 1024,
+            default_handler_task_mode: HandlerTaskMode::Detached,
+            log_headers: vec![],
+            compression: dropshot::CompressionConfig::None,
+        })
         .start()
         .context("failed to create server")?;
 
@@ -151,7 +152,9 @@ struct CrucibleContext {
 impl CrucibleContext {
     /// Return a new CrucibleContext.
     pub fn new(cpf: CruciblePseudoFile<crucible::Guest>) -> CrucibleContext {
-        CrucibleContext { cpf: Arc::new(Mutex::new(cpf)) }
+        CrucibleContext {
+            cpf: Arc::new(Mutex::new(cpf)),
+        }
     }
 }
 
@@ -187,19 +190,21 @@ async fn crucible_api_get_bytes(
     let mut cpf = api_context.cpf.lock().await;
 
     match cpf.seek(SeekFrom::Start(req.offset)) {
-        Ok(_) => {},
-        Err(e) => return Err(HttpError::for_internal_error(
-            format!("seek failed: {e}")
-        ))
+        Ok(_) => {}
+        Err(e) => {
+            return Err(HttpError::for_internal_error(format!(
+                "seek failed: {e}"
+            )))
+        }
     };
     let mut buffer = vec![0u8; req.len.try_into().unwrap()];
     match cpf.read(&mut buffer) {
         Ok(bytes_read) => Ok(HttpResponseOk(ReadResponse {
-            bytes: String::from_utf8_lossy(&buffer[..bytes_read]).to_string()
+            bytes: String::from_utf8_lossy(&buffer[..bytes_read]).to_string(),
         })),
-        Err(e) => Err(HttpError::for_internal_error(
-            format!("read failed: {e}")
-        ))
+        Err(e) => {
+            Err(HttpError::for_internal_error(format!("read failed: {e}")))
+        }
     }
 }
 
@@ -218,16 +223,20 @@ async fn crucible_api_put_bytes(
     let mut cpf = api_context.cpf.lock().await;
 
     match cpf.seek(SeekFrom::Start(req.offset)) {
-        Ok(_) => {},
-        Err(e) => return Err(HttpError::for_internal_error(
-            format!("seek failed: {e}")
-        ))
+        Ok(_) => {}
+        Err(e) => {
+            return Err(HttpError::for_internal_error(format!(
+                "seek failed: {e}"
+            )))
+        }
     };
     match cpf.write(&mut req.bytes.as_bytes()) {
         Ok(_bytes_written) => Ok(HttpResponseUpdatedNoContent()),
-        Err(e) => return Err(HttpError::for_internal_error(
-            format!("write failed: {e}")
-        ))
+        Err(e) => {
+            return Err(HttpError::for_internal_error(format!(
+                "write failed: {e}"
+            )))
+        }
     }
 }
 /// flush
@@ -244,8 +253,10 @@ async fn crucible_api_put_flush(
 
     match cpf.flush() {
         Ok(_) => Ok(HttpResponseUpdatedNoContent()),
-        Err(e) => return Err(HttpError::for_internal_error(
-            format!("flush failed: {e}")
-        ))
+        Err(e) => {
+            return Err(HttpError::for_internal_error(format!(
+                "flush failed: {e}"
+            )))
+        }
     }
 }

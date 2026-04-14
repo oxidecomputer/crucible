@@ -1660,16 +1660,16 @@ dependencies = [
  "crucible-common",
  "crucible-protocol",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.17.0",
  "futures",
  "futures-core",
  "ringbuffer",
- "schemars",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
- "toml 0.8.23",
+ "toml 1.0.6+spec-1.1.0",
 ]
 
 [[package]]
