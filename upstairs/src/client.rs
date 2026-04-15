@@ -436,31 +436,34 @@ impl DownstairsClient {
     /// Sets our state to `DsStateData::Reconcile`
     ///
     /// # Panics
-    /// If the current state is invalid
+    /// If we are not currently in `WaitQuorum`
     pub(crate) fn begin_reconcile(&mut self) {
-        info!(self.log, "Transition from {:?} to Reconcile", self.state());
-        let DsStateData::Connecting { state, mode } = &mut self.state else {
-            panic!(
-                "invalid state {:?} for client {}",
-                self.state(),
-                self.client_id
-            );
-        };
+        info!(
+            self.log,
+            "setting state to reconcile from {:?}",
+            self.state()
+        );
         // There are two cases where reconciliation is allowed: either from a
         // new connection, or if all three Downstairs need live-repair
-        // simultaneously.
-        match (state.discriminant(), &mode) {
-            (NegotiationState::WaitQuorum, ConnectionMode::New) => {
-                // This is fine.
+        // simultaneously.  If this Downstairs isn't Connecting, then we ignore
+        // it.
+        if let DsStateData::Connecting { state, mode, .. } = &mut self.state {
+            match (state.discriminant(), &mode) {
+                (NegotiationState::WaitQuorum, ConnectionMode::New) => {
+                    // This is fine.
+                }
+                (
+                    NegotiationState::LiveRepairReady,
+                    ConnectionMode::Faulted,
+                ) => {
+                    // This is also fine, but we need to tweak our connection mode
+                    // because we're no longer doing live-repair.
+                    *mode = ConnectionMode::New;
+                }
+                s => panic!("invalid (state, mode) tuple: ({s:?}"),
             }
-            (NegotiationState::LiveRepairReady, ConnectionMode::Faulted) => {
-                // This is also fine, but we need to tweak our connection mode
-                // because we're no longer doing live-repair.
-                *mode = ConnectionMode::New;
-            }
-            s => panic!("invalid (state, mode) tuple: ({s:?}"),
+            *state = NegotiationStateData::Reconcile;
         }
-        *state = NegotiationStateData::Reconcile;
     }
 
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
@@ -511,7 +514,7 @@ impl DownstairsClient {
         // If the upstairs is already active (or trying to go active), then we
         // should automatically connect to the Downstairs.
         let auto_connect = match up_state {
-            UpstairsState::Active | UpstairsState::GoActive(..) => true,
+            UpstairsState::Active | UpstairsState::GoActive { .. } => true,
             UpstairsState::Disabled(..)
             | UpstairsState::Initializing
             | UpstairsState::Deactivating { .. } => false,
@@ -552,7 +555,7 @@ impl DownstairsClient {
                 match up_state {
                     // If we haven't activated yet (or we're deactivating) then
                     // start from New
-                    UpstairsState::GoActive(..)
+                    UpstairsState::GoActive { .. }
                     | UpstairsState::Initializing
                     | UpstairsState::Disabled(..)
                     | UpstairsState::Deactivating { .. } => ConnectionMode::New,
@@ -566,7 +569,7 @@ impl DownstairsClient {
                 match up_state {
                     // If we haven't activated yet (or we're deactivating), then
                     // start from New
-                    UpstairsState::GoActive(..)
+                    UpstairsState::GoActive { .. }
                     | UpstairsState::Initializing
                     | UpstairsState::Disabled(..)
                     | UpstairsState::Deactivating { .. } => ConnectionMode::New,
@@ -762,17 +765,20 @@ impl DownstairsClient {
     ///
     /// This changes the subsequent path through negotiation, without restarting
     /// the client IO task.  Doing so is safe because the faulted path is
-    /// a superset of the offline path.
+    /// a superset of all other paths.
     ///
     /// # Panics
-    /// If we are not in `DsStateData::Connecting { mode: ConnectionMode::Offline,
-    /// .. }`
+    /// If we are not in `DsStateData::Connecting { .. }`
     pub(crate) fn set_connection_mode_faulted(&mut self) {
-        let DsStateData::Connecting { mode, .. } = &mut self.state else {
+        let DsStateData::Connecting { mode, state } = &mut self.state else {
             panic!("not connecting");
         };
-        assert_eq!(*mode, ConnectionMode::Offline);
-        *mode = ConnectionMode::Faulted
+        *mode = ConnectionMode::Faulted;
+        if let NegotiationStateData::WaitQuorum(r) = state {
+            // yoink
+            let r = std::mem::replace(r, RegionMetadata::new(&[], &[], &[]));
+            *state = NegotiationStateData::LiveRepairReady(r);
+        }
     }
 
     /// Applies an [`EnqueueResult`] for the given job
@@ -1459,7 +1465,7 @@ impl DownstairsClient {
                             // downstairs here.
                             match up_state {
                                 UpstairsState::Initializing
-                                | UpstairsState::GoActive(_) => {
+                                | UpstairsState::GoActive { .. } => {
                                     warn!(
                                         self.log,
                                         "Replace {} with {} before active",
@@ -1592,7 +1598,7 @@ impl DownstairsClient {
                         if matches!(
                             up_state,
                             UpstairsState::Initializing
-                                | UpstairsState::GoActive(..)
+                                | UpstairsState::GoActive { .. }
                         ) =>
                     {
                         *state = NegotiationStateData::WaitQuorum(dsr);
