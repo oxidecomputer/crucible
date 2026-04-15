@@ -3,16 +3,13 @@
 //! API traits for Crucible downstairs operations.
 
 use crucible_common::RegionDefinition;
-use crucible_downstairs_types::{FileType, RunDownstairsForRegionParams};
+use crucible_downstairs_types_versions::latest;
 use dropshot::{
     Body, HttpError, HttpResponseCreated, HttpResponseOk, Path, RequestContext,
     TypedBody,
 };
 use dropshot_api_manager_types::api_versions;
 use hyper::Response;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 api_versions!([
     // WHEN CHANGING THE API (part 1 of 2):
@@ -53,9 +50,12 @@ pub trait CrucibleDownstairsAdminApi {
     }]
     async fn run_downstairs_for_region(
         rqctx: RequestContext<Self::Context>,
-        path_param: Path<RunDownstairsForRegionPath>,
-        run_params: TypedBody<RunDownstairsForRegionParams>,
-    ) -> Result<HttpResponseCreated<DownstairsRunningResponse>, HttpError>;
+        path_param: Path<latest::admin::RunDownstairsForRegionPath>,
+        run_params: TypedBody<latest::admin::RunDownstairsForRegionParams>,
+    ) -> Result<
+        HttpResponseCreated<latest::admin::DownstairsRunningResponse>,
+        HttpError,
+    >;
 }
 
 /// API trait for the downstairs repair server.
@@ -70,7 +70,7 @@ pub trait CrucibleDownstairsRepairApi {
     }]
     async fn get_extent_file(
         rqctx: RequestContext<Self::Context>,
-        path: Path<ExtentFilePath>,
+        path: Path<latest::repair::ExtentFilePath>,
     ) -> Result<Response<Body>, HttpError>;
 
     /// Return true if the provided extent is closed or the region is read only.
@@ -80,7 +80,7 @@ pub trait CrucibleDownstairsRepairApi {
     }]
     async fn extent_repair_ready(
         rqctx: RequestContext<Self::Context>,
-        path: Path<ExtentPath>,
+        path: Path<latest::repair::ExtentPath>,
     ) -> Result<HttpResponseOk<bool>, HttpError>;
 
     /// Get the list of files related to an extent.
@@ -93,7 +93,7 @@ pub trait CrucibleDownstairsRepairApi {
     }]
     async fn get_files_for_extent(
         rqctx: RequestContext<Self::Context>,
-        path: Path<ExtentPath>,
+        path: Path<latest::repair::ExtentPath>,
     ) -> Result<HttpResponseOk<Vec<String>>, HttpError>;
 
     /// Return the RegionDefinition describing our region.
@@ -122,32 +122,4 @@ pub trait CrucibleDownstairsRepairApi {
     async fn get_work(
         rqctx: RequestContext<Self::Context>,
     ) -> Result<HttpResponseOk<bool>, HttpError>;
-}
-
-// Admin API types
-#[derive(Deserialize, JsonSchema)]
-pub struct RunDownstairsForRegionPath {
-    pub uuid: Uuid,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub struct DownstairsRunningResponse {
-    pub uuid: Uuid,
-}
-
-// Repair API types
-#[derive(Deserialize, JsonSchema)]
-pub struct ExtentPath {
-    pub eid: u32,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct ExtentFilePath {
-    pub eid: u32,
-    pub file_type: FileType,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct JobPath {
-    pub id: String,
 }

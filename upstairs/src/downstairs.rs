@@ -604,7 +604,7 @@ impl Downstairs {
         }
 
         if self.gw_active.remove(&ds_id) {
-            self.acked_ids.push(ds_id);
+            self.acked_ids.enqueue(ds_id);
         } else {
             panic!("job {ds_id} not on gw_active list");
         }
@@ -2405,7 +2405,7 @@ impl Downstairs {
         );
 
         if acked {
-            self.acked_ids.push(ds_id)
+            self.acked_ids.enqueue(ds_id);
         } else {
             self.gw_active.insert(ds_id);
         }
@@ -2922,9 +2922,9 @@ impl Downstairs {
                 assert!(job.acked);
 
                 retired.push(id);
-                self.retired_ids.push(id);
+                self.retired_ids.enqueue(id);
                 let summary = job.io_summarize(id);
-                self.retired_jobs.push(summary);
+                self.retired_jobs.enqueue(summary);
                 for cid in ClientId::iter() {
                     self.clients[cid].retire_job(job);
                 }
