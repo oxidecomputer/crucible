@@ -1,14 +1,12 @@
 // Copyright 2022 Oxide Computer Company
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+use cmon_common::{DtraceDisplay, DtraceWrapper, short_state};
+use crucible::DtraceInfo;
 use crucible_control_client::Client;
 use crucible_protocol::ClientId;
-use std::fmt;
 use std::io::{self, BufRead};
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
 use tokio::time::{Duration, sleep};
-
-use crucible::DtraceInfo;
 
 /// Connect to crucible control server
 #[derive(Parser, Debug)]
@@ -27,52 +25,12 @@ struct Args {
     seconds: u64,
 }
 
-// The possible fields we will display when receiving DTrace output.
-#[derive(Debug, Copy, Clone, ValueEnum, EnumIter)]
-enum DtraceDisplay {
-    State,
-    IoCount,
-    IoSummary,
-    UpCount,
-    DsCount,
-    Reconcile,
-    LiveRepair,
-    Connected,
-    Replaced,
-    ExtentLiveRepair,
-    ExtentLimit,
-    NextJobId,
-    JobDelta,
-    DsDelay,
-}
-
-impl fmt::Display for DtraceDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            DtraceDisplay::State => write!(f, "state"),
-            DtraceDisplay::IoCount => write!(f, "io_count"),
-            DtraceDisplay::IoSummary => write!(f, "io_summary"),
-            DtraceDisplay::UpCount => write!(f, "up_count"),
-            DtraceDisplay::DsCount => write!(f, "ds_count"),
-            DtraceDisplay::Reconcile => write!(f, "reconcile"),
-            DtraceDisplay::LiveRepair => write!(f, "live_repair"),
-            DtraceDisplay::Connected => write!(f, "connected"),
-            DtraceDisplay::Replaced => write!(f, "replaced"),
-            DtraceDisplay::ExtentLiveRepair => write!(f, "extent_live_repair"),
-            DtraceDisplay::ExtentLimit => write!(f, "extent_under_repair"),
-            DtraceDisplay::NextJobId => write!(f, "next_job_id"),
-            DtraceDisplay::JobDelta => write!(f, "job_delta"),
-            DtraceDisplay::DsDelay => write!(f, "ds_delay"),
-        }
-    }
-}
-
 #[derive(Debug, Subcommand)]
 enum Action {
     /// Read from stdin
     Dtrace {
         /// Fields to display from dtrace received input
-        #[clap(short, long, default_value = "io-count")]
+        #[clap(short, long, value_delimiter = ',', default_values_t = vec![DtraceDisplay::Pid, DtraceDisplay::Session, DtraceDisplay::State, DtraceDisplay::NextJobId, DtraceDisplay::JobDelta, DtraceDisplay::ExtentLimit, DtraceDisplay::DsReconciled, DtraceDisplay::DsReconcileNeeded])]
         #[arg(value_enum)]
         output: Vec<DtraceDisplay>,
     },
@@ -82,28 +40,6 @@ enum Action {
     Jobs,
     /// Show the status of various LiveRepair stats
     Repair,
-}
-
-/// Translate what the default DsState string is (that we are getting from DTrace)
-/// into a three letter string for printing.
-fn short_state(dss: &str) -> String {
-    match dss {
-        "Active" => "ACT".to_string(),
-        "WaitQuorum" => "WQ".to_string(),
-        "Reconcile" => "REC".to_string(),
-        "LiveRepairReady" => "LRR".to_string(),
-        "New" => "NEW".to_string(),
-        "Faulted" => "FLT".to_string(),
-        "Offline" => "OFL".to_string(),
-        "Replaced" => "RPL".to_string(),
-        "LiveRepair" => "LR".to_string(),
-        "Replacing" => "RPC".to_string(),
-        "Disabled" => "DIS".to_string(),
-        "Deactivated" => "DAV".to_string(),
-        "NegotiationFailed" => "NF".to_string(),
-        "Fault" => "FLT".to_string(),
-        x => x.to_string(),
-    }
 }
 
 // Show the downstairs work queue
@@ -192,6 +128,15 @@ async fn show_repair_stats(args: Args) {
 fn print_dtrace_header(dd: &[DtraceDisplay]) {
     for display_item in dd.iter() {
         match display_item {
+            DtraceDisplay::Pid => {
+                print!(" {:>5}", "PID");
+            }
+            DtraceDisplay::Session => {
+                print!(" {:>8}", "SESSION");
+            }
+            DtraceDisplay::UpstairsId => {
+                print!(" {:>8}", "UPSTAIRS");
+            }
             DtraceDisplay::State => {
                 print!(" {:>3} {:>3} {:>3}", "DS0", "DS1", "DS2",);
             }
@@ -212,6 +157,12 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
             }
             DtraceDisplay::Reconcile => {
                 print!(" {:>4} {:>4} {:>4}", "REC", "NREC", "AREC");
+            }
+            DtraceDisplay::DsReconciled => {
+                print!(" {:>4}", "ERR");
+            }
+            DtraceDisplay::DsReconcileNeeded => {
+                print!(" {:>4}", "ERN");
             }
             DtraceDisplay::LiveRepair => {
                 print!(" {:>4} {:>4} {:>4}", "LRC0", "LRC1", "LRC0");
@@ -237,7 +188,25 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
                 print!(" {:>5}", "DELTA");
             }
             DtraceDisplay::DsDelay => {
-                print!(" {:>5}", "DELAY");
+                print!(" {:>5} {:>5} {:>5}", "DLY0", "DLY1", "DLY2");
+            }
+            DtraceDisplay::WriteBytesOut => {
+                print!(" {:>10}", "WRBYTES");
+            }
+            DtraceDisplay::RoLrSkipped => {
+                print!(" {:>4} {:>4} {:>4}", "RLS0", "RLS1", "RLS2");
+            }
+            DtraceDisplay::DsIoInProgress => {
+                print!(" {:>5} {:>5} {:>5}", "IP0", "IP1", "IP2");
+            }
+            DtraceDisplay::DsIoDone => {
+                print!(" {:>5} {:>5} {:>5}", "D0", "D1", "D2");
+            }
+            DtraceDisplay::DsIoSkipped => {
+                print!(" {:>5} {:>5} {:>5}", "S0", "S1", "S2");
+            }
+            DtraceDisplay::DsIoError => {
+                print!(" {:>4} {:>4} {:>4}", "E0", "E1", "E2");
             }
         }
     }
@@ -247,12 +216,26 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
 // Print out the values in the dtrace output based on what the DtraceDisplay
 // enums are set in the given Vec.
 fn print_dtrace_row(
+    pid: u32,
     d_out: DtraceInfo,
     dd: &[DtraceDisplay],
     last_job_id: &mut u64,
 ) {
     for display_item in dd.iter() {
         match display_item {
+            DtraceDisplay::Pid => {
+                print!(" {:>5}", pid);
+            }
+            DtraceDisplay::Session => {
+                let session_short =
+                    d_out.session_id.chars().take(8).collect::<String>();
+                print!(" {:>8}", session_short);
+            }
+            DtraceDisplay::UpstairsId => {
+                let upstairs_short =
+                    d_out.upstairs_id.chars().take(8).collect::<String>();
+                print!(" {:>8}", upstairs_short);
+            }
             DtraceDisplay::State => {
                 print!(
                     " {:>3} {:>3} {:>3}",
@@ -302,6 +285,12 @@ fn print_dtrace_row(
                     d_out.ds_reconcile_needed,
                     d_out.ds_reconcile_aborted,
                 );
+            }
+            DtraceDisplay::DsReconciled => {
+                print!(" {:>4}", d_out.ds_reconciled);
+            }
+            DtraceDisplay::DsReconcileNeeded => {
+                print!(" {:>4}", d_out.ds_reconcile_needed);
             }
             DtraceDisplay::LiveRepair => {
                 print!(
@@ -354,12 +343,12 @@ fn print_dtrace_row(
                 print!(" {:>7}", d_out.next_job_id);
             }
             DtraceDisplay::JobDelta => {
-                let delta = if *last_job_id == 0 {
-                    d_out.next_job_id.0
+                if *last_job_id == 0 {
+                    print!(" {:>5}", "---");
                 } else {
-                    d_out.next_job_id.0 - *last_job_id
-                };
-                print!(" {:5}", delta);
+                    let delta = d_out.next_job_id.0 - *last_job_id;
+                    print!(" {:5}", delta);
+                }
                 *last_job_id = d_out.next_job_id.0;
             }
             DtraceDisplay::DsDelay => {
@@ -368,6 +357,49 @@ fn print_dtrace_row(
                     d_out.ds_delay_us[0],
                     d_out.ds_delay_us[1],
                     d_out.ds_delay_us[2],
+                );
+            }
+            DtraceDisplay::WriteBytesOut => {
+                print!(" {:10}", d_out.write_bytes_out);
+            }
+            DtraceDisplay::RoLrSkipped => {
+                print!(
+                    " {:4} {:4} {:4}",
+                    d_out.ds_ro_lr_skipped[0],
+                    d_out.ds_ro_lr_skipped[1],
+                    d_out.ds_ro_lr_skipped[2],
+                );
+            }
+            DtraceDisplay::DsIoInProgress => {
+                print!(
+                    " {:5} {:5} {:5}",
+                    d_out.ds_io_count.in_progress[ClientId::new(0)],
+                    d_out.ds_io_count.in_progress[ClientId::new(1)],
+                    d_out.ds_io_count.in_progress[ClientId::new(2)],
+                );
+            }
+            DtraceDisplay::DsIoDone => {
+                print!(
+                    " {:5} {:5} {:5}",
+                    d_out.ds_io_count.done[ClientId::new(0)],
+                    d_out.ds_io_count.done[ClientId::new(1)],
+                    d_out.ds_io_count.done[ClientId::new(2)],
+                );
+            }
+            DtraceDisplay::DsIoSkipped => {
+                print!(
+                    " {:5} {:5} {:5}",
+                    d_out.ds_io_count.skipped[ClientId::new(0)],
+                    d_out.ds_io_count.skipped[ClientId::new(1)],
+                    d_out.ds_io_count.skipped[ClientId::new(2)],
+                );
+            }
+            DtraceDisplay::DsIoError => {
+                print!(
+                    " {:4} {:4} {:4}",
+                    d_out.ds_io_count.error[ClientId::new(0)],
+                    d_out.ds_io_count.error[ClientId::new(1)],
+                    d_out.ds_io_count.error[ClientId::new(2)],
                 );
             }
         }
@@ -390,15 +422,20 @@ fn dtrace_loop(output: Vec<DtraceDisplay>) {
                     print_dtrace_header(&output);
                 }
                 count = (count + 1) % 20;
-                let d_out: DtraceInfo = match serde_json::from_str(&dtrace_out)
-                {
-                    Ok(a) => a,
-                    Err(e) => {
-                        println!("Err {:?}", e);
-                        continue;
-                    }
-                };
-                print_dtrace_row(d_out, &output, &mut last_job_id);
+                let wrapper: DtraceWrapper =
+                    match serde_json::from_str(&dtrace_out) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            println!("Err {:?}", e);
+                            continue;
+                        }
+                    };
+                print_dtrace_row(
+                    wrapper.pid,
+                    wrapper.status,
+                    &output,
+                    &mut last_job_id,
+                );
             }
             Err(e) => {
                 println!("Error: {:?}", e);
