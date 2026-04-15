@@ -15,7 +15,7 @@
 //! - **Data Format Validation**: Ensures expected fields are present and
 //!   correctly typed
 //!
-//! ## What's NOT Tested (Yet)
+//! ## What's NOT Tested
 //!
 //! The following areas require more sophisticated testing infrastructure:
 //!
@@ -40,9 +40,7 @@
 //! - Delta history ring buffer behavior
 //!
 //! ### Edge Cases
-//! - Multiple sessions with same PID
 //! - Rapidly changing session data
-//! - Very long session IDs or upstairs IDs
 //! - Terminal resize during operation
 //! - Empty or missing DTrace output
 //!
