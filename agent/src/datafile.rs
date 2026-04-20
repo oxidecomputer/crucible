@@ -1,10 +1,17 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
-use anyhow::{Result, anyhow, bail};
-use crucible_agent_types::{region::*, snapshot::*};
+use anyhow::{Result, bail};
+use crucible_agent_types::region::CreateRegion;
+use crucible_agent_types::region::RegionId;
+use crucible_agent_types::snapshot::CreateRunningSnapshotRequest;
+use crucible_agent_types::snapshot::DeleteRunningSnapshotRequest;
+use crucible_agent_types::snapshot::DeleteSnapshotRequest;
+use crucible_agent_types::snapshot::Snapshot;
 use crucible_common::write_json;
+use crucible_smf::scf_type_t::*;
+use dropshot::HttpError;
 use serde::{Deserialize, Serialize};
-use slog::{Logger, crit, error, info};
+use slog::{Logger, crit, error, info, warn};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -14,6 +21,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use crate::ZFSDataset;
 use crate::resource::Resource;
 use crate::snapshot_interface::SnapshotInterface;
+use crucible_agent_types::smf::SmfProperty;
 
 pub struct DataFile {
     log: Logger,
@@ -27,11 +35,479 @@ pub struct DataFile {
     snapshot_interface: Arc<dyn SnapshotInterface>,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, PartialEq, Clone)]
+pub enum RegionState {
+    Requested,
+    /// Region creation is occuring in the background
+    Creating,
+    Created,
+    Tombstoned,
+    Destroyed,
+    Failed,
+}
+
+impl From<RegionState> for crucible_agent_types::region::State {
+    fn from(s: RegionState) -> crucible_agent_types::region::State {
+        match s {
+            RegionState::Requested => {
+                crucible_agent_types::region::State::Requested
+            }
+            RegionState::Creating => {
+                // The Crucible agent will only read the data file on startup,
+                // either after being updated or after crashing. There's a few
+                // considerations here that all conclude that Creating should be
+                // converted here to Requested:
+                //
+                // If the region was in state Creating, then background creation
+                // of that region was occurring when the update or crash
+                // occurred, and the Agent should start again from the
+                // beginning. Starting from the beginning is equivalent by
+                // running the worker thread and starting again from Requested.
+                //
+                // If this From path is being invoked as part of an API
+                // response, then users of the API only care that the Region is
+                // Requested and not yet in state Created, as they have always,
+                // not what the Agent is doing behind the scenes.
+                crucible_agent_types::region::State::Requested
+            }
+            RegionState::Created => {
+                crucible_agent_types::region::State::Created
+            }
+            RegionState::Tombstoned => {
+                crucible_agent_types::region::State::Tombstoned
+            }
+            RegionState::Destroyed => {
+                crucible_agent_types::region::State::Destroyed
+            }
+            RegionState::Failed => crucible_agent_types::region::State::Failed,
+        }
+    }
+}
+
+impl From<crucible_agent_types::region::State> for RegionState {
+    fn from(s: crucible_agent_types::region::State) -> RegionState {
+        match s {
+            crucible_agent_types::region::State::Requested => {
+                RegionState::Requested
+            }
+            crucible_agent_types::region::State::Created => {
+                RegionState::Created
+            }
+            crucible_agent_types::region::State::Tombstoned => {
+                RegionState::Tombstoned
+            }
+            crucible_agent_types::region::State::Destroyed => {
+                RegionState::Destroyed
+            }
+            crucible_agent_types::region::State::Failed => RegionState::Failed,
+        }
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, PartialEq, Clone)]
+pub struct Region {
+    pub id: RegionId,
+    pub state: RegionState,
+
+    // Creation parameters
+    pub block_size: u64,
+    pub extent_size: u64,
+    pub extent_count: u32,
+    pub encrypted: bool,
+
+    // Run-time parameters
+    pub port_number: u16,
+    pub cert_pem: Option<String>,
+    pub key_pem: Option<String>,
+    pub root_pem: Option<String>,
+
+    // If this region was created as part of a clone.
+    pub source: Option<SocketAddr>,
+
+    // If this region is read only
+    pub read_only: bool,
+}
+
+impl From<Region> for crucible_agent_types::region::Region {
+    fn from(region: Region) -> crucible_agent_types::region::Region {
+        crucible_agent_types::region::Region {
+            id: region.id,
+            state: region.state.into(),
+
+            block_size: region.block_size,
+            extent_size: region.extent_size,
+            extent_count: region.extent_count,
+            encrypted: region.encrypted,
+
+            port_number: region.port_number,
+            cert_pem: region.cert_pem,
+            key_pem: region.key_pem,
+            root_pem: region.root_pem,
+
+            source: region.source,
+
+            read_only: region.read_only,
+        }
+    }
+}
+
+impl From<crucible_agent_types::region::Region> for Region {
+    fn from(region: crucible_agent_types::region::Region) -> Region {
+        Region {
+            id: region.id,
+            state: region.state.into(),
+
+            block_size: region.block_size,
+            extent_size: region.extent_size,
+            extent_count: region.extent_count,
+            encrypted: region.encrypted,
+
+            port_number: region.port_number,
+            cert_pem: region.cert_pem,
+            key_pem: region.key_pem,
+            root_pem: region.root_pem,
+
+            source: region.source,
+
+            read_only: region.read_only,
+        }
+    }
+}
+
+impl Region {
+    /**
+     * Given a root directory, return a list of SMF properties to ensure for
+     * the corresponding running instance.
+     */
+    pub fn get_smf_properties(&self, dir: &Path) -> Vec<SmfProperty<'_>> {
+        let mut results = vec![
+            SmfProperty {
+                name: "directory",
+                typ: SCF_TYPE_ASTRING,
+                val: dir.to_str().unwrap().to_string(),
+            },
+            SmfProperty {
+                name: "port",
+                typ: SCF_TYPE_COUNT,
+                val: self.port_number.to_string(),
+            },
+        ];
+
+        if self.cert_pem.is_some() {
+            let mut path = dir.to_path_buf();
+            path.push("cert.pem");
+            let path = path.into_os_string().into_string().unwrap();
+
+            results.push(SmfProperty {
+                name: "cert_pem_path",
+                typ: SCF_TYPE_ASTRING,
+                val: path,
+            });
+        }
+
+        if self.key_pem.is_some() {
+            let mut path = dir.to_path_buf();
+            path.push("key.pem");
+            let path = path.into_os_string().into_string().unwrap();
+
+            results.push(SmfProperty {
+                name: "key_pem_path",
+                typ: SCF_TYPE_ASTRING,
+                val: path,
+            });
+        }
+
+        if self.root_pem.is_some() {
+            let mut path = dir.to_path_buf();
+            path.push("root.pem");
+            let path = path.into_os_string().into_string().unwrap();
+
+            results.push(SmfProperty {
+                name: "root_pem_path",
+                typ: SCF_TYPE_ASTRING,
+                val: path,
+            });
+        }
+
+        results
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, PartialEq, Clone)]
+pub enum RunningSnapshotState {
+    Requested,
+    Created,
+    Tombstoned,
+    Destroyed,
+    Failed,
+}
+
+impl From<RunningSnapshotState> for crucible_agent_types::region::State {
+    fn from(s: RunningSnapshotState) -> crucible_agent_types::region::State {
+        match s {
+            RunningSnapshotState::Requested => {
+                crucible_agent_types::region::State::Requested
+            }
+            RunningSnapshotState::Created => {
+                crucible_agent_types::region::State::Created
+            }
+            RunningSnapshotState::Tombstoned => {
+                crucible_agent_types::region::State::Tombstoned
+            }
+            RunningSnapshotState::Destroyed => {
+                crucible_agent_types::region::State::Destroyed
+            }
+            RunningSnapshotState::Failed => {
+                crucible_agent_types::region::State::Failed
+            }
+        }
+    }
+}
+
+impl From<crucible_agent_types::region::State> for RunningSnapshotState {
+    fn from(s: crucible_agent_types::region::State) -> RunningSnapshotState {
+        match s {
+            crucible_agent_types::region::State::Requested => {
+                RunningSnapshotState::Requested
+            }
+            crucible_agent_types::region::State::Created => {
+                RunningSnapshotState::Created
+            }
+            crucible_agent_types::region::State::Tombstoned => {
+                RunningSnapshotState::Tombstoned
+            }
+            crucible_agent_types::region::State::Destroyed => {
+                RunningSnapshotState::Destroyed
+            }
+            crucible_agent_types::region::State::Failed => {
+                RunningSnapshotState::Failed
+            }
+        }
+    }
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, PartialEq, Clone)]
+pub struct RunningSnapshot {
+    pub id: RegionId,
+    pub name: String,
+    pub port_number: u16,
+    pub state: RunningSnapshotState,
+}
+
+impl From<RunningSnapshot> for crucible_agent_types::snapshot::RunningSnapshot {
+    fn from(
+        running_snapshot: RunningSnapshot,
+    ) -> crucible_agent_types::snapshot::RunningSnapshot {
+        Self {
+            id: running_snapshot.id,
+            name: running_snapshot.name,
+            port_number: running_snapshot.port_number,
+            state: running_snapshot.state.into(),
+        }
+    }
+}
+
+impl From<crucible_agent_types::snapshot::RunningSnapshot> for RunningSnapshot {
+    fn from(
+        running_snapshot: crucible_agent_types::snapshot::RunningSnapshot,
+    ) -> Self {
+        Self {
+            id: running_snapshot.id,
+            name: running_snapshot.name,
+            port_number: running_snapshot.port_number,
+            state: running_snapshot.state.into(),
+        }
+    }
+}
+
+impl RunningSnapshot {
+    /**
+     * Given a root directory, return a list of SMF properties to ensure for
+     * the corresponding running instance.
+     */
+    pub fn get_smf_properties(&self, dir: &Path) -> Vec<SmfProperty<'_>> {
+        let mut results = vec![
+            SmfProperty {
+                name: "directory",
+                typ: SCF_TYPE_ASTRING,
+                val: dir.to_str().unwrap().to_string(),
+            },
+            SmfProperty {
+                name: "port",
+                typ: SCF_TYPE_COUNT,
+                val: self.port_number.to_string(),
+            },
+            SmfProperty {
+                name: "mode",
+                typ: SCF_TYPE_ASTRING,
+                val: "ro".to_string(),
+            },
+        ];
+
+        // Test for X509 files in snapshot - note this means that running
+        // snapshots will use the X509 information in the snapshot, not a new
+        // set.
+        {
+            let mut path = dir.to_path_buf();
+            path.push("cert.pem");
+            let path = path.into_os_string().into_string().unwrap();
+
+            if Path::new(&path).exists() {
+                results.push(SmfProperty {
+                    name: "cert_pem_path",
+                    typ: SCF_TYPE_ASTRING,
+                    val: path,
+                });
+            }
+        }
+
+        {
+            let mut path = dir.to_path_buf();
+            path.push("key.pem");
+            let path = path.into_os_string().into_string().unwrap();
+
+            if Path::new(&path).exists() {
+                results.push(SmfProperty {
+                    name: "key_pem_path",
+                    typ: SCF_TYPE_ASTRING,
+                    val: path,
+                });
+            }
+        }
+
+        {
+            let mut path = dir.to_path_buf();
+            path.push("root.pem");
+            let path = path.into_os_string().into_string().unwrap();
+
+            if Path::new(&path).exists() {
+                results.push(SmfProperty {
+                    name: "root_pem_path",
+                    typ: SCF_TYPE_ASTRING,
+                    val: path,
+                });
+            }
+        }
+
+        results
+    }
+}
+
+/// A separate in-memory-only version of the deserialized data file.
+#[derive(Clone)]
 struct Inner {
     regions: BTreeMap<RegionId, Region>,
+
     // indexed by region id and snapshot name
     running_snapshots: BTreeMap<RegionId, BTreeMap<String, RunningSnapshot>>,
+}
+
+/// Serialized on-disk data file for the Crucible Agent. Be careful changing
+/// this: an older version of the Agent will not be able to deserialize the file
+/// anymore, or may interpret the fields or states differently if semantics
+/// change. The types used in this function are from `crucible_agent_types`,
+/// meaning the API versioning tooling will flag type changes (but not semantic
+/// changes!).
+#[derive(Serialize, Deserialize, Default)]
+struct OnDiskDataFile {
+    regions: BTreeMap<RegionId, crucible_agent_types::region::Region>,
+
+    // indexed by region id and snapshot name
+    running_snapshots: BTreeMap<
+        RegionId,
+        BTreeMap<String, crucible_agent_types::snapshot::RunningSnapshot>,
+    >,
+}
+
+impl From<OnDiskDataFile> for Inner {
+    fn from(on_disk: OnDiskDataFile) -> Inner {
+        Inner {
+            regions: on_disk
+                .regions
+                .into_iter()
+                .map(|(k, v)| (k, v.into()))
+                .collect(),
+
+            running_snapshots: on_disk
+                .running_snapshots
+                .into_iter()
+                .map(|(k, v)| {
+                    (k, v.into_iter().map(|(kk, vv)| (kk, vv.into())).collect())
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<Inner> for OnDiskDataFile {
+    fn from(inner: Inner) -> OnDiskDataFile {
+        OnDiskDataFile {
+            regions: inner
+                .regions
+                .into_iter()
+                .map(|(k, v)| (k, v.into()))
+                .collect(),
+
+            running_snapshots: inner
+                .running_snapshots
+                .into_iter()
+                .map(|(k, v)| {
+                    (k, v.into_iter().map(|(kk, vv)| (kk, vv.into())).collect())
+                })
+                .collect(),
+        }
+    }
+}
+
+fn request_mismatch(
+    request: &CreateRegion,
+    r: &crate::datafile::Region,
+) -> Option<String> {
+    if request.block_size != r.block_size {
+        Some(format!(
+            "block size {} instead of requested {}",
+            request.block_size, r.block_size
+        ))
+    } else if request.extent_size != r.extent_size {
+        Some(format!(
+            "extent size {} instead of requested {}",
+            request.extent_size, r.extent_size
+        ))
+    } else if request.extent_count != r.extent_count {
+        Some(format!(
+            "extent count {} instead of requested {}",
+            request.extent_count, r.extent_count
+        ))
+    } else if request.encrypted != r.encrypted {
+        Some(format!(
+            "encrypted {} instead of requested {}",
+            request.encrypted, r.encrypted
+        ))
+    } else if request.cert_pem != r.cert_pem {
+        Some(format!(
+            "cert_pem {:?} instead of requested {:?}",
+            request.cert_pem, r.cert_pem
+        ))
+    } else if request.key_pem != r.key_pem {
+        // Do not output key_pem, leaking what is stored on disk!
+        Some(String::from("key_pem incorrect"))
+    } else if request.root_pem != r.root_pem {
+        Some(format!(
+            "root_pem {:?} instead of requested {:?}",
+            request.root_pem, r.root_pem
+        ))
+    } else if request.source != r.source {
+        Some(format!(
+            "source {:?} instead of requested {:?}",
+            request.source, r.source
+        ))
+    } else {
+        None
+    }
 }
 
 impl DataFile {
@@ -50,13 +526,14 @@ impl DataFile {
         /*
          * Open data file, load contents.
          */
-        let inner = match crucible_common::read_json_maybe(&conf_path) {
-            Ok(Some(inner)) => inner,
-            Ok(None) => Inner::default(),
-            Err(e) => {
-                bail!("failed to load data file {:?}: {:?}", conf_path, e);
-            }
-        };
+        let inner: OnDiskDataFile =
+            match crucible_common::read_json_maybe(&conf_path) {
+                Ok(Some(inner)) => inner,
+                Ok(None) => OnDiskDataFile::default(),
+                Err(e) => {
+                    bail!("failed to load data file {:?}: {:?}", conf_path, e);
+                }
+            };
 
         Ok(DataFile {
             log,
@@ -66,7 +543,7 @@ impl DataFile {
             port_min,
             port_max,
             bell: Condvar::new(),
-            inner: Mutex::new(inner),
+            inner: Mutex::new(inner.into()),
             snapshot_interface,
         })
     }
@@ -99,8 +576,9 @@ impl DataFile {
      * Store the database into the JSON file.
      */
     fn store(&self, inner: MutexGuard<Inner>) {
+        let on_disk_datafile: OnDiskDataFile = (*inner).clone().into();
         loop {
-            match write_json(&self.conf_path, &*inner, true) {
+            match write_json(&self.conf_path, &on_disk_datafile, true) {
                 Ok(()) => return,
                 Err(e) => {
                     /*
@@ -130,7 +608,7 @@ impl DataFile {
                  * for now, as they may still prevent use of
                  * their assigned port number.
                  */
-                if region.state == State::Destroyed {
+                if region.state == RegionState::Destroyed {
                     continue;
                 }
 
@@ -148,7 +626,8 @@ impl DataFile {
                 inner.running_snapshots.values()
             {
                 for running_snapshot in running_snapshot_regions.values() {
-                    if running_snapshot.state == State::Destroyed {
+                    if running_snapshot.state == RunningSnapshotState::Destroyed
+                    {
                         continue;
                     }
 
@@ -187,7 +666,7 @@ impl DataFile {
          * Look for a region with this ID.
          */
         if let Some(r) = inner.regions.get(&create.id) {
-            if let Some(mis) = create.mismatch(r) {
+            if let Some(mis) = request_mismatch(&create, r) {
                 bail!(
                     "requested region {} already exists, with {}",
                     create.id.0,
@@ -211,7 +690,7 @@ impl DataFile {
 
         let r = Region {
             id: create.id.clone(),
-            state: State::Requested,
+            state: RegionState::Requested,
 
             block_size: create.block_size,
             extent_size: create.extent_size,
@@ -300,7 +779,7 @@ impl DataFile {
             id: request.id.clone(),
             name: request.name.clone(),
             port_number,
-            state: State::Requested,
+            state: RunningSnapshotState::Requested,
         };
 
         info!(
@@ -377,7 +856,8 @@ impl DataFile {
                 // snapshot state could be anything.
 
                 match existing.state {
-                    State::Tombstoned | State::Destroyed => {
+                    RunningSnapshotState::Tombstoned
+                    | RunningSnapshotState::Destroyed => {
                         /*
                          * Either:
                          * - Destroy already scheduled.
@@ -385,7 +865,8 @@ impl DataFile {
                          */
                     }
 
-                    State::Requested | State::Created => {
+                    RunningSnapshotState::Requested
+                    | RunningSnapshotState::Created => {
                         info!(
                             self.log,
                             "removing running snapshot {}-{}",
@@ -393,7 +874,7 @@ impl DataFile {
                             request.name
                         );
 
-                        existing.state = State::Tombstoned;
+                        existing.state = RunningSnapshotState::Tombstoned;
 
                         /*
                          * Wake the worker thread to remove the snapshot we've
@@ -404,7 +885,7 @@ impl DataFile {
                         self.store(inner);
                     }
 
-                    State::Failed => {
+                    RunningSnapshotState::Failed => {
                         /*
                          * For now, this terminal state will preserve evidence
                          *  for investigation.
@@ -437,7 +918,9 @@ impl DataFile {
             && let Some(running_snapshot) = running_snapshots.get(&request.name)
         {
             match running_snapshot.state {
-                State::Requested | State::Created | State::Tombstoned => {
+                RunningSnapshotState::Requested
+                | RunningSnapshotState::Created
+                | RunningSnapshotState::Tombstoned => {
                     bail!(
                         "read-only downstairs running for region {} snapshot {}",
                         request.id.0,
@@ -445,11 +928,11 @@ impl DataFile {
                     );
                 }
 
-                State::Destroyed => {
+                RunningSnapshotState::Destroyed => {
                     // ok to delete
                 }
 
-                State::Failed => {
+                RunningSnapshotState::Failed => {
                     // Something has set the running snapshot to state
                     // failed, so we can't delete this snapshot.
                     bail!(
@@ -476,24 +959,35 @@ impl DataFile {
                 // Did the region exist in the past, and was it already deleted?
                 if let Some(region) = inner.regions.get(&request.id) {
                     match region.state {
-                        State::Tombstoned | State::Destroyed => {
+                        RegionState::Tombstoned | RegionState::Destroyed => {
                             // If so, any snapshots must have been deleted
                             // before the agent would allow the region to be
                             // deleted.
                             return Ok(());
                         }
 
-                        State::Requested | State::Created => {
-                            // This is a bug: according to the agent's datafile,
-                            // the region exists, but according to zfs list, it
-                            // does not
+                        RegionState::Requested | RegionState::Creating => {
+                            // According to the agent's datafile, the region was
+                            // requested and may exist. According to zfs list,
+                            // it does not yet. How was a snapshot taken?
                             bail!(
-                                "Agent thinks region {} exists but zfs list does not! {e}",
+                                "region {} not found in zfs list! {e}",
                                 request.id.0
                             );
                         }
 
-                        State::Failed => {
+                        RegionState::Created => {
+                            // This is a bug: according to the agent's datafile,
+                            // the region exists, but according to zfs list, it
+                            // does not
+                            bail!(
+                                "Agent thinks region {} exists but zfs list \
+                                does not! {e}",
+                                request.id.0
+                            );
+                        }
+
+                        RegionState::Failed => {
                             // Something has set the region to state failed, so
                             // we can't delete this snapshot.
                             bail!(
@@ -505,7 +999,8 @@ impl DataFile {
                 } else {
                     // In here, the region never existed!
                     bail!(
-                        "Inside region {} snapshot {} delete, region never existed! {e}",
+                        "Inside region {} snapshot {} delete, region never \
+                        existed! {e}",
                         request.id.0,
                         request.name
                     );
@@ -527,7 +1022,7 @@ impl DataFile {
         let mut inner = self.inner.lock().unwrap();
 
         let r = inner.regions.get_mut(id).unwrap();
-        let nstate = State::Failed;
+        let nstate = RegionState::Failed;
         if r.state == nstate {
             return;
         }
@@ -554,7 +1049,7 @@ impl DataFile {
             .get_mut(snapshot_name)
             .unwrap();
 
-        let nstate = State::Failed;
+        let nstate = RunningSnapshotState::Failed;
         if rs.state == nstate {
             return;
         }
@@ -579,16 +1074,18 @@ impl DataFile {
         let mut inner = self.inner.lock().unwrap();
 
         let r = inner.regions.get_mut(id).unwrap();
-        let nstate = State::Created;
+        let nstate = RegionState::Created;
         match &r.state {
-            State::Requested => (),
-            State::Tombstoned => {
+            RegionState::Requested | RegionState::Creating => (),
+
+            RegionState::Tombstoned => {
                 /*
                  * Nexus requested that we destroy this region before we
                  * finished provisioning it.
                  */
                 return Ok(());
             }
+
             x => bail!("created region in weird state {:?}", x),
         }
 
@@ -619,12 +1116,12 @@ impl DataFile {
             .get_mut(snapshot_name)
             .unwrap();
 
-        let nstate = State::Created;
+        let nstate = RunningSnapshotState::Created;
 
         match &rs.state {
-            State::Requested => (),
+            RunningSnapshotState::Requested => (),
 
-            State::Tombstoned => {
+            RunningSnapshotState::Tombstoned => {
                 /*
                  * Something else set this to Tombstoned between when the SMF
                  * was applied and before the state in the datafile changed!
@@ -681,10 +1178,12 @@ impl DataFile {
         let mut inner = self.inner.lock().unwrap();
 
         let r = inner.regions.get_mut(id).unwrap();
-        let nstate = State::Destroyed;
+        let nstate = RegionState::Destroyed;
         match &r.state {
-            State::Requested => (),
-            State::Tombstoned => (),
+            RegionState::Requested | RegionState::Creating => (),
+
+            RegionState::Tombstoned => (),
+
             x => bail!("region to destroy in weird state {:?}", x),
         }
 
@@ -717,7 +1216,7 @@ impl DataFile {
             .get_mut(snapshot_name)
             .unwrap();
 
-        let nstate = State::Destroyed;
+        let nstate = RunningSnapshotState::Destroyed;
 
         info!(
             self.log,
@@ -736,23 +1235,45 @@ impl DataFile {
     /**
      * Nexus has requested that we destroy this particular region.
      */
-    pub fn destroy(&self, id: &RegionId) -> Result<()> {
+    pub fn destroy(&self, id: &RegionId) -> Result<(), HttpError> {
         let mut inner = self.inner.lock().unwrap();
 
-        let r = inner
-            .regions
-            .get_mut(id)
-            .ok_or_else(|| anyhow!("region {} does not exist", id.0))?;
+        let r = inner.regions.get_mut(id).ok_or_else(|| {
+            HttpError::for_not_found(
+                None,
+                format!("region {} does not exist", id.0),
+            )
+        })?;
 
         match r.state {
-            State::Tombstoned | State::Destroyed => {
+            RegionState::Tombstoned | RegionState::Destroyed => {
                 /*
                  * Either:
                  * - Destroy already scheduled.
                  * - Already destroyed; no more work to do.
                  */
             }
-            State::Requested | State::Created | State::Failed => {
+
+            RegionState::Creating => {
+                // `Creating` means that some processing is occurring in the
+                // background in a region creation thread, and if we set this
+                // region's state to `Tombstoned` and allow the worker thread to
+                // operate on it, this would conflict and lead to chaos.
+                // Restrict this with a 503.
+
+                let m = format!(
+                    "cannot destroy region {:?} in state {:?}",
+                    r.id.0, r.state,
+                );
+
+                warn!(self.log, "{m}");
+
+                return Err(HttpError::for_unavail(None, m));
+            }
+
+            RegionState::Requested
+            | RegionState::Created
+            | RegionState::Failed => {
                 /*
                  * Schedule the destruction of this region.
                  */
@@ -761,9 +1282,9 @@ impl DataFile {
                     "region {} state: {:?} -> {:?}",
                     r.id.0,
                     r.state,
-                    State::Tombstoned
+                    RegionState::Tombstoned
                 );
-                r.state = State::Tombstoned;
+                r.state = RegionState::Tombstoned;
                 self.bell.notify_all();
                 self.store(inner);
             }
@@ -777,7 +1298,11 @@ impl DataFile {
      * particular state. If there are no resources in the provided state,
      * wait on the condition variable.
      */
-    pub fn first_in_states(&self, states: &[State]) -> Resource {
+    pub fn first_in_states(
+        &self,
+        region_states: &[RegionState],
+        running_snapshot_states: &[RunningSnapshotState],
+    ) -> Resource {
         let mut inner = self.inner.lock().unwrap();
 
         loop {
@@ -788,13 +1313,15 @@ impl DataFile {
              * allows us to focus on destroying tombstoned
              * regions ahead of creating new regions.
              */
-            for s in states {
+            for s in region_states {
                 for r in inner.regions.values() {
                     if &r.state == s {
                         return Resource::Region(r.clone());
                     }
                 }
+            }
 
+            for s in running_snapshot_states {
                 for (rid, r) in &inner.running_snapshots {
                     for (name, rs) in r {
                         if &rs.state == s {
@@ -832,17 +1359,18 @@ impl DataFile {
         let region = region.unwrap();
 
         match region.state {
-            State::Requested
-            | State::Destroyed
-            | State::Tombstoned
-            | State::Failed => {
+            RegionState::Requested
+            | RegionState::Creating
+            | RegionState::Destroyed
+            | RegionState::Tombstoned
+            | RegionState::Failed => {
                 // Either the region hasn't been created yet, or it has been
                 // destroyed or marked to be destroyed (both of which require
                 // that no snapshots exist). Return an empty list.
                 return Ok(vec![]);
             }
 
-            State::Created => {
+            RegionState::Created => {
                 // proceed to next section
             }
         }
@@ -863,6 +1391,27 @@ impl DataFile {
             .get_snapshots_for_dataset(dataset.dataset())?;
 
         Ok(results)
+    }
+
+    /**
+     * Mark a particular region as provisioning in the background.
+     */
+    pub fn creating(&self, id: &RegionId) {
+        let mut inner = self.inner.lock().unwrap();
+
+        let r = inner.regions.get_mut(id).unwrap();
+        let nstate = RegionState::Creating;
+        if r.state == nstate {
+            return;
+        }
+
+        info!(
+            self.log,
+            "region {} state: {:?} -> {:?}", r.id.0, r.state, nstate,
+        );
+        r.state = nstate;
+
+        self.store(inner);
     }
 }
 

@@ -1,0 +1,11 @@
+[package]
+name = "crucible-agent-types-versions"
+version = "0.1.0"
+license = "MPL-2.0"
+edition = "2024"
+
+[dependencies]
+chrono.workspace = true
+crucible-workspace-hack.workspace = true
+schemars.workspace = true
+serde.workspace = true

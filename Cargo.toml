@@ -4,6 +4,7 @@ members = [
     "agent-api",
     "agent-client",
     "agent-types",
+    "agent-types/versions",
     "crucible-client-types",
     "common",
     "control-client",
@@ -13,6 +14,7 @@ members = [
     "downstairs",
     "downstairs-api",
     "downstairs-types",
+    "downstairs-types/versions",
     "dropshot-apis",
     "dsc",
     "dsc-client",
@@ -25,6 +27,7 @@ members = [
     "pantry-api",
     "pantry-client",
     "pantry-types",
+    "pantry-types/versions",
     "protocol",
     "repair-client",
     "smf",
@@ -42,6 +45,7 @@ resolver = "2"
 # crates.io
 aes-gcm-siv = "0.11.1"
 anyhow = "1"
+async-channel = "2.5.0"
 async-recursion = "1.1.1"
 async-trait = "0.1.89"
 atty = "0.2.14"
@@ -57,9 +61,9 @@ clearscreen = "4.0.5"
 crossterm = { version = "0.28.1" }
 crucible-workspace-hack = "0.1.0"  # see [patch.crates-io.crucible-workspace-hack] for more
 csv = "1.4.0"
-dropshot = { version = "0.16.7", features = [ "usdt-probes" ] }
-dropshot-api-manager = "0.5.2"
-dropshot-api-manager-types = "0.5.2"
+dropshot = { version = "0.17.0", features = [ "usdt-probes" ] }
+dropshot-api-manager = "0.7.0"
+dropshot-api-manager-types = "0.7.0"
 expectorate = "1.2.0"
 fakedata_generator = "0.7"
 futures = "0.3"
@@ -145,6 +149,7 @@ crucible = { path = "./upstairs" }
 crucible-agent-api = { path = "./agent-api" }
 crucible-agent-client = { path = "./agent-client" }
 crucible-agent-types = { path = "./agent-types" }
+crucible-agent-types-versions = { path = "./agent-types/versions" }
 crucible-client-types = { path = "./crucible-client-types" }
 crucible-common = { path = "./common" }
 crucible-control-client = { path = "./control-client" }
@@ -153,10 +158,12 @@ crucible-control-client = { path = "./control-client" }
 crucible-downstairs = { path = "./downstairs" }
 crucible-downstairs-api = { path = "./downstairs-api" }
 crucible-downstairs-types = { path = "./downstairs-types" }
+crucible-downstairs-types-versions = { path = "./downstairs-types/versions" }
 crucible-pantry = { path = "./pantry" }
 crucible-pantry-api = { path = "./pantry-api" }
 crucible-pantry-client = { path = "./pantry-client" }
 crucible-pantry-types = { path = "./pantry-types" }
+crucible-pantry-types-versions = { path = "./pantry-types/versions" }
 crucible-protocol = { path = "./protocol" }
 crucible-raw-extent = { path = "./raw-extent" }
 crucible-verify-raw = { path = "./verify-raw" }
