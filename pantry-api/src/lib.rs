@@ -1,6 +1,7 @@
 // Copyright 2026 Oxide Computer Company
 
 use crucible_pantry_types_versions::latest;
+use crucible_pantry_types_versions::v1;
 use dropshot::{
     HttpError, HttpResponseDeleted, HttpResponseOk,
     HttpResponseUpdatedNoContent, Path, RequestContext, TypedBody,
@@ -19,6 +20,7 @@ api_versions!([
     // |  example for the next person.
     // v
     // (next_int, IDENT),
+    (2, VOLUME_INFO_ENUM),
     (1, INITIAL),
 ]);
 
@@ -51,11 +53,27 @@ pub trait CruciblePantryApi {
     #[endpoint {
         method = GET,
         path = "/crucible/pantry/0/volume/{id}",
+        versions = VERSION_VOLUME_INFO_ENUM..,
     }]
     async fn volume_status(
         rqctx: RequestContext<Self::Context>,
         path: Path<latest::pantry::VolumePath>,
     ) -> Result<HttpResponseOk<latest::pantry::VolumeStatus>, HttpError>;
+
+    #[endpoint {
+        method = GET,
+        path = "/crucible/pantry/0/volume/{id}",
+        versions = VERSION_INITIAL..VERSION_VOLUME_INFO_ENUM,
+        operation_id = "volume_status",
+    }]
+    async fn volume_status_v1(
+        rqctx: RequestContext<Self::Context>,
+        path: Path<latest::pantry::VolumePath>,
+    ) -> Result<HttpResponseOk<v1::pantry::VolumeStatus>, HttpError> {
+        Self::volume_status(rqctx, path)
+            .await
+            .map(|response| response.map(Into::into))
+    }
 
     /// Construct a volume from a VolumeConstructionRequest, storing the result in
     /// the Pantry.

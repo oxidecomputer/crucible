@@ -1780,6 +1780,14 @@ impl DownstairsClient {
     pub(crate) fn id(&self) -> Option<Uuid> {
         self.region_uuid
     }
+
+    pub(crate) fn target_addr(&self) -> Option<SocketAddr> {
+        self.target_addr
+    }
+
+    pub(crate) fn repair_addr(&self) -> Option<SocketAddr> {
+        self.repair_addr
+    }
 }
 
 /// Tracks client negotiation progress

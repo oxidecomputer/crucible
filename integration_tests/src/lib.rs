@@ -1,4 +1,4 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 #[cfg(test)]
 mod integration_tests {
@@ -6148,6 +6148,7 @@ mod integration_tests {
                 active: true,
                 seen_active: true,
                 num_job_handles: 0,
+                info: _,
             }
         ));
 
@@ -6181,6 +6182,7 @@ mod integration_tests {
                 active: false,
                 seen_active: true,
                 num_job_handles: 0,
+                info: _,
             }
         ));
     }
@@ -6270,5 +6272,76 @@ mod integration_tests {
         }
 
         Ok(())
+    }
+
+    /// Validate the VolumeInfo from the Pantry
+    #[tokio::test]
+    async fn test_pantry_get_volume_info() {
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
+        let opts = tds.opts();
+
+        // Start a pantry, get the client for it, then use it to bulk_write
+        // in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        let status =
+            client.volume_status(&volume_id.to_string()).await.unwrap();
+
+        let crucible_pantry_client::types::VolumeStatus { info, .. } =
+            status.into_inner();
+
+        use crucible_pantry_client::types::DownstairsInfoStatus;
+        use crucible_pantry_client::types::UpstairsInfoStatus;
+
+        let crucible_pantry_client::types::VolumeInfo::Volume {
+            sub_volumes,
+            ..
+        } = info
+        else {
+            panic!("wrong variant");
+        };
+
+        assert_eq!(sub_volumes.len(), 1);
+
+        let crucible_pantry_client::types::VolumeInfo::Upstairs {
+            state,
+            block_size: _,
+            upstairs_id: _,
+            session_id: _,
+            generation,
+            read_only,
+            encrypted,
+            reconcile_in_progress,
+            live_repair_in_progress,
+            targets,
+        } = &sub_volumes[0]
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(*state, UpstairsInfoStatus::Active);
+        assert_eq!(*generation, 1);
+        assert!(!(*read_only));
+        assert!(*encrypted);
+        assert!(!(*reconcile_in_progress));
+        assert!(!(*live_repair_in_progress));
+
+        for (i, target) in targets.iter().enumerate() {
+            let crucible_pantry_client::types::DownstairsInfo {
+                region_id: _,
+                target_addr,
+                repair_addr: _,
+                state,
+            } = &target;
+
+            assert_eq!(
+                target_addr.as_ref().map(|x| x.parse().unwrap()),
+                Some(opts.target[i])
+            );
+            assert_eq!(*state, DownstairsInfoStatus::Active);
+        }
     }
 }
