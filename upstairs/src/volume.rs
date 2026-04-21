@@ -1,4 +1,4 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 use super::*;
 use crate::guest::Guest;
@@ -21,7 +21,7 @@ use crucible_client_types::VolumeConstructionRequest;
 // for each downstairs, each bearing the expected downstairs UUID for that
 // downstairs, but this requires those UUIDs to be present in `opts`, which
 // currently doesn't store them.
-fn build_region_definition(
+pub(crate) fn build_region_definition(
     extent_info: &RegionExtentInfo,
     opts: &CrucibleOpts,
 ) -> Result<RegionDefinition> {
@@ -196,13 +196,17 @@ impl VolumeBuilder {
         generation: u64,
         producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
-        let region_def = build_region_definition(&extent_info, &opts)?;
-        let (guest, io) = Guest::new(Some(self.0.log.clone()));
-
-        let _join_handle =
-            up_main(opts, generation, Some(region_def), io, producer_registry)?;
-
-        self.add_subvolume(Arc::new(guest)).await
+        self.add_subvolume(Arc::new(
+            Guest::create_and_up_main(
+                self.0.log.clone(),
+                opts,
+                extent_info,
+                generation,
+                producer_registry,
+            )
+            .await?,
+        ))
+        .await
     }
 
     // Add a "parent" source for blocks.
@@ -258,6 +262,101 @@ impl From<VolumeInner> for Volume {
 impl From<VolumeBuilder> for Volume {
     fn from(v: VolumeBuilder) -> Volume {
         Volume(v.0.into())
+    }
+}
+
+fn to_arc_block_io<T>(b: T) -> Arc<dyn BlockIO + Send + Sync>
+where
+    T: BlockIO + Send + Sync + 'static,
+{
+    Arc::new(b)
+}
+
+#[async_recursion]
+async fn blockio_from_construction_request(
+    request: VolumeConstructionRequest,
+    producer_registry: Option<ProducerRegistry>,
+    log: Logger,
+) -> Result<Arc<dyn BlockIO + Send + Sync>> {
+    match request {
+        VolumeConstructionRequest::Volume {
+            id,
+            block_size,
+            sub_volumes,
+            read_only_parent,
+        } => {
+            let mut vol =
+                VolumeBuilder::new_with_id(block_size, id, log.clone());
+
+            for subreq in sub_volumes {
+                vol.add_subvolume(
+                    blockio_from_construction_request(
+                        subreq,
+                        producer_registry.clone(),
+                        log.clone(),
+                    )
+                    .await?,
+                )
+                .await?;
+            }
+
+            if let Some(read_only_parent) = read_only_parent {
+                vol.add_read_only_parent(
+                    blockio_from_construction_request(
+                        *read_only_parent,
+                        producer_registry,
+                        log,
+                    )
+                    .await?,
+                )
+                .await?;
+            }
+
+            let volume: Volume = vol.into();
+
+            Ok(volume.as_blockio())
+        }
+
+        VolumeConstructionRequest::Url {
+            id,
+            block_size,
+            url,
+        } => {
+            let bio = ReqwestBlockIO::new(id, block_size, url).await?;
+            Ok(to_arc_block_io(bio))
+        }
+
+        VolumeConstructionRequest::Region {
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts,
+            generation,
+        } => {
+            let guest = Guest::create_and_up_main(
+                log.clone(),
+                opts,
+                RegionExtentInfo {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                },
+                generation,
+                producer_registry,
+            )
+            .await?;
+
+            Ok(to_arc_block_io(guest))
+        }
+
+        VolumeConstructionRequest::File {
+            id,
+            block_size,
+            path,
+        } => {
+            let bio = FileBlockIO::new(id, block_size, path)?;
+            Ok(to_arc_block_io(bio))
+        }
     }
 }
 
@@ -681,6 +780,7 @@ impl BlockIO for VolumeInner {
 
         Ok(())
     }
+
     async fn activate_with_gen(
         &self,
         generation: u64,
@@ -1216,6 +1316,8 @@ impl Volume {
         self.0.clone()
     }
 
+    /// Construct a Volume from a VolumeConstructionRequest. If the variant is
+    /// _not_ Volume, wrap it in a Volume.
     #[async_recursion]
     pub async fn construct(
         request: VolumeConstructionRequest,
@@ -1234,26 +1336,24 @@ impl Volume {
 
                 for subreq in sub_volumes {
                     vol.add_subvolume(
-                        Volume::construct(
+                        blockio_from_construction_request(
                             subreq,
                             producer_registry.clone(),
                             log.clone(),
                         )
-                        .await?
-                        .as_blockio(),
+                        .await?,
                     )
                     .await?;
                 }
 
                 if let Some(read_only_parent) = read_only_parent {
                     vol.add_read_only_parent(
-                        Volume::construct(
+                        blockio_from_construction_request(
                             *read_only_parent,
                             producer_registry,
                             log,
                         )
-                        .await?
-                        .as_blockio(),
+                        .await?,
                     )
                     .await?;
                 }
@@ -1261,51 +1361,20 @@ impl Volume {
                 Ok(vol.into())
             }
 
-            VolumeConstructionRequest::Url {
-                id,
-                block_size,
-                url,
-            } => {
+            VolumeConstructionRequest::Url { block_size, .. }
+            | VolumeConstructionRequest::Region { block_size, .. }
+            | VolumeConstructionRequest::File { block_size, .. } => {
                 let mut vol = VolumeBuilder::new(block_size, log.clone());
-                vol.add_subvolume(Arc::new(
-                    ReqwestBlockIO::new(id, block_size, url).await?,
-                ))
-                .await?;
-                Ok(vol.into())
-            }
-
-            VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts,
-                generation,
-            } => {
-                let mut vol = VolumeBuilder::new(block_size, log.clone());
-                vol.add_subvolume_create_guest(
-                    opts,
-                    RegionExtentInfo {
-                        block_size,
-                        blocks_per_extent,
-                        extent_count,
-                    },
-                    generation,
-                    producer_registry,
+                vol.add_subvolume(
+                    blockio_from_construction_request(
+                        request,
+                        producer_registry,
+                        log,
+                    )
+                    .await?,
                 )
                 .await?;
-                Ok(vol.into())
-            }
 
-            VolumeConstructionRequest::File {
-                id,
-                block_size,
-                path,
-            } => {
-                let mut vol = VolumeBuilder::new(block_size, log.clone());
-                vol.add_subvolume(Arc::new(FileBlockIO::new(
-                    id, block_size, path,
-                )?))
-                .await?;
                 Ok(vol.into())
             }
         }
