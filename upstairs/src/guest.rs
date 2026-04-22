@@ -1,4 +1,5 @@
-// Copyright 2024 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
+
 use std::{
     net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
@@ -8,10 +9,14 @@ use crate::{
     BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, ReadBlockContext,
     ReplaceResult, UpstairsAction,
     io_limits::{IOLimitView, IOLimits},
+    up_main,
+    volume::build_region_definition,
 };
+use crucible_client_types::CrucibleOpts;
 use crucible_client_types::RegionExtentInfo;
 use crucible_common::{BlockIndex, CrucibleError, build_logger};
 use crucible_protocol::SnapshotDetails;
+use oximeter::types::ProducerRegistry;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -166,6 +171,22 @@ impl Guest {
         (guest, io)
     }
 
+    pub fn create_and_up_main(
+        log: Logger,
+        opts: CrucibleOpts,
+        extent_info: RegionExtentInfo,
+        generation: u64,
+        producer_registry: Option<ProducerRegistry>,
+    ) -> anyhow::Result<Guest> {
+        let region_def = build_region_definition(&extent_info, &opts)?;
+        let (guest, io) = Guest::new(Some(log));
+
+        let _join_handle =
+            up_main(opts, generation, Some(region_def), io, producer_registry)?;
+
+        Ok(guest)
+    }
+
     /*
      * This is used to submit a new BlockOp IO request to Crucible.
      *
@@ -265,6 +286,7 @@ impl BlockIO for Guest {
         self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
             .await
     }
+
     async fn query_extent_info(
         &self,
     ) -> Result<Option<RegionExtentInfo>, CrucibleError> {
