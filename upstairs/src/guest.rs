@@ -171,7 +171,7 @@ impl Guest {
         (guest, io)
     }
 
-    pub async fn create_and_up_main(
+    pub fn create_and_up_main(
         log: Logger,
         opts: CrucibleOpts,
         extent_info: RegionExtentInfo,

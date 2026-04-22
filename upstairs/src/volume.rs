@@ -196,16 +196,13 @@ impl VolumeBuilder {
         generation: u64,
         producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
-        self.add_subvolume(Arc::new(
-            Guest::create_and_up_main(
-                self.0.log.clone(),
-                opts,
-                extent_info,
-                generation,
-                producer_registry,
-            )
-            .await?,
-        ))
+        self.add_subvolume(Arc::new(Guest::create_and_up_main(
+            self.0.log.clone(),
+            opts,
+            extent_info,
+            generation,
+            producer_registry,
+        )?))
         .await
     }
 
@@ -343,8 +340,7 @@ async fn blockio_from_construction_request(
                 },
                 generation,
                 producer_registry,
-            )
-            .await?;
+            )?;
 
             Ok(to_arc_block_io(guest))
         }
