@@ -1,0 +1,19 @@
+[package]
+name = "cmon-common"
+version = "0.1.0"
+license = "MPL-2.0"
+edition = "2024"
+
+[dependencies]
+crucible.workspace = true
+serde.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
+crucible-workspace-hack.workspace = true
+
+# Optional dependency for clap integration
+clap = { workspace = true, optional = true }
+
+[features]
+# Enable clap ValueEnum derive for DtraceDisplay
+clap = ["dep:clap"]

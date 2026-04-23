@@ -9,8 +9,10 @@ members = [
     "common",
     "control-client",
     "cmon",
+    "cmon-common",
     "crudd",
     "crutest",
+    "ctop",
     "downstairs",
     "downstairs-api",
     "downstairs-types",
@@ -95,6 +97,7 @@ proptest = "1.10.0"
 rayon = "1.11.0"
 rand = { version = "0.9.2", features = [ "small_rng"] }
 rand_chacha = "0.9.0"
+ratatui = "0.28"
 reedline = "0.46.0"
 rangemap = "1.7.1"
 reqwest = { version = "0.13", features = ["default", "blocking", "json", "stream"] }
@@ -145,6 +148,7 @@ oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 
 # local path
+cmon-common = { path = "./cmon-common" }
 crucible = { path = "./upstairs" }
 crucible-agent-api = { path = "./agent-api" }
 crucible-agent-client = { path = "./agent-client" }
