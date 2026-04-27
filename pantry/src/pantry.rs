@@ -883,6 +883,7 @@ impl Pantry {
             active,
             seen_active,
             num_job_handles: jobs.num_job_handles_for_volume(&volume_id),
+            info: entry.volume.query_volume_info().await?,
         })
     }
 

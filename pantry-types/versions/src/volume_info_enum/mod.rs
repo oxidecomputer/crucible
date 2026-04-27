@@ -1,5 +1,5 @@
 // Copyright 2026 Oxide Computer Company
 
-//! Functional code for the latest versions of types.
+//! Version `VOLUME_INFO_ENUM` of the Crucible Pantry API.
 
 pub mod pantry;

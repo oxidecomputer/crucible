@@ -1,4 +1,5 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
+
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use clap::Parser;
@@ -32,7 +33,8 @@ mod protocol;
 mod stats;
 pub use stats::*;
 
-use crucible::volume::{VolumeBuilder, VolumeInfo};
+use crucible::volume::VolumeBuilder;
+use crucible::volume::VolumeExtentInfo;
 use crucible::*;
 use crucible_client_types::RegionExtentInfo;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
@@ -411,7 +413,7 @@ impl BufferbloatConfig {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DiskInfo {
-    volume_info: VolumeInfo,
+    volume_info: VolumeExtentInfo,
     write_log: WriteLog,
     max_block_io: usize,
 }
