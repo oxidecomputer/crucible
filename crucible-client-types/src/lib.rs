@@ -190,7 +190,7 @@ pub enum VolumeInfo {
     },
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DownstairsInfoNegotiationStatus {
     WaitConnect,
@@ -200,7 +200,7 @@ pub enum DownstairsInfoNegotiationStatus {
     LiveRepairReady,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DownstairsInfoConnectionMode {
     New,
@@ -218,7 +218,7 @@ pub struct DownstairsInfo {
     pub state: DownstairsInfoStatus,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum DownstairsInfoStatus {
     Connecting {
@@ -230,7 +230,7 @@ pub enum DownstairsInfoStatus {
     Stopping,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstairsInfoStatus {
     Initializing,
