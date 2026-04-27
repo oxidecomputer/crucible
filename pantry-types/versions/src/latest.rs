@@ -20,7 +20,7 @@ pub mod pantry {
     pub use crate::v1::pantry::ValidateRequest;
     pub use crate::v1::pantry::ValidateResponse;
     pub use crate::v1::pantry::VolumePath;
-    pub use crate::v1::pantry::VolumeStatus;
+    pub use crate::v2::pantry::VolumeStatus;
 
     // Re-export ReplaceResult from crucible_client_types since the pantry API
     // uses it.

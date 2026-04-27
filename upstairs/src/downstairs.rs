@@ -1068,6 +1068,11 @@ impl Downstairs {
         }
     }
 
+    /// Checks whether a reconciliation is in progress
+    pub(crate) fn reconcile_in_progress(&self) -> bool {
+        self.reconcile.is_some()
+    }
+
     /// Checks whether a live-repair is in progress
     pub(crate) fn live_repair_in_progress(&self) -> bool {
         // A live-repair is in progress if any client is in the LiveRepair

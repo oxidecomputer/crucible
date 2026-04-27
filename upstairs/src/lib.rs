@@ -1,4 +1,4 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
@@ -11,9 +11,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use crucible_client_types::{
-    CrucibleOpts, RegionExtentInfo, ReplaceResult, VolumeConstructionRequest,
-};
+pub use crucible_client_types::CrucibleOpts;
+pub use crucible_client_types::RegionExtentInfo;
+pub use crucible_client_types::ReplaceResult;
+pub use crucible_client_types::VolumeConstructionRequest;
+pub use crucible_client_types::VolumeInfo;
 pub use crucible_common::*;
 pub use crucible_protocol::*;
 
@@ -140,6 +142,17 @@ pub trait BlockIO: Sync {
         &self,
     ) -> Result<Option<RegionExtentInfo>, CrucibleError>;
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError>;
+
+    /// Return a VolumeInfo object.
+    ///
+    /// This only make sense for Volume, Subvolume, and Guest, so it is only
+    /// implemented for those.
+    async fn query_volume_info(&self) -> Result<VolumeInfo, CrucibleError> {
+        crucible_bail!(
+            Unsupported,
+            "query_volume_info not implemented for this type"
+        );
+    }
 
     // Total bytes of Volume
     async fn total_size(&self) -> Result<u64, CrucibleError>;
@@ -1537,6 +1550,9 @@ pub(crate) enum BlockOp {
     },
     QueryUpstairsUuid {
         done: BlockRes<Uuid>,
+    },
+    QueryVolumeInfo {
+        done: BlockRes<VolumeInfo>,
     },
     // Begin testing options.
     QueryExtentInfo {

@@ -14,6 +14,7 @@ use crate::{
 };
 use crucible_client_types::CrucibleOpts;
 use crucible_client_types::RegionExtentInfo;
+use crucible_client_types::VolumeInfo;
 use crucible_common::{BlockIndex, CrucibleError, build_logger};
 use crucible_protocol::SnapshotDetails;
 use oximeter::types::ProducerRegistry;
@@ -294,6 +295,14 @@ impl BlockIO for Guest {
             .send_and_wait(|done| BlockOp::QueryExtentInfo { done })
             .await?;
         Ok(Some(ei))
+    }
+
+    async fn query_volume_info(&self) -> Result<VolumeInfo, CrucibleError> {
+        let status = self
+            .send_and_wait(|done| BlockOp::QueryVolumeInfo { done })
+            .await?;
+
+        Ok(status)
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {

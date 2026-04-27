@@ -1,4 +1,4 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 use base64::{Engine, engine};
 use schemars::JsonSchema;
@@ -165,6 +165,79 @@ pub struct RegionExtentInfo {
     pub blocks_per_extent: u64,
     /// Total number of extents that make up this region.
     pub extent_count: u32,
+}
+
+/// A tree representation of the info and status of all parts of a Volume.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeInfo {
+    Volume {
+        sub_volumes: Vec<VolumeInfo>,
+        read_only_parent: Option<Box<VolumeInfo>>,
+    },
+
+    Upstairs {
+        state: UpstairsInfoStatus,
+        block_size: Option<u64>,
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        generation: u64,
+        read_only: bool,
+        encrypted: bool,
+        reconcile_in_progress: bool,
+        live_repair_in_progress: bool,
+        targets: Vec<DownstairsInfo>,
+    },
+}
+
+#[derive(Debug, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownstairsInfoNegotiationStatus {
+    WaitConnect,
+    Negotiating,
+    WaitQuorum,
+    Reconcile,
+    LiveRepairReady,
+}
+
+#[derive(Debug, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownstairsInfoConnectionMode {
+    New,
+    Offline,
+    Faulted,
+    Replaced,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DownstairsInfo {
+    pub region_id: Option<Uuid>,
+    pub target_addr: Option<SocketAddr>,
+    pub repair_addr: Option<SocketAddr>,
+    pub state: DownstairsInfoStatus,
+}
+
+#[derive(Debug, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum DownstairsInfoStatus {
+    Connecting {
+        state: DownstairsInfoNegotiationStatus,
+        mode: DownstairsInfoConnectionMode,
+    },
+    Active,
+    LiveRepair,
+    Stopping,
+}
+
+#[derive(Debug, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstairsInfoStatus {
+    Initializing,
+    GoActive,
+    Active,
+    Deactivating,
+    Disabled,
 }
 
 #[cfg(test)]

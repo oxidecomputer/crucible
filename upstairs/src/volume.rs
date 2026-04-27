@@ -13,6 +13,7 @@ use tokio::time::Instant;
 use crucible_client_types::RegionExtentInfo;
 use crucible_client_types::ReplacementRequestCheck;
 use crucible_client_types::VolumeConstructionRequest;
+use crucible_client_types::VolumeInfo;
 
 /// Creates a `RegionDefinition` from a set of parameters in a region
 /// construction request.
@@ -710,7 +711,7 @@ impl Volume {
 
     pub async fn volume_extent_info(
         &self,
-    ) -> Result<VolumeInfo, CrucibleError> {
+    ) -> Result<VolumeExtentInfo, CrucibleError> {
         // A volume has multiple levels of extent info, not just one.
         let mut volumes = Vec::new();
 
@@ -721,7 +722,7 @@ impl Volume {
                     // it, we verify that the block sizes match, so we never
                     // expect there to be a mismatch.
                     assert_eq!(self.block_size, ei.block_size);
-                    let svi = SubVolumeInfo {
+                    let svi = SubVolumeExtentInfo {
                         blocks_per_extent: ei.blocks_per_extent,
                         extent_count: ei.extent_count,
                     };
@@ -737,7 +738,7 @@ impl Volume {
             }
         }
 
-        Ok(VolumeInfo {
+        Ok(VolumeExtentInfo {
             block_size: self.block_size,
             volumes,
         })
@@ -873,6 +874,28 @@ impl BlockIO for VolumeInner {
         }
 
         Ok(true)
+    }
+
+    async fn query_volume_info(&self) -> Result<VolumeInfo, CrucibleError> {
+        Ok(VolumeInfo::Volume {
+            sub_volumes: {
+                let mut statuses = Vec::with_capacity(self.sub_volumes.len());
+
+                for sub_volume in &self.sub_volumes {
+                    statuses.push(sub_volume.query_volume_info().await?);
+                }
+
+                statuses
+            },
+
+            read_only_parent: {
+                if let Some(rop) = &self.read_only_parent {
+                    Some(Box::new(rop.query_volume_info().await?))
+                } else {
+                    None
+                }
+            },
+        })
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
@@ -1111,18 +1134,20 @@ impl BlockIO for VolumeInner {
     }
 }
 
+// TODO eventually put this in VolumeInfo?
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct VolumeInfo {
+pub struct VolumeExtentInfo {
     pub block_size: u64,
-    pub volumes: Vec<SubVolumeInfo>,
+    pub volumes: Vec<SubVolumeExtentInfo>,
 }
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct SubVolumeInfo {
+pub struct SubVolumeExtentInfo {
     pub blocks_per_extent: u64,
     pub extent_count: u32,
 }
 
-impl VolumeInfo {
+impl VolumeExtentInfo {
     pub fn total_size(&self) -> u64 {
         self.block_size * (self.total_blocks() as u64)
     }
@@ -1248,6 +1273,10 @@ impl BlockIO for SubVolume {
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         self.block_io.query_is_active().await
+    }
+
+    async fn query_volume_info(&self) -> Result<VolumeInfo, CrucibleError> {
+        self.block_io.query_volume_info().await
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
