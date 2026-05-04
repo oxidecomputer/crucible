@@ -397,11 +397,13 @@ impl DownstairsClient {
                         !self.skipped_jobs.contains(x)
                             && repair_min_id.map(|r| *x >= r).unwrap_or(true)
                     });
-                    info!(
-                        self.log,
-                        " {ds_id} final dependency list {}",
-                        format_job_list(dependencies),
-                    );
+                    if !dependencies.is_empty() {
+                        info!(
+                            self.log,
+                            " {ds_id} final dependency list {}",
+                            format_job_list(dependencies),
+                        );
+                    }
                 }
             }
         }
