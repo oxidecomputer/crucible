@@ -89,8 +89,8 @@ openapiv3 = "2.2.0"
 opentelemetry = "0.31.0"
 opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
-progenitor = "0.13.0"
-progenitor-client = "0.13.0"
+progenitor = "0.14.0"
+progenitor-client = "0.14.0"
 proptest = "1.10.0"
 rayon = "1.11.0"
 rand = { version = "0.9.2", features = [ "small_rng"] }
@@ -98,7 +98,6 @@ rand_chacha = "0.9.0"
 reedline = "0.46.0"
 rangemap = "1.7.1"
 reqwest = { version = "0.13", features = ["default", "blocking", "json", "stream"] }
-reqwest012 = { package = "reqwest", version = "0.12", features = ["default", "json", "stream"] }
 ringbuffer = "0.16.0"
 rusqlite = { version = "0.37" }
 rustls-pemfile = { version = "1.0.4" }
