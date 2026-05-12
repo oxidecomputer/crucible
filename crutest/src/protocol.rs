@@ -1,4 +1,5 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
+
 use anyhow::bail;
 use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -39,7 +40,7 @@ pub enum CliMessage {
     Flush,
     // Run the generic test
     Generic(usize, bool, bool),
-    Info(VolumeInfo),
+    Info(VolumeExtentInfo),
     InfoPlease,
     IsActive,
     MyUuid(Uuid),
@@ -221,7 +222,7 @@ mod tests {
 
     #[test]
     fn rt_info() -> Result<()> {
-        let vi = VolumeInfo {
+        let vi = VolumeExtentInfo {
             block_size: 512,
             volumes: Vec::new(),
         };

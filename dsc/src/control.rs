@@ -1,5 +1,6 @@
 // Copyright 2022 Oxide Computer Company
 use dropshot::ApiDescription;
+use dropshot::CompressionConfig;
 use dropshot::ConfigDropshot;
 use dropshot::ConfigLogging;
 use dropshot::ConfigLoggingLevel;
@@ -55,6 +56,7 @@ pub async fn begin(dsci: Arc<DscInfo>, addr: SocketAddr) -> Result<(), String> {
         default_request_body_max_bytes: 1024,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
+        compression: CompressionConfig::None,
     };
     println!("start access at:{:?}", addr);
 

@@ -27,7 +27,9 @@ use crucible::Volume;
 use crucible::VolumeConstructionRequest;
 use crucible_common::CrucibleError;
 use crucible_common::crucible_bail;
-use crucible_pantry_types::{ExpectedDigest, PantryStatus, VolumeStatus};
+use crucible_pantry_types::pantry::{
+    ExpectedDigest, PantryStatus, VolumeStatus,
+};
 
 pub enum ActiveObservation {
     /// This Pantry has never seen this Volume active
@@ -881,6 +883,7 @@ impl Pantry {
             active,
             seen_active,
             num_job_handles: jobs.num_job_handles_for_volume(&volume_id),
+            info: entry.volume.query_volume_info().await?,
         })
     }
 

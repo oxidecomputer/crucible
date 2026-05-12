@@ -1,9 +1,12 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
+
 //! Data structures specific to Crucible's `struct Upstairs`
+
 use crate::{
     BlockOp, BlockRes, Buffer, ClientId, ClientMap, ConnectionMode,
-    CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
-    RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts, cdt,
+    CrucibleOpts, DsState, DsStateData, EncryptionContext, GuestIoHandle,
+    Message, NegotiationStateData, RegionDefinition, RegionDefinitionStatus,
+    SnapshotDetails, WQCounts, cdt,
     client::{
         ClientAction, ClientNegotiationFailed, ClientRunResult,
         ClientStopReason, NegotiationResult, NegotiationState,
@@ -19,6 +22,7 @@ use crate::{
     stats::UpStatOuter,
 };
 use crucible_client_types::RegionExtentInfo;
+use crucible_client_types::VolumeInfo;
 use crucible_common::{BlockIndex, CrucibleError};
 use serde::{Deserialize, Serialize};
 
@@ -1119,6 +1123,10 @@ impl Upstairs {
                     }
                 };
             }
+            BlockOp::QueryVolumeInfo { done } => {
+                let status = self.get_volume_info();
+                done.send_ok(status);
+            }
             // Testing options
             BlockOp::QueryExtentInfo { done } => {
                 // Yes, test only
@@ -1363,15 +1371,23 @@ impl Upstairs {
 
         self.need_flush = false;
 
-        /*
-         * Get the next ID for our new guest work job. Note that the flush
-         * ID and the next_id are connected here, in that all future writes
-         * should be flushed at the next flush ID.
-         */
-
         if snapshot_details.is_some() {
+            if self.cfg.read_only {
+                info!(
+                    self.log,
+                    "rejecting flush with snap request for read-only upstairs",
+                );
+
+                if let Some(res) = res {
+                    res.send_err(CrucibleError::ModifyingReadOnlyRegion);
+                }
+
+                return;
+            }
+
             info!(self.log, "flush with snap requested");
         }
+
         let ds_id =
             self.downstairs
                 .submit_flush(snapshot_details, res, io_guard);
@@ -2357,6 +2373,99 @@ impl Upstairs {
     #[cfg(test)]
     pub(crate) fn ds_state(&self, client_id: ClientId) -> DsState {
         self.downstairs.clients[client_id].state()
+    }
+
+    pub fn get_volume_info(&self) -> VolumeInfo {
+        use crucible_client_types::DownstairsInfoConnectionMode;
+        use crucible_client_types::DownstairsInfoNegotiationStatus;
+        use crucible_client_types::DownstairsInfoStatus;
+        use crucible_client_types::UpstairsInfoStatus;
+
+        let mut targets = Vec::with_capacity(3);
+
+        for client in self.downstairs.clients.iter() {
+            let state = match client.state_data() {
+                DsStateData::Connecting { state, mode } => {
+                    DownstairsInfoStatus::Connecting {
+                        state: match state {
+                            NegotiationStateData::WaitConnect(_) => {
+                                DownstairsInfoNegotiationStatus::WaitConnect
+                            }
+
+                            NegotiationStateData::Start
+                            | NegotiationStateData::WaitForPromote
+                            | NegotiationStateData::WaitForRegionInfo
+                            | NegotiationStateData::GetExtentVersions => {
+                                DownstairsInfoNegotiationStatus::Negotiating
+                            }
+
+                            NegotiationStateData::WaitQuorum(_) => {
+                                DownstairsInfoNegotiationStatus::WaitQuorum
+                            }
+
+                            NegotiationStateData::Reconcile => {
+                                DownstairsInfoNegotiationStatus::Reconcile
+                            }
+
+                            NegotiationStateData::LiveRepairReady(_) => {
+                                DownstairsInfoNegotiationStatus::LiveRepairReady
+                            }
+                        },
+
+                        mode: match mode {
+                            ConnectionMode::New => {
+                                DownstairsInfoConnectionMode::New
+                            }
+                            ConnectionMode::Offline => {
+                                DownstairsInfoConnectionMode::Offline
+                            }
+                            ConnectionMode::Faulted => {
+                                DownstairsInfoConnectionMode::Faulted
+                            }
+                            ConnectionMode::Replaced => {
+                                DownstairsInfoConnectionMode::Replaced
+                            }
+                        },
+                    }
+                }
+
+                DsStateData::Active => DownstairsInfoStatus::Active,
+
+                DsStateData::LiveRepair => DownstairsInfoStatus::LiveRepair,
+
+                DsStateData::Stopping(_) => DownstairsInfoStatus::Stopping,
+            };
+
+            let target = crucible_client_types::DownstairsInfo {
+                region_id: client.id(),
+                target_addr: client.target_addr(),
+                repair_addr: client.repair_addr(),
+                state,
+            };
+
+            targets.push(target);
+        }
+
+        VolumeInfo::Upstairs {
+            state: match self.state {
+                UpstairsState::Initializing => UpstairsInfoStatus::Initializing,
+                UpstairsState::GoActive(_) => UpstairsInfoStatus::GoActive,
+                UpstairsState::Active => UpstairsInfoStatus::Active,
+                UpstairsState::Deactivating(_) => {
+                    UpstairsInfoStatus::Deactivating
+                }
+                UpstairsState::Disabled(_) => UpstairsInfoStatus::Disabled,
+            },
+            block_size: self.ddef.get_def().map(|ddef| ddef.block_size()),
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+            generation: self.cfg.generation(),
+            read_only: self.cfg.read_only,
+            encrypted: self.cfg.encrypted(),
+            reconcile_in_progress: self.downstairs.reconcile_in_progress(),
+            live_repair_in_progress: self.downstairs.live_repair_in_progress(),
+            targets,
+        }
     }
 }
 
@@ -4961,5 +5070,31 @@ pub(crate) mod test {
             * ddef.extent_size().value as usize
             * 4;
         assert_eq!(up.downstairs.reconcile_repair_needed(), expected_repairs);
+    }
+
+    #[tokio::test]
+    async fn test_reject_snapshot_of_read_only_upstairs() {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), true);
+        up.force_active().unwrap();
+
+        let (brw, res) = BlockOpWaiter::pair();
+
+        up.submit_flush(
+            Some(res),
+            Some(SnapshotDetails {
+                snapshot_name: String::from("invalid-request"),
+            }),
+            None,
+        );
+
+        assert!(matches!(
+            brw.wait().await,
+            Err(CrucibleError::ModifyingReadOnlyRegion),
+        ));
     }
 }

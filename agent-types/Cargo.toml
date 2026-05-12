@@ -5,11 +5,11 @@ license = "MPL-2.0"
 edition = "2024"
 
 [dependencies]
-chrono.workspace = true
+crucible-agent-types-versions.workspace = true
 crucible-smf.workspace = true
 crucible-workspace-hack.workspace = true
-serde.workspace = true
 schemars.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
