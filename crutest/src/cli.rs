@@ -197,6 +197,8 @@ enum CliCommand {
     },
     /// Get the upstairs UUID
     Uuid,
+    /// Request volume info as JSON
+    VolumeInfo,
 }
 
 /*
@@ -546,6 +548,9 @@ async fn cmd_to_msg(
         CliCommand::WriteUnwritten { offset } => {
             fw.send(CliMessage::WriteUnwritten(offset)).await?;
         }
+        CliCommand::VolumeInfo => {
+            fw.send(CliMessage::VolumeInfoPlease).await?;
+        }
     }
     /*
      * Now, wait for our response
@@ -557,6 +562,9 @@ async fn cmd_to_msg(
         }
         Some(CliMessage::Info(vi)) => {
             println!("Got info: {:?}", vi);
+        }
+        Some(CliMessage::VolumeInfoJson(json)) => {
+            println!("{}", json);
         }
         Some(CliMessage::DoneOk) => {
             println!("Ok");
@@ -988,6 +996,15 @@ async fn process_cli_command(
         CliMessage::Uuid => {
             let uuid = volume.get_uuid().await?;
             fw.send(CliMessage::MyUuid(uuid)).await
+        }
+        CliMessage::VolumeInfoPlease => {
+            match volume.query_volume_info().await {
+                Ok(vi) => {
+                    let json = serde_json::to_string_pretty(&vi).unwrap();
+                    fw.send(CliMessage::VolumeInfoJson(json)).await
+                }
+                Err(e) => fw.send(CliMessage::Error(e)).await,
+            }
         }
         CliMessage::Verify => {
             if let Some(di) = di_option {
