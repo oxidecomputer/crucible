@@ -2449,7 +2449,7 @@ impl Upstairs {
         VolumeInfo::Upstairs {
             state: match self.state {
                 UpstairsState::Initializing => UpstairsInfoStatus::Initializing,
-                UpstairsState::GoActive(_) => UpstairsInfoStatus::GoActive,
+                UpstairsState::GoActive { .. } => UpstairsInfoStatus::GoActive,
                 UpstairsState::Active => UpstairsInfoStatus::Active,
                 UpstairsState::Deactivating(_) => {
                     UpstairsInfoStatus::Deactivating
