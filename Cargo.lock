@@ -358,12 +358,6 @@ checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
 
 [[package]]
 name = "base64"
-version = "0.21.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
-
-[[package]]
-name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
@@ -615,7 +609,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86b041d2328ab2041b4e9d8f21e3b0b5b8bb61e9a23bb9171387771c314ea340"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "hex",
  "schemars 0.8.22",
  "serde_core",
@@ -1319,7 +1313,7 @@ dependencies = [
  "anyhow",
  "async-recursion",
  "async-trait",
- "base64 0.22.1",
+ "base64",
  "bincode",
  "bytes",
  "cfg-if",
@@ -1455,7 +1449,7 @@ dependencies = [
 name = "crucible-client-types"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "crucible-workspace-hack",
  "schemars 0.8.22",
  "serde",
@@ -1468,7 +1462,7 @@ name = "crucible-client-types"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/crucible?rev=ae1da83e66c648574827298f4bc444632bf4d047#ae1da83e66c648574827298f4bc444632bf4d047"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "crucible-workspace-hack",
  "schemars 0.8.22",
  "serde",
@@ -1486,7 +1480,7 @@ dependencies = [
  "dropshot",
  "nix",
  "proptest",
- "rustls-pemfile 1.0.4",
+ "rustls-pemfile",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -1657,7 +1651,7 @@ name = "crucible-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64",
  "bytes",
  "crucible",
  "crucible-client-types 0.1.0",
@@ -1723,7 +1717,7 @@ name = "crucible-pantry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64",
  "bytes",
  "chrono",
  "clap",
@@ -2453,7 +2447,7 @@ dependencies = [
  "async-compression",
  "async-stream",
  "async-trait",
- "base64 0.22.1",
+ "base64",
  "bytes",
  "camino",
  "chrono",
@@ -2472,7 +2466,7 @@ dependencies = [
  "paste",
  "percent-encoding",
  "rustls 0.22.4",
- "rustls-pemfile 2.2.0",
+ "rustls-pemfile",
  "schemars 0.8.22",
  "scopeguard",
  "semver 1.0.28",
@@ -3074,7 +3068,7 @@ name = "gateway-client"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?branch=main#fa779b29af7a8656657ccca6ec531446188d916c"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "chrono",
  "daft",
  "ereport-types",
@@ -3765,7 +3759,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -4836,7 +4830,7 @@ dependencies = [
  "anyhow",
  "api_identity",
  "async-trait",
- "base64 0.22.1",
+ "base64",
  "bootstrap-agent-lockstep-types",
  "chrono",
  "clap",
@@ -4909,7 +4903,7 @@ source = "git+https://github.com/oxidecomputer/omicron?branch=main#fa779b29af7a8
 dependencies = [
  "anyhow",
  "api_identity",
- "base64 0.22.1",
+ "base64",
  "chrono",
  "daft",
  "dropshot",
@@ -5889,7 +5883,7 @@ version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38af38e8470ac9dee3ce1bae1af9c1671fffc44ddfd8bd1d0a3445bf349a8ef3"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "serde",
 ]
 
@@ -6924,7 +6918,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "bytes",
  "futures-core",
  "futures-util",
@@ -6965,7 +6959,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab3f43e3283ab1488b624b44b0e988d0acea0b3214e694730a055cb6b2efa801"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "bytes",
  "encoding_rs",
  "futures-channel",
@@ -7201,15 +7195,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
-dependencies = [
- "base64 0.21.7",
 ]
 
 [[package]]
@@ -7575,7 +7560,7 @@ name = "serde_human_bytes"
 version = "0.1.0"
 source = "git+http://github.com/oxidecomputer/serde_human_bytes?branch=main#8f60acdfe7c6d9e2a01f59be920c1c2b19129322"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "hex",
  "serde_core",
 ]
@@ -7672,7 +7657,7 @@ version = "3.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c522100790450cf78eeac1507263d0a350d4d5b30df0c8e1fe051a10c22b376e"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "chrono",
  "hex",
  "indexmap 1.9.3",
