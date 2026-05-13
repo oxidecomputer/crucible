@@ -168,7 +168,7 @@ pub struct RegionExtentInfo {
 }
 
 /// A tree representation of the info and status of all parts of a Volume.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VolumeInfo {
     Volume {
@@ -190,7 +190,7 @@ pub enum VolumeInfo {
     },
 }
 
-#[derive(Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DownstairsInfoNegotiationStatus {
     WaitConnect,
@@ -200,7 +200,7 @@ pub enum DownstairsInfoNegotiationStatus {
     LiveRepairReady,
 }
 
-#[derive(Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DownstairsInfoConnectionMode {
     New,
@@ -209,7 +209,7 @@ pub enum DownstairsInfoConnectionMode {
     Replaced,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DownstairsInfo {
     pub region_id: Option<Uuid>,
@@ -218,7 +218,7 @@ pub struct DownstairsInfo {
     pub state: DownstairsInfoStatus,
 }
 
-#[derive(Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum DownstairsInfoStatus {
     Connecting {
@@ -230,7 +230,7 @@ pub enum DownstairsInfoStatus {
     Stopping,
 }
 
-#[derive(Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstairsInfoStatus {
     Initializing,
