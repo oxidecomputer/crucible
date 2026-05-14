@@ -974,13 +974,13 @@ async fn main() -> Result<()> {
         // so we can pass that on to the upstairs.
         // Finally, spin out a task with the server to provide the endpoint
         // so metrics can be collected by Oximeter.
-        println!(
-            "Creating a metric collect endpoint at {}",
-            opt.metric_collect
+        info!(
+            test_log,
+            "Creating a metric collect endpoint at {}", opt.metric_collect
         );
         match client_oximeter(opt.metric_collect, opt.metric_register) {
             Err(e) => {
-                println!("Failed to register with Oximeter {:?}", e);
+                info!(test_log, "Failed to register with Oximeter {:?}", e);
                 pr = None;
             }
             Ok(server) => {
@@ -1016,15 +1016,18 @@ async fn main() -> Result<()> {
 
     if opt.retry_activate {
         while let Err(e) = volume.activate_with_gen(opt.generation).await {
-            println!("Activate returns: {:#}  Retrying", e);
+            info!(test_log, "Activate returns: {:#}  Retrying", e);
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         }
-        println!("Activate successful");
+        info!(test_log, "Activate successful");
     } else {
         volume.activate_with_gen(opt.generation).await?;
     }
 
-    println!("Wait for a query_work_queue command to finish before sending IO");
+    info!(
+        test_log,
+        "Wait for a query_work_queue command to finish before sending IO"
+    );
     volume.query_work_queue().await?;
 
     loop {
@@ -1034,7 +1037,7 @@ async fn main() -> Result<()> {
             }
             _ => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                println!("Waiting for upstairs to be active");
+                info!(test_log, "Waiting for upstairs to be active");
             }
         }
     }
@@ -1071,7 +1074,7 @@ async fn main() -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<SignalAction>(4);
     if opt.continuous {
-        println!("Setup signal handler");
+        info!(test_log, "Setup signal handler");
         let signals = Signals::new([SIGUSR1, SIGUSR2])?;
         tokio::spawn(handle_signals(signals, shutdown_tx));
     }
@@ -1082,19 +1085,19 @@ async fn main() -> Result<()> {
      */
     match opt.workload {
         Workload::Balloon => {
-            println!("Run balloon test");
+            info!(test_log, "Run balloon test");
             balloon_workload(&volume, &mut disk_info).await?;
         }
         Workload::Big => {
-            println!("Run big test");
+            info!(test_log, "Run big test");
             big_workload(&volume, &mut disk_info).await?;
         }
         Workload::Biggest => {
-            println!("Run biggest IO test");
+            info!(test_log, "Run biggest IO test");
             biggest_io_workload(&volume, &mut disk_info).await?;
         }
         Workload::Burst => {
-            println!("Run burst test (demo in a loop)");
+            info!(test_log, "Run burst test (demo in a loop)");
             burst_workload(&volume, 460, 190, &mut disk_info, &opt.verify_out)
                 .await?;
         }
@@ -1110,22 +1113,22 @@ async fn main() -> Result<()> {
              * not enough for a more exhaustive test.
              */
             let count = opt.count.unwrap_or(5);
-            println!("Run deactivate test");
+            info!(test_log, "Run deactivate test");
             deactivate_workload(&volume, count, &mut disk_info, opt.generation)
                 .await?;
         }
         Workload::Demo => {
-            println!("Run Demo test");
+            info!(test_log, "Run Demo test");
             let count = opt.count.unwrap_or(300);
             demo_workload(&volume, count, &mut disk_info).await?;
         }
         Workload::Dep => {
-            println!("Run dep test");
+            info!(test_log, "Run dep test");
             dep_workload(&volume, &mut disk_info).await?;
         }
 
         Workload::Dirty => {
-            println!("Run dirty test");
+            info!(test_log, "Run dirty test");
             let count = opt.count.unwrap_or(10);
             dirty_workload(&volume, &mut disk_info, count).await?;
 
@@ -1138,18 +1141,18 @@ async fn main() -> Result<()> {
              */
             if let Some(vo) = &opt.verify_out {
                 write_json(vo, &disk_info.write_log, true)?;
-                println!("Wrote out file {vo:?}");
+                info!(test_log, "Wrote out file {vo:?}");
             }
             return Ok(());
         }
 
         Workload::FastFill => {
-            println!("FastFill test");
+            info!(test_log, "FastFill test");
             fill_sparse_workload(&volume, &mut disk_info).await?;
         }
 
         Workload::Fill { skip_verify } => {
-            println!("Fill test");
+            info!(test_log, "Fill test");
             fill_workload(&volume, &mut disk_info, skip_verify).await?;
         }
 
@@ -1196,7 +1199,7 @@ async fn main() -> Result<()> {
         }
 
         Workload::One => {
-            println!("One test");
+            info!(test_log, "One test");
             one_workload(&volume, &mut disk_info).await?;
         }
         Workload::RandRead { cfg } => {
@@ -1241,7 +1244,7 @@ async fn main() -> Result<()> {
             }
         }
         Workload::Nothing => {
-            println!("Do nothing test, just start");
+            info!(test_log, "Do nothing test, just start");
             /*
              * If we don't want to quit right away, then just loop
              * forever
@@ -1254,13 +1257,13 @@ async fn main() -> Result<()> {
             }
         }
         Workload::Repair => {
-            println!("Run Repair workload");
+            info!(test_log, "Run Repair workload");
             let count = opt.count.unwrap_or(10);
             repair_workload(&volume, count, &mut disk_info).await?;
             drop(volume);
             if let Some(vo) = &opt.verify_out {
                 write_json(vo, &disk_info.write_log, true)?;
-                println!("Wrote out file {vo:?}");
+                info!(test_log, "Wrote out file {vo:?}");
             }
             return Ok(());
         }
@@ -1360,7 +1363,7 @@ async fn main() -> Result<()> {
                 targets,
                 dsc_client,
                 opt.generation,
-                test_log,
+                test_log.clone(),
             )
             .await?;
         }
@@ -1406,12 +1409,12 @@ async fn main() -> Result<()> {
                 targets,
                 dsc_client,
                 opt.generation,
-                test_log,
+                test_log.clone(),
             )
             .await?;
         }
         Workload::Span => {
-            println!("Span test");
+            info!(test_log, "Span test");
             span_workload(&volume, &mut disk_info).await?;
         }
         Workload::Verify => {
@@ -1427,12 +1430,12 @@ async fn main() -> Result<()> {
             }
             if let Some(vo) = &opt.verify_out {
                 write_json(vo, &disk_info.write_log, true)?;
-                println!("Wrote out file {vo:?}");
+                info!(test_log, "Wrote out file {vo:?}");
             }
             if opt.quit {
-                println!("Verify test completed");
+                info!(test_log, "Verify test completed");
             } else {
-                println!("Verify read loop begins");
+                info!(test_log, "Verify read loop begins");
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(10))
                         .await;
@@ -1443,7 +1446,7 @@ async fn main() -> Result<()> {
                     }
                     let mut wc = volume.show_work().await?;
                     while wc.up_count + wc.ds_count > 0 {
-                        println!("Waiting for all work to be completed");
+                        info!(test_log, "Waiting for all work to be completed");
                         tokio::time::sleep(tokio::time::Duration::from_secs(
                             10,
                         ))
@@ -1457,7 +1460,7 @@ async fn main() -> Result<()> {
             panic!("This case handled above");
         }
         Workload::WFR => {
-            println!("Run Write-Flush-Read random IO test");
+            info!(test_log, "Run Write-Flush-Read random IO test");
             let count = opt.count.unwrap_or(10);
             write_flush_read_workload(&volume, count, &mut disk_info).await?;
         }
@@ -1485,24 +1488,33 @@ async fn main() -> Result<()> {
 
     if let Some(vo) = &opt.verify_out {
         write_json(vo, &disk_info.write_log, true)?;
-        println!("Wrote out file {vo:?}");
+        info!(test_log, "Wrote out file {vo:?}");
     }
 
-    println!("CLIENT: Tests done.  All submitted work has been ACK'd");
+    info!(
+        test_log,
+        "CLIENT: Tests done.  All submitted work has been ACK'd"
+    );
     loop {
         let wc = volume.show_work().await?;
-        println!(
+        info!(
+            test_log,
             "CLIENT: Up:{} ds:{} act:{}",
-            wc.up_count, wc.ds_count, wc.active_count
+            wc.up_count,
+            wc.ds_count,
+            wc.active_count
         );
         if opt.quit && wc.up_count + wc.ds_count == 0 {
-            println!("CLIENT: All crucible jobs finished, exiting program");
+            info!(
+                test_log,
+                "CLIENT: All crucible jobs finished, exiting program"
+            );
             return Ok(());
         } else if opt.stable
             && wc.up_count + wc.ds_count == 0
             && wc.active_count == downstairs_in_volume
         {
-            println!("CLIENT: All jobs finished, all DS active.");
+            info!(test_log, "CLIENT: All jobs finished, all DS active.");
             return Ok(());
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
