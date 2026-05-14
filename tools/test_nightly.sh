@@ -93,20 +93,6 @@ else
     exit 1
 fi
 echo ""
-
-sleep 1
-banner replace
-banner special
-echo "$(date) test_replace_special start" >> "$output_file"
-./tools/test_replace_special.sh -l 50
-res=$?
-if [[ "$res" -eq 0 ]]; then
-    echo "$(date) test_replace_special pass" >> "$output_file"
-else
-    echo "$(date) test_replace_special fail with: $res" >> "$output_file"
-    (( err += 1 ))
-    exit 1
-fi
 duration=$SECONDS
 
 banner results

@@ -1208,8 +1208,18 @@ impl Upstairs {
                 self.submit_flush(Some(done), snapshot_details, Some(io_guard));
             }
             BlockOp::ReplaceDownstairs { id, old, new, done } => {
-                let r = self.downstairs.replace(id, old, new, &self.state);
-                done.send_result(r);
+                if !matches!(self.state, UpstairsState::Active) {
+                    warn!(self.log, "Replace before active request");
+                    done.send_result(Err(
+                        CrucibleError::ReplaceRequestInvalid(
+                            "replace not allowed before upstairs is active"
+                                .to_string(),
+                        ),
+                    ));
+                } else {
+                    let r = self.downstairs.replace(id, old, new, &self.state);
+                    done.send_result(r);
+                }
             }
 
             #[cfg(test)]
@@ -2031,7 +2041,10 @@ impl Upstairs {
             }
             3 => {
                 if min_quorum_deadline.is_some() {
-                    info!(self.log, "cancelling min-quorum reconciliation");
+                    info!(
+                        self.log,
+                        "Proceed with full quorum, cancelling min-quorum reconciliation"
+                    );
                     *min_quorum_deadline = None;
                 }
             }
