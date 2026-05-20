@@ -58,6 +58,8 @@ pub enum CliMessage {
     WriteUnwritten(usize),
     Unknown(u32, BytesMut),
     Uuid,
+    VolumeInfoPlease,
+    VolumeInfoJson(String),
 }
 
 #[derive(Debug)]
@@ -313,6 +315,20 @@ mod tests {
     #[test]
     fn rt_generic() -> Result<()> {
         let input = CliMessage::Generic(2, true, true);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_volume_info_please() -> Result<()> {
+        let input = CliMessage::VolumeInfoPlease;
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_volume_info_json() -> Result<()> {
+        let input = CliMessage::VolumeInfoJson(r#"{"volume": {}}"#.to_string());
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
