@@ -42,7 +42,7 @@ rayon.workspace = true
 repair-client.workspace = true
 reqwest.workspace = true
 ringbuffer.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, optional = true }
 schemars.workspace = true
 semver.workspace = true
 serde_json.workspace = true
@@ -74,7 +74,13 @@ version_check = "0.9.5"
 
 [features]
 asm = ["usdt/asm"]
-default = []
+default = ["sqlite"]
 zfs_snapshot = []
-integration-tests = [] # Enables creating SQLite volumes
+# SQLite extent backend. Required for opening or migrating regions in the
+# pre-raw on-disk format. Seed-only builds disable this via
+# `--no-default-features` so the `crucible-downstairs` binary doesn't drag
+# `rusqlite` / `libsqlite3-sys` (avoids workspace links-conflicts when seed
+# is built alongside other crates that also link `libsqlite3`).
+sqlite = ["dep:rusqlite"]
+integration-tests = ["sqlite"] # Enables creating SQLite volumes
 omicron-build = [] # Uses syncfs(3c) for flushes instead of fsync

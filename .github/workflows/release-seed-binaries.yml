@@ -55,11 +55,13 @@ jobs:
           echo "vid=${VERSION_ID}, fork=${FORK_SHA:0:12}, base=${UPSTREAM_BASE_SHA:0:12}"
 
       - name: Install system deps
-        # libsqlite3-dev mirrors the upstream rust.yml requirement; mold cuts
-        # link time roughly in half on the linux-musl Crucible workspace.
+        # mold cuts link time roughly in half on the linux-musl Crucible
+        # workspace. libsqlite3-dev would only be needed for the SQLite
+        # extent backend; the seed downstairs build drops it via
+        # --no-default-features (plan §4), so it's not installed here.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev mold
+          sudo apt-get install -y mold
 
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # stable
         with:
@@ -79,8 +81,14 @@ jobs:
         env:
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: |
+          # downstairs: --no-default-features drops the SQLite extent
+          # backend so the binary doesn't drag rusqlite/libsqlite3-sys
+          # (avoids workspace links-conflicts when seed is co-built
+          # with other crates that link libsqlite3). Per plan §4.
           cargo build --release \
             -p crucible-downstairs \
+            --no-default-features
+          cargo build --release \
             -p crucible-nbd-server
 
       - name: Sanity-check artifacts

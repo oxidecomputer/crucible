@@ -393,7 +393,21 @@ impl Extent {
         //  `Extent::open` is called, we will restart the migration (if we
         //  haven't gotten to deleting the `.db` file).
         let mut has_sqlite = path.with_extension("db").exists();
+        // SQLite-backed regions require the `sqlite` feature both for opening
+        // (read-only path) and migrating (read-write path) to the raw
+        // backend. Without the feature this binary refuses cleanly rather
+        // than silently treating the `.db` file as missing.
+        #[cfg(not(feature = "sqlite"))]
+        if has_sqlite {
+            return Err(CrucibleError::IoError(format!(
+                "extent {number} has a legacy SQLite backing file but this \
+                 build was compiled without `feature = \"sqlite\"`; rebuild \
+                 with `--features sqlite` to migrate, then redeploy."
+            ))
+            .into());
+        }
         let should_migrate = has_sqlite && !read_only;
+        #[cfg(feature = "sqlite")]
         if should_migrate {
             info!(log, "Migrating extent {number}");
             // Truncate the file to the length of the extent data
@@ -444,6 +458,10 @@ impl Extent {
             has_sqlite = false;
             info!(log, "Done migrating extent {number}");
         }
+        // When `feature = "sqlite"` is off, `has_sqlite` short-circuited to
+        // an Err above; the line below keeps `has_sqlite` mutable in both
+        // cfg paths so the read-only open branch downstream compiles.
+        let _ = &mut has_sqlite;
 
         // Clean up spare SQLite files if this is a raw file extent.  These
         // deletions don't need to be durable, because we're not using their
@@ -462,12 +480,22 @@ impl Extent {
         // were constructed using the SQLite backend, we have to keep them
         // as-is.
         let inner: Box<dyn ExtentInner + Send + Sync> = {
-            if has_sqlite {
-                assert!(read_only);
-                let inner = extent_inner_sqlite::SqliteInner::open(
-                    dir, def, number, read_only, log,
-                )?;
-                Box::new(inner)
+            #[cfg(feature = "sqlite")]
+            let sqlite_ro_opened: Option<Box<dyn ExtentInner + Send + Sync>> =
+                if has_sqlite {
+                    assert!(read_only);
+                    let inner = extent_inner_sqlite::SqliteInner::open(
+                        dir, def, number, read_only, log,
+                    )?;
+                    Some(Box::new(inner))
+                } else {
+                    None
+                };
+            #[cfg(not(feature = "sqlite"))]
+            let sqlite_ro_opened: Option<Box<dyn ExtentInner + Send + Sync>> =
+                None;
+            if let Some(b) = sqlite_ro_opened {
+                b
             } else {
                 match extent_inner_raw_common::OnDiskMeta::get_version_tag(
                     &extent_path(dir, number),

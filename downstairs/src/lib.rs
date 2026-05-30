@@ -46,6 +46,11 @@ mod stats;
 
 mod extent_inner_raw;
 pub(crate) mod extent_inner_raw_common;
+// SQLite backend gated behind `feature = "sqlite"` (default-on upstream so
+// region migration and integration tests still work; seed builds without
+// it via `--no-default-features` so the binary doesn't drag `rusqlite` /
+// `libsqlite3-sys` workspace-wide).
+#[cfg(any(test, feature = "sqlite"))]
 mod extent_inner_sqlite;
 
 use complete_jobs::CompletedJobs;
