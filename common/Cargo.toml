@@ -8,6 +8,8 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 atty.workspace = true
+iroh.workspace = true
+iroh-base.workspace = true
 nix.workspace = true
 rustls-pemfile.workspace = true
 schemars.workspace = true

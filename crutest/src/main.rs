@@ -237,6 +237,15 @@ pub struct Opt {
     #[clap(short, long, global = true, action)]
     target: Vec<SocketAddr>,
 
+    /// Hex iroh secret key. When set, dial Downstairs over the seed mesh
+    /// (`seed/crucible/v1`) instead of TCP.
+    #[clap(long, global = true, env = "SEED_IROH_SECRET")]
+    seed_iroh_secret: Option<String>,
+
+    /// iroh target(s) `<node_id>@<addr>`, positionally parallel to `--target`.
+    #[clap(long, global = true, action)]
+    iroh_target: Vec<String>,
+
     /// A UUID to use for the upstairs.
     #[clap(long, global = true, action)]
     uuid: Option<Uuid>,
@@ -920,6 +929,22 @@ async fn make_a_volume(
 async fn main() -> Result<()> {
     let opt = opts()?;
     let is_encrypted = opt.key.is_some();
+
+    // Seed mesh: build the iroh endpoint + target map so the Upstairs dials
+    // Downstairs over `seed/crucible/v1` instead of TCP.
+    if let Some(hex) = &opt.seed_iroh_secret {
+        let secret = crucible_common::seed_iroh::secret_from_hex(hex)?;
+        let endpoint =
+            crucible_common::seed_iroh::build_endpoint(secret).await?;
+        let mut targets = Vec::new();
+        for (sock, iroh) in opt.target.iter().zip(opt.iroh_target.iter()) {
+            targets.push((
+                *sock,
+                crucible_common::seed_iroh::parse_target(iroh)?,
+            ));
+        }
+        crucible_common::seed_iroh::init(endpoint, targets);
+    }
 
     // If we just want the version, print that and exit.
     if let Workload::Version = opt.workload {

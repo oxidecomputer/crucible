@@ -45,6 +45,9 @@ resolver = "2"
 # crates.io
 aes-gcm-siv = "0.11.1"
 anyhow = "1"
+# seed iroh transport (Phase 0.5): wire-compatible with seed's mesh (iroh rc.1)
+iroh = "1.0.0-rc.1"
+iroh-base = "1.0.0-rc.1"
 async-channel = "2.5.0"
 async-recursion = "1.1.1"
 async-trait = "0.1.89"

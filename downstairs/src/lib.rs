@@ -26,6 +26,8 @@ use anyhow::{Context, Result, bail};
 use bytes::BytesMut;
 use futures::StreamExt;
 use rand::prelude::*;
+use iroh::Endpoint;
+use iroh::endpoint::{RecvStream, SendStream};
 use slog::{Logger, debug, error, info, o, warn};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -851,6 +853,14 @@ async fn proc_stream(
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = MessageWriter::new(write);
+
+            proc(handle, id, fr, fw, log).await
+        }
+        WrappedStream::Iroh(send, recv) => {
+            // iroh streams arrive already split; feed them to the same
+            // generic `proc` as the TCP paths (framing unchanged).
+            let fr = FramedRead::new(recv, CrucibleDecoder::new());
+            let fw = MessageWriter::new(send);
 
             proc(handle, id, fr, fw, log).await
         }
@@ -3425,6 +3435,9 @@ impl Work {
 enum WrappedStream {
     Http(tokio::net::TcpStream),
     Https(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
+    /// Seed mesh transport: an already-split iroh bidirectional stream
+    /// (`seed/crucible/v1`), in place of TCP.
+    Iroh(SendStream, RecvStream),
 }
 
 /// On-disk backend for downstairs storage
@@ -3519,6 +3532,7 @@ impl DownstairsClient {
         settings: DownstairsClientSettings,
     ) -> Result<Self> {
         let root_log = ds.log.clone();
+        let iroh_endpoint = settings.iroh_endpoint.clone();
         let oximeter_handle = settings.oximeter.map(|oximeter| {
             let dss = ds.dss.clone();
             let log = root_log.new(o!("task" => "oximeter".to_string()));
@@ -3609,6 +3623,56 @@ impl DownstairsClient {
             // (here) is dropped by JoinHandle::abort()
             #[expect(unused)]
             let guard = cancel.drop_guard();
+
+            // Seed mesh: when an iroh endpoint is configured, accept Upstairs
+            // connections over `seed/crucible/v1` and feed each bidirectional
+            // stream to the same `proc_stream` path. The TCP loop below is
+            // left untouched (Crucible's own tests use it).
+            if let Some(endpoint) = iroh_endpoint {
+                info!(log, "downstairs accepting over seed iroh mesh");
+                let mut id = ConnectionId(0);
+                loop {
+                    let accepted = tokio::select! {
+                        _ = &mut ds_runner => {
+                            info!(log, "downstairs runner stopped; exiting");
+                            break;
+                        }
+                        a = crucible_common::seed_iroh::accept(&endpoint) => a,
+                    };
+                    match accepted {
+                        Ok(Some((send, recv))) => {
+                            dss.add_connection();
+                            let task_log =
+                                root_log.new(o!("id" => id.0.to_string()));
+                            let handle = handle.clone();
+                            if let Err(e) = proc_stream(
+                                handle,
+                                id,
+                                WrappedStream::Iroh(send, recv),
+                                &task_log,
+                            )
+                            .await
+                            {
+                                error!(
+                                    task_log,
+                                    "iroh connection failed to spawn tasks: {e:?}"
+                                );
+                            } else {
+                                info!(task_log, "iroh connection: tasks spawned");
+                            }
+                            id.0 += 1;
+                        }
+                        Ok(None) => {
+                            info!(log, "iroh endpoint closed; exiting");
+                            break;
+                        }
+                        Err(e) => {
+                            error!(log, "iroh accept error: {e:?}");
+                        }
+                    }
+                }
+                return Ok(());
+            }
 
             let mut id = ConnectionId(0);
             loop {
@@ -3738,6 +3802,9 @@ pub struct DownstairsClientSettings {
     pub port: u16,
     pub rport: u16,
     pub certs: Option<DownstairsClientCerts>,
+    /// When set, accept Upstairs connections over the seed iroh mesh
+    /// (`seed/crucible/v1`) instead of the TCP listener.
+    pub iroh_endpoint: Option<Endpoint>,
 }
 
 /// Paths to certificates
@@ -3755,6 +3822,7 @@ impl Default for DownstairsClientSettings {
             port: 0,
             rport: 0,
             certs: None,
+            iroh_endpoint: None,
         }
     }
 }

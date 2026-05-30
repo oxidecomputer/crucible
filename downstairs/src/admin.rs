@@ -84,6 +84,7 @@ impl CrucibleDownstairsAdminApi for CrucibleDownstairsAdminImpl {
                 port: run_params.port,
                 rport: run_params.rport,
                 certs,
+                iroh_endpoint: None,
             },
         )
         .await

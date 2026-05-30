@@ -22,6 +22,7 @@ pub use region::{
 };
 
 pub mod impacted_blocks;
+pub mod seed_iroh;
 pub mod x509;
 
 pub const REPAIR_PORT_OFFSET: u16 = 4000;

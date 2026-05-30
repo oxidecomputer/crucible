@@ -2369,6 +2369,39 @@ impl ClientIoTask {
             }
         }
 
+        // Seed mesh: if iroh transport is active and this Downstairs has an
+        // iroh target, dial it over `seed/crucible/v1` and feed the bidi
+        // stream to the same generic `cmd_loop` (framing unchanged). The TCP
+        // path below is left intact for Crucible's own tests.
+        if let Some(endpoint) = crucible_common::seed_iroh::endpoint() {
+            if let Some(iroh_target) =
+                crucible_common::seed_iroh::iroh_target_for(self.target)
+            {
+                info!(
+                    self.log,
+                    "connecting to {} over seed iroh mesh", self.target
+                );
+                match crucible_common::seed_iroh::connect(endpoint, iroh_target)
+                    .await
+                {
+                    Ok((send, recv)) => {
+                        let fr = FramedRead::new(recv, CrucibleDecoder::new());
+                        let fw = MessageWriter::new(send);
+                        return self.cmd_loop(fr, fw).await;
+                    }
+                    Err(e) => {
+                        warn!(
+                            self.log,
+                            "iroh connect to {} failed: {e:?}", self.target
+                        );
+                        return ClientRunResult::ConnectionFailed(
+                            std::io::Error::other(format!("iroh connect: {e}")),
+                        );
+                    }
+                }
+            }
+        }
+
         // Make connection to this downstairs.
         let sock = if self.target.is_ipv4() {
             TcpSocket::new_v4().unwrap()

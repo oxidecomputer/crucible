@@ -209,6 +209,11 @@ enum Args {
 
         #[clap(long, default_value = "rw", action)]
         mode: Mode,
+
+        /// Hex iroh secret key. When set, accept Upstairs connections over the
+        /// seed mesh (`seed/crucible/v1`) instead of the TCP listener.
+        #[clap(long, env = "SEED_IROH_SECRET")]
+        seed_iroh_secret: Option<String>,
     },
     Serve {
         #[clap(short, long, action)]
@@ -413,6 +418,7 @@ async fn main() -> Result<()> {
             key_pem,
             root_cert_pem,
             mode,
+            seed_iroh_secret,
         } => {
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
@@ -448,6 +454,24 @@ async fn main() -> Result<()> {
                 .set_test_errors(read_errors, write_errors, flush_errors)
                 .build()?;
 
+            // Seed mesh: build the iroh endpoint from the injected secret and
+            // print our dial string so the spawner can hand it to the Upstairs.
+            let iroh_endpoint = match seed_iroh_secret {
+                Some(hex) => {
+                    let secret =
+                        crucible_common::seed_iroh::secret_from_hex(&hex)?;
+                    let ep = crucible_common::seed_iroh::build_endpoint(secret)
+                        .await?;
+                    if let Some(t) =
+                        crucible_common::seed_iroh::local_target_string(&ep)
+                    {
+                        println!("SEED_IROH_DOWNSTAIRS_ADDR={t}");
+                    }
+                    Some(ep)
+                }
+                None => None,
+            };
+
             let downstairs = DownstairsClient::spawn(
                 d,
                 DownstairsClientSettings {
@@ -457,6 +481,7 @@ async fn main() -> Result<()> {
                     // TODO accept as an argument?
                     rport: port + crucible_common::REPAIR_PORT_OFFSET,
                     certs,
+                    iroh_endpoint,
                 },
             )
             .await?;
