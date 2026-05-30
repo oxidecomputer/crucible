@@ -2369,38 +2369,53 @@ impl ClientIoTask {
             }
         }
 
-        // Seed mesh: if iroh transport is active and this Downstairs has an
-        // iroh target, dial it over `seed/crucible/v1` and feed the bidi
-        // stream to the same generic `cmd_loop` (framing unchanged). The TCP
-        // path below is left intact for Crucible's own tests.
+        // Seed mesh: if iroh transport is active, every Downstairs MUST have
+        // a registered iroh target — fall-through to TCP is forbidden by
+        // plan §8 ("no public-HTTP fallback for node-to-node"). A missing
+        // target is therefore a misconfiguration: fail explicitly rather
+        // than silently dialing the placeholder loopback address.
         if let Some(endpoint) = crucible_common::seed_iroh::endpoint() {
-            if let Some(iroh_target) =
+            let Some(iroh_target) =
                 crucible_common::seed_iroh::iroh_target_for(self.target)
-            {
-                info!(
+            else {
+                warn!(
                     self.log,
-                    "connecting to {} over seed iroh mesh", self.target
+                    "seed iroh active but no iroh target registered for \
+                     placeholder {}; refusing to fall through to TCP",
+                    self.target
                 );
-                match crucible_common::seed_iroh::connect(endpoint, iroh_target)
-                    .await
-                {
-                    Ok((send, recv)) => {
-                        let fr = FramedRead::new(recv, CrucibleDecoder::new());
-                        let fw = MessageWriter::new(send);
-                        return self.cmd_loop(fr, fw).await;
-                    }
-                    Err(e) => {
-                        warn!(
-                            self.log,
-                            "iroh connect to {} failed: {e:?}", self.target
-                        );
-                        return ClientRunResult::ConnectionFailed(
-                            std::io::Error::other(format!("iroh connect: {e}")),
-                        );
-                    }
+                return ClientRunResult::ConnectionFailed(std::io::Error::other(
+                    format!(
+                        "seed iroh active but no iroh target for {}",
+                        self.target
+                    ),
+                ));
+            };
+            info!(
+                self.log,
+                "connecting to {} over seed iroh mesh", self.target
+            );
+            match crucible_common::seed_iroh::connect(endpoint, iroh_target)
+                .await
+            {
+                Ok((send, recv)) => {
+                    let fr = FramedRead::new(recv, CrucibleDecoder::new());
+                    let fw = MessageWriter::new(send);
+                    return self.cmd_loop(fr, fw).await;
+                }
+                Err(e) => {
+                    warn!(
+                        self.log,
+                        "iroh connect to {} failed: {e:?}", self.target
+                    );
+                    return ClientRunResult::ConnectionFailed(
+                        std::io::Error::other(format!("iroh connect: {e}")),
+                    );
                 }
             }
         }
+        // No SEED_IROH_SECRET — upstream Crucible TCP path, preserved so
+        // Oxide's own tests and CI keep working unchanged.
 
         // Make connection to this downstairs.
         let sock = if self.target.is_ipv4() {

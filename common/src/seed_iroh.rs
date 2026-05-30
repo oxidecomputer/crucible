@@ -139,25 +139,66 @@ pub async fn build_endpoint(secret: SecretKey) -> Result<Endpoint> {
 
 /// Dial `addr` on the Crucible ALPN and open a bidirectional stream.
 ///
+/// **Relay refusal (plan §0.5).** Block I/O over a relay path is a latency
+/// disaster — relays are TCP-tunnelled and add inter-region RTTs to every
+/// quorum write. After the connect resolves, this function inspects the
+/// resulting [`iroh::endpoint::IncomingAddr`] and returns an error if the
+/// path landed on a `Relay` transport. The caller (Upstairs
+/// `ClientIoTask`) treats the error like any other connect failure: it
+/// surfaces to the supervisor, which routes the volume into Degraded
+/// rather than serving I/O over a connection that cannot meet the
+/// latency budget.
+///
 /// # Errors
 ///
-/// Returns an error if the connection or stream cannot be established.
+/// Returns an error if the connection or stream cannot be established, or
+/// if the resolved transport is a relay path.
 pub async fn connect(endpoint: &Endpoint, addr: EndpointAddr) -> Result<(SendStream, RecvStream)> {
     let conn = endpoint
         .connect(addr, ALPN)
         .await
         .map_err(|e| anyhow::anyhow!("iroh connect: {e}"))?;
+    // The QUIC handshake has completed by the time `connect` returns Ok.
+    // Inspect the currently-selected path; refuse if it's a relay.
+    refuse_if_relay(&conn, "connect")?;
     conn.open_bi()
         .await
         .map_err(|e| anyhow::anyhow!("iroh open_bi: {e}"))
 }
 
+/// Inspect the connection's currently-selected path and return an error if
+/// it is a Relay transport. Returns `Ok(())` for direct IP (and custom)
+/// paths, and also `Ok(())` if no path is currently selected (the
+/// `Minimal` preset configures no relays, so this shouldn't fire; the
+/// check still belongs because a future preset change or env override
+/// could re-enable relay candidates).
+fn refuse_if_relay(conn: &iroh::endpoint::Connection, op: &'static str) -> Result<()> {
+    let paths = conn.paths();
+    for path in &paths {
+        if path.is_selected() && path.is_relay() {
+            anyhow::bail!(
+                "iroh {op} resolved to a Relay path ({:?}); \
+                 block I/O over a relay does not meet the seed latency budget — \
+                 refusing the connection",
+                path.remote_addr(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Accept the next inbound Crucible connection and its first bidirectional
 /// stream. Returns `Ok(None)` once the endpoint is closed.
 ///
+/// **Relay refusal (plan §0.5).** Same as [`connect`]: inbound connections
+/// landed on a `Relay` transport are refused, because the Downstairs's
+/// flush-quorum durability budget cannot tolerate the relay's TCP-tunnelled
+/// latency.
+///
 /// # Errors
 ///
-/// Returns an error if accepting the connection or stream fails.
+/// Returns an error if accepting the connection or stream fails, or if the
+/// inbound peer's resolved transport is a relay path.
 pub async fn accept(endpoint: &Endpoint) -> Result<Option<(SendStream, RecvStream)>> {
     let Some(incoming) = endpoint.accept().await else {
         return Ok(None);
@@ -165,6 +206,7 @@ pub async fn accept(endpoint: &Endpoint) -> Result<Option<(SendStream, RecvStrea
     let conn = incoming
         .await
         .map_err(|e| anyhow::anyhow!("iroh accept connection: {e}"))?;
+    refuse_if_relay(&conn, "accept")?;
     let stream = conn
         .accept_bi()
         .await
