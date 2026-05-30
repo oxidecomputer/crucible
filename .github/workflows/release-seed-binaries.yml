@@ -1,0 +1,211 @@
+name: Release seed binaries
+
+# Build `crucible-downstairs` + `crucible-nbd-server` from the seed
+# iroh-transport patch and (a) attach them to a GitHub Release for the tag,
+# (b) optionally mirror them to seed's R2 bucket in the layout that
+# `BinaryResolver::resolve_current` reads — `binaries/{name}/...`.
+#
+# Triggers:
+#   - push of a tag matching `seed-v*` (release path)
+#   - manual `workflow_dispatch` (snapshot path; tags the run with the
+#     resolved commit short SHA)
+
+on:
+  push:
+    tags:
+      - "seed-v*"
+  workflow_dispatch:
+    inputs:
+      r2_upload:
+        description: "Mirror artifacts to R2 (requires R2_* secrets)"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build seed binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version_id: ${{ steps.meta.outputs.version_id }}
+      fork_sha: ${{ steps.meta.outputs.fork_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          FORK_SHA="$(git rev-parse HEAD)"
+          UPSTREAM_BASE_SHA="$(awk '/^- Base commit:/ {print $4; exit}' UPSTREAM.md | tr -d '`' || echo unknown)"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION_ID="${GITHUB_REF_NAME}-${FORK_SHA:0:12}"
+          else
+            VERSION_ID="$(date -u +%Y%m%d-%H%M%S)-${FORK_SHA:0:12}"
+          fi
+          echo "version_id=${VERSION_ID}" >>"$GITHUB_OUTPUT"
+          echo "fork_sha=${FORK_SHA}" >>"$GITHUB_OUTPUT"
+          echo "upstream_base_sha=${UPSTREAM_BASE_SHA}" >>"$GITHUB_OUTPUT"
+          echo "vid=${VERSION_ID}, fork=${FORK_SHA:0:12}, base=${UPSTREAM_BASE_SHA:0:12}"
+
+      - name: Install system deps
+        # libsqlite3-dev mirrors the upstream rust.yml requirement; mold cuts
+        # link time roughly in half on the linux-musl Crucible workspace.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev mold
+
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # stable
+        with:
+          toolchain: stable
+
+      - name: Cargo cache
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-seed-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-seed-${{ runner.os }}-
+
+      - name: Build release binaries
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: |
+          cargo build --release \
+            -p crucible-downstairs \
+            -p crucible-nbd-server
+
+      - name: Sanity-check artifacts
+        run: |
+          set -euo pipefail
+          for name in crucible-downstairs crucible-nbd-server; do
+            test -f "target/release/${name}" \
+              || { echo "missing target/release/${name}"; exit 1; }
+            file "target/release/${name}"
+          done
+
+      - name: Compute sha256 + meta.json
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          VID="${{ steps.meta.outputs.version_id }}"
+          FORK_SHA="${{ steps.meta.outputs.fork_sha }}"
+          UPSTREAM_BASE_SHA="${{ steps.meta.outputs.upstream_base_sha }}"
+          UPLOADED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for name in crucible-downstairs crucible-nbd-server; do
+            cp "target/release/${name}" "out/${name}"
+            SIZE="$(stat -c%s "out/${name}")"
+            SHA256="$(sha256sum "out/${name}" | awk '{print $1}')"
+            echo "${SHA256}  ${name}" > "out/${name}.sha256"
+            cat > "out/${name}.meta.json" <<META
+          {
+            "version_id": "${VID}",
+            "name": "${name}",
+            "size": ${SIZE},
+            "sha256": "${SHA256}",
+            "fork_sha": "${FORK_SHA}",
+            "upstream_base_sha": "${UPSTREAM_BASE_SHA}",
+            "uploaded_at": "${UPLOADED_AT}",
+            "uploader": "github-actions@${GITHUB_REPOSITORY}",
+            "build_profile": "release"
+          }
+          META
+          done
+          ls -la out/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4
+        with:
+          name: seed-crucible-binaries-${{ steps.meta.outputs.version_id }}
+          path: out/
+
+      - name: Attach to GitHub Release (tag builds only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2
+        with:
+          files: |
+            out/crucible-downstairs
+            out/crucible-downstairs.sha256
+            out/crucible-downstairs.meta.json
+            out/crucible-nbd-server
+            out/crucible-nbd-server.sha256
+            out/crucible-nbd-server.meta.json
+          body: |
+            Seed iroh-transport build of Crucible.
+
+            Build metadata:
+            - version_id: ${{ steps.meta.outputs.version_id }}
+            - fork_sha: ${{ steps.meta.outputs.fork_sha }}
+            - upstream_base_sha: ${{ steps.meta.outputs.upstream_base_sha }}
+
+            Install path on seed VMs: `/opt/seed/bin/crucible-downstairs`,
+            `/opt/seed/bin/crucible-nbd-server`. Verify the binary's sha256
+            against the matching `.meta.json` `sha256` field before install
+            (the seed agent does this automatically via `BinaryResolver`).
+
+  mirror-to-r2:
+    # Optional follow-up: push to the seed R2 bucket in the layout the seed
+    # BinaryResolver reads. Gated on the `r2_upload` workflow_dispatch input
+    # so tag-triggered runs don't surprise-mirror, and on the R2 secrets
+    # being present (no-op if absent).
+    name: Mirror to seed R2
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.r2_upload
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: seed-crucible-binaries-${{ needs.build.outputs.version_id }}
+          path: bin/
+
+      - name: Install AWS CLI v2
+        run: |
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
+          unzip -q /tmp/awscli.zip -d /tmp
+          sudo /tmp/aws/install --update
+
+      - name: Publish to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          VID: ${{ needs.build.outputs.version_id }}
+        run: |
+          set -euo pipefail
+          : "${R2_ENDPOINT:?R2_ENDPOINT secret not set}"
+          : "${R2_BUCKET:=seed-state}"
+          S3="aws s3 --endpoint-url $R2_ENDPOINT --region auto"
+          for name in crucible-downstairs crucible-nbd-server; do
+            $S3 cp "bin/${name}" "s3://${R2_BUCKET}/binaries/${name}"
+            $S3 cp "bin/${name}" "s3://${R2_BUCKET}/binaries/${name}/current"
+            $S3 cp "bin/${name}" "s3://${R2_BUCKET}/binaries/${name}/versions/${VID}/binary"
+            $S3 cp "bin/${name}.meta.json" \
+              "s3://${R2_BUCKET}/binaries/${name}/versions/${VID}/meta.json"
+            # versions/index.json: newest-first, capped at 20. Match
+            # publish-crucible.sh so the seed BinaryResolver agrees.
+            IDXP="s3://${R2_BUCKET}/binaries/${name}/versions/index.json"
+            IDXF="$(mktemp)"
+            if ! $S3 cp "$IDXP" "$IDXF" 2>/dev/null; then
+              echo "[]" > "$IDXF"
+            fi
+            SHA="$(jq -r .sha256 "bin/${name}.meta.json")"
+            SIZE="$(jq -r .size "bin/${name}.meta.json")"
+            jq --arg vid "${VID}" --arg sha "$SHA" --argjson size "$SIZE" \
+               '([{version_id:$vid, sha256:$sha, size:$size}]
+                 + (map(select(.version_id != $vid)))) | .[0:20]' \
+               "$IDXF" > "$IDXF.tmp"
+            $S3 cp "$IDXF.tmp" "$IDXP"
+            rm -f "$IDXF" "$IDXF.tmp"
+          done
+          echo "Mirrored to s3://${R2_BUCKET}/binaries/{crucible-downstairs,crucible-nbd-server}/versions/${VID}/"
