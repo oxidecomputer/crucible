@@ -20,6 +20,13 @@ use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
 /// ALPN for Crucible block replication over the seed mesh.
 pub const ALPN: &[u8] = b"seed/crucible/v1";
 
+/// Comma-separated allowlist of Upstairs NodeId hex strings permitted to
+/// drive this Downstairs. The seed CP sets it to the volume's single
+/// deterministic Upstairs identity at spawn, so a mesh peer that merely
+/// speaks the ALPN cannot write block I/O against the region. Unset or
+/// empty = permissive (legacy behaviour, e.g. the single-node harness).
+pub const ALLOWED_UPSTAIRS_ENV: &str = "SEED_IROH_ALLOWED_UPSTAIRS";
+
 /// Process-global iroh endpoint, installed once at startup by the binary.
 /// The Upstairs connect seam reads it; `None` means TCP transport.
 static ENDPOINT: OnceLock<Endpoint> = OnceLock::new();
@@ -207,11 +214,41 @@ pub async fn accept(endpoint: &Endpoint) -> Result<Option<(SendStream, RecvStrea
         .await
         .map_err(|e| anyhow::anyhow!("iroh accept connection: {e}"))?;
     refuse_if_relay(&conn, "accept")?;
+    authorize_peer(&conn)?;
     let stream = conn
         .accept_bi()
         .await
         .map_err(|e| anyhow::anyhow!("iroh accept_bi: {e}"))?;
     Ok(Some(stream))
+}
+
+/// Authorize the connecting Upstairs against [`ALLOWED_UPSTAIRS_ENV`].
+///
+/// The Downstairs runs its own iroh endpoint and would otherwise accept any
+/// dialer that speaks `seed/crucible/v1` — there is no NodeCert on this
+/// raw-iroh path. When the env names a non-empty allowlist, the connection's
+/// remote NodeId must be on it or the connection is refused; unset/empty
+/// stays permissive for the single-node harness + backward compatibility.
+/// NodeIds are compared as hex strings so a malformed allowlist entry can
+/// never panic the accept loop.
+fn authorize_peer(conn: &iroh::endpoint::Connection) -> Result<()> {
+    let Ok(raw) = std::env::var(ALLOWED_UPSTAIRS_ENV) else {
+        return Ok(());
+    };
+    let allowed: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if allowed.is_empty() {
+        return Ok(());
+    }
+    let remote_hex = conn.remote_id().to_string();
+    if allowed.iter().any(|a| *a == remote_hex) {
+        Ok(())
+    } else {
+        anyhow::bail!("seed_iroh: refusing unauthorized Upstairs {remote_hex}")
+    }
 }
 
 fn hex32(s: &str) -> Result<[u8; 32]> {
