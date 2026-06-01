@@ -90,14 +90,11 @@ jobs:
             --no-default-features
           cargo build --release \
             -p crucible-nbd-server
-          # crucible-pantry: volume-maintenance HTTP service (plan §5).
-          cargo build --release \
-            -p crucible-pantry
 
       - name: Sanity-check artifacts
         run: |
           set -euo pipefail
-          for name in crucible-downstairs crucible-nbd-server crucible-pantry; do
+          for name in crucible-downstairs crucible-nbd-server; do
             test -f "target/release/${name}" \
               || { echo "missing target/release/${name}"; exit 1; }
             file "target/release/${name}"
@@ -111,7 +108,7 @@ jobs:
           FORK_SHA="${{ steps.meta.outputs.fork_sha }}"
           UPSTREAM_BASE_SHA="${{ steps.meta.outputs.upstream_base_sha }}"
           UPLOADED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          for name in crucible-downstairs crucible-nbd-server crucible-pantry; do
+          for name in crucible-downstairs crucible-nbd-server; do
             cp "target/release/${name}" "out/${name}"
             SIZE="$(stat -c%s "out/${name}")"
             SHA256="$(sha256sum "out/${name}" | awk '{print $1}')"
@@ -149,9 +146,6 @@ jobs:
             out/crucible-nbd-server
             out/crucible-nbd-server.sha256
             out/crucible-nbd-server.meta.json
-            out/crucible-pantry
-            out/crucible-pantry.sha256
-            out/crucible-pantry.meta.json
           body: |
             Seed iroh-transport build of Crucible.
 
@@ -200,7 +194,7 @@ jobs:
           : "${R2_ENDPOINT:?R2_ENDPOINT secret not set}"
           : "${R2_BUCKET:=seed-state}"
           S3="aws s3 --endpoint-url $R2_ENDPOINT --region auto"
-          for name in crucible-downstairs crucible-nbd-server crucible-pantry; do
+          for name in crucible-downstairs crucible-nbd-server; do
             $S3 cp "bin/${name}" "s3://${R2_BUCKET}/binaries/${name}"
             $S3 cp "bin/${name}" "s3://${R2_BUCKET}/binaries/${name}/current"
             $S3 cp "bin/${name}" "s3://${R2_BUCKET}/binaries/${name}/versions/${VID}/binary"
