@@ -79,7 +79,10 @@ jobs:
 
       - name: Build release binaries
         env:
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          # --cfg tokio_unstable is REQUIRED by oxide-tokio-rt (compile_error!
+          # otherwise). RUSTFLAGS fully replaces the workspace .cargo/config.toml
+          # rustflags, so it must be carried here alongside the mold linker flag.
+          RUSTFLAGS: "--cfg tokio_unstable -C link-arg=-fuse-ld=mold"
         run: |
           # downstairs: --no-default-features drops the SQLite extent
           # backend so the binary doesn't drag rusqlite/libsqlite3-sys
