@@ -122,4 +122,13 @@ pub trait CrucibleDownstairsRepairApi {
     async fn get_work(
         rqctx: RequestContext<Self::Context>,
     ) -> Result<HttpResponseOk<bool>, HttpError>;
+
+    /// Memory usage report
+    #[endpoint {
+        method = GET,
+        path = "/memory",
+    }]
+    async fn get_memory(
+        rqctx: RequestContext<Self::Context>,
+    ) -> Result<HttpResponseOk<latest::repair::MemoryReport>, HttpError>;
 }

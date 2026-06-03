@@ -43,6 +43,11 @@ impl CompletedJobs {
         self.completed.contains(&id)
     }
 
+    /// Returns the number of contiguous ranges stored
+    pub fn range_count(&self) -> usize {
+        self.completed.iter().count()
+    }
+
     /// Returns the list of completed jobs
     pub fn completed(&self) -> impl Iterator<Item = JobId> + use<'_> {
         self.completed

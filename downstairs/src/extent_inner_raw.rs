@@ -177,6 +177,10 @@ impl BlockBitArray {
         self.block_count as usize
     }
 
+    fn heap_size(&self) -> usize {
+        self.data.capacity() * size_of::<u32>()
+    }
+
     fn iter(&self) -> impl Iterator<Item = bool> + '_ {
         (0..self.block_count).map(|i| self[i])
     }
@@ -686,6 +690,12 @@ impl ExtentInner for RawInner {
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
         RawInner::get_block_contexts(self, block, count)
+    }
+
+    fn heap_size(&self) -> usize {
+        size_of_val(self)
+            + self.active_context.0.heap_size()
+            + self.block_dirty.heap_size()
     }
 }
 

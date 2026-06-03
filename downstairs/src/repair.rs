@@ -196,6 +196,21 @@ impl CrucibleDownstairsRepairApi for CrucibleDownstairsRepairImpl {
             .map(|_| HttpResponseOk(true))
             .map_err(|e| HttpError::for_internal_error(e.to_string()))
     }
+
+    /// Get memory usage report.
+    async fn get_memory(
+        rqctx: RequestContext<Self::Context>,
+    ) -> Result<
+        HttpResponseOk<crucible_downstairs_types::repair::MemoryReport>,
+        HttpError,
+    > {
+        let downstairs = &rqctx.context().downstairs;
+        downstairs
+            .memory_report()
+            .await
+            .map(HttpResponseOk)
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))
+    }
 }
 
 async fn get_a_file(
