@@ -134,13 +134,13 @@ usdt = "0.6.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
 
 # git
-omicron-common = { git = "https://github.com/oxidecomputer/omicron", rev = "fa779b29af7a8656657ccca6ec531446188d916c" }
-nexus-client = { git = "https://github.com/oxidecomputer/omicron", rev = "fa779b29af7a8656657ccca6ec531446188d916c" }
-internal-dns-resolver = { git = "https://github.com/oxidecomputer/omicron", rev = "fa779b29af7a8656657ccca6ec531446188d916c" }
-internal-dns-types = { git = "https://github.com/oxidecomputer/omicron", rev = "fa779b29af7a8656657ccca6ec531446188d916c" }
-omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", rev = "fa779b29af7a8656657ccca6ec531446188d916c" }
-oximeter = { git = "https://github.com/oxidecomputer/omicron", rev = "fa779b29af7a8656657ccca6ec531446188d916c" }
-oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", rev = "fa779b29af7a8656657ccca6ec531446188d916c" }
+omicron-common = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
+nexus-client = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
+internal-dns-resolver = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
+internal-dns-types = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
+omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
+oximeter = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
+oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
 
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", rev = "ef442ee4343e97b6d9c217d3e7533962fe7d7236" }
 
