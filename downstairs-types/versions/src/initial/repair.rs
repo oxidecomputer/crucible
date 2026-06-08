@@ -70,6 +70,13 @@ pub struct MemoryReport {
     pub tokio_worker_threads: usize,
     pub rayon_threads: usize,
 
+    // jemalloc allocator stats
+    pub jemalloc_allocated: usize,
+    pub jemalloc_active: usize,
+    pub jemalloc_resident: usize,
+    pub jemalloc_mapped: usize,
+    pub jemalloc_retained: usize,
+
     // Connection memory
     pub active_connections: usize,
     pub connections: Vec<ConnectionMemoryReport>,

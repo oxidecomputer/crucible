@@ -2606,6 +2606,20 @@ impl Downstairs {
             .collect();
         let extent_count = def.extent_count();
         let extent_meta_bytes = self.region.extent_meta_bytes();
+
+        // Advance jemalloc's stats epoch so we get fresh numbers
+        tikv_jemalloc_ctl::epoch::advance().ok();
+        let jemalloc_allocated =
+            tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(0);
+        let jemalloc_active =
+            tikv_jemalloc_ctl::stats::active::read().unwrap_or(0);
+        let jemalloc_resident =
+            tikv_jemalloc_ctl::stats::resident::read().unwrap_or(0);
+        let jemalloc_mapped =
+            tikv_jemalloc_ctl::stats::mapped::read().unwrap_or(0);
+        let jemalloc_retained =
+            tikv_jemalloc_ctl::stats::retained::read().unwrap_or(0);
+
         MemoryReport {
             extent_count,
             extent_size: def.extent_size().value,
@@ -2624,6 +2638,11 @@ impl Downstairs {
                 .metrics()
                 .num_workers(),
             rayon_threads: self.region.rayon_thread_count(),
+            jemalloc_allocated,
+            jemalloc_active,
+            jemalloc_resident,
+            jemalloc_mapped,
+            jemalloc_retained,
             active_connections: active.len(),
             connections,
         }
