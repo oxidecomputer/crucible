@@ -5797,6 +5797,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pantest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crucible-common",
+ "crucible-pantry-client",
+ "crucible-workspace-hack",
+ "dsc-client",
+ "slog",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "papergrid"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,328 @@
+// Copyright 2026 Oxide Computer Company
+
+use anyhow::{Result, bail};
+use clap::Parser;
+use crucible_pantry_client::Client;
+use crucible_pantry_client::types::{
+    AttachRequest, CrucibleOpts, VolumeConstructionRequest, VolumeInfo,
+};
+use dsc_client::Client as DscClient;
+use slog::{Logger, info, warn};
+use uuid::Uuid;
+
+use crucible_common::build_logger;
+
+#[derive(Debug, Parser)]
+#[clap(name = "pantest", about = "Crucible Pantry test program")]
+struct Args {
+    /// IP:Port for the pantry server
+    #[clap(short, long)]
+    pantry: std::net::SocketAddr,
+
+    /// IP:Port for a dsc server
+    #[clap(short, long)]
+    dsc: Option<std::net::SocketAddr>,
+
+    #[clap(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Debug, Parser)]
+enum Cmd {
+    /// Get pantry status
+    Status,
+
+    /// Attach a volume constructed from dsc info
+    Attach {
+        /// Generation number
+        #[clap(short, long, default_value_t = 1)]
+        generation: u64,
+    },
+
+    /// Detach a volume
+    Detach {
+        /// Volume ID to detach
+        volume_id: Uuid,
+    },
+
+    /// Get status of an attached volume
+    VolumeStatus {
+        /// Volume ID to query
+        volume_id: Uuid,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let log = build_logger();
+
+    let pantry_url = format!("http://{}", args.pantry);
+    let pantry = Client::new(&pantry_url);
+
+    match args.cmd {
+        Cmd::Status => cmd_status(&log, &pantry).await?,
+        Cmd::Attach { generation } => {
+            let dsc_addr = require_dsc(&args.dsc)?;
+            let dsc = DscClient::new(&format!("http://{}", dsc_addr));
+            cmd_attach(&log, &pantry, &dsc, dsc_addr, generation).await?;
+        }
+        Cmd::Detach { volume_id } => {
+            cmd_detach(&log, &pantry, volume_id).await?;
+        }
+        Cmd::VolumeStatus { volume_id } => {
+            cmd_volume_status(&log, &pantry, volume_id).await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn require_dsc(
+    dsc: &Option<std::net::SocketAddr>,
+) -> Result<std::net::SocketAddr> {
+    dsc.ok_or_else(|| anyhow::anyhow!("--dsc is required for this command"))
+}
+
+/// Query dsc for region info and downstairs targets, then build
+/// a VolumeConstructionRequest suitable for the pantry.
+async fn build_vcr_from_dsc(
+    log: &Logger,
+    dsc: &DscClient,
+    dsc_addr: std::net::SocketAddr,
+    generation: u64,
+) -> Result<(Uuid, VolumeConstructionRequest)> {
+    let ri = dsc
+        .dsc_get_region_info()
+        .await
+        .map_err(|e| anyhow::anyhow!("get region info: {}", e))?
+        .into_inner();
+
+    info!(
+        log, "Region info from dsc";
+        "block_size" => ri.block_size,
+        "blocks_per_extent" => ri.blocks_per_extent,
+        "extent_count" => ri.extent_count,
+    );
+
+    let region_count = dsc
+        .dsc_get_region_count()
+        .await
+        .map_err(|e| anyhow::anyhow!("get region count: {}", e))?
+        .into_inner();
+
+    if region_count < 3 {
+        bail!("Need at least 3 regions, dsc reports {}", region_count,);
+    }
+
+    let sv_count = region_count / 3;
+    let remainder = region_count % 3;
+    info!(
+        log,
+        "dsc has {} regions, {} sub-volumes", region_count, sv_count,
+    );
+    if remainder != 0 {
+        warn!(
+            log,
+            "{} regions will not be part of any sub-volume", remainder,
+        );
+    }
+
+    let volume_id = dsc
+        .dsc_get_uuid(0)
+        .await
+        .map_err(|e| anyhow::anyhow!("get uuid for cid 0: {}", e))?
+        .into_inner();
+
+    let mut sub_volumes = Vec::new();
+    let mut cid = 0u32;
+
+    for sv in 0..sv_count {
+        let mut targets = Vec::new();
+        for _ in 0..3 {
+            let port = dsc
+                .dsc_get_port(cid)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("get port for cid {}: {}", cid, e,)
+                })?
+                .into_inner();
+            let addr =
+                std::net::SocketAddr::new(dsc_addr.ip(), port.try_into()?);
+            targets.push(addr.to_string());
+            cid += 1;
+        }
+
+        info!(
+            log, "Sub-volume {sv}";
+            "targets" => ?targets,
+        );
+
+        sub_volumes.push(VolumeConstructionRequest::Region {
+            block_size: ri.block_size,
+            blocks_per_extent: ri.blocks_per_extent,
+            extent_count: ri.extent_count,
+            gen_: generation,
+            opts: CrucibleOpts {
+                id: Uuid::new_v4(),
+                target: targets,
+                lossy: false,
+                read_only: false,
+                flush_timeout: None,
+                key: None,
+                cert_pem: None,
+                key_pem: None,
+                root_cert_pem: None,
+                control: None,
+            },
+        });
+    }
+
+    let vcr = VolumeConstructionRequest::Volume {
+        id: volume_id,
+        block_size: ri.block_size,
+        sub_volumes,
+        read_only_parent: None,
+    };
+
+    Ok((volume_id, vcr))
+}
+
+async fn cmd_status(log: &Logger, pantry: &Client) -> Result<()> {
+    let status = pantry
+        .pantry_status()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get pantry status: {}", e))?
+        .into_inner();
+
+    info!(log, "Pantry status:");
+    info!(log, "  Volumes: {:?}", status.volumes);
+    info!(log, "  Job handles: {}", status.num_job_handles);
+
+    Ok(())
+}
+
+async fn cmd_attach(
+    log: &Logger,
+    pantry: &Client,
+    dsc: &DscClient,
+    dsc_addr: std::net::SocketAddr,
+    generation: u64,
+) -> Result<()> {
+    let (volume_id, vcr) =
+        build_vcr_from_dsc(log, dsc, dsc_addr, generation).await?;
+
+    let volume_id_str = volume_id.to_string();
+    info!(log, "Attaching volume {}", volume_id_str);
+
+    let result = pantry
+        .attach(
+            &volume_id_str,
+            &AttachRequest {
+                volume_construction_request: vcr,
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("attach failed: {}", e))?
+        .into_inner();
+
+    info!(log, "Attached volume"; "id" => result.id);
+
+    Ok(())
+}
+
+async fn cmd_detach(
+    log: &Logger,
+    pantry: &Client,
+    volume_id: Uuid,
+) -> Result<()> {
+    let volume_id_str = volume_id.to_string();
+    info!(log, "Detaching volume {}", volume_id_str);
+
+    pantry
+        .detach(&volume_id_str)
+        .await
+        .map_err(|e| anyhow::anyhow!("detach failed: {}", e))?;
+
+    info!(log, "Detached volume {}", volume_id_str);
+
+    Ok(())
+}
+
+async fn cmd_volume_status(
+    log: &Logger,
+    pantry: &Client,
+    volume_id: Uuid,
+) -> Result<()> {
+    let status = pantry
+        .volume_status(&volume_id.to_string())
+        .await
+        .map_err(|e| anyhow::anyhow!("volume status failed: {}", e))?
+        .into_inner();
+
+    info!(log, "Volume status for {}", volume_id);
+    info!(log, "  Active: {}", status.active);
+    info!(log, "  Seen active: {}", status.seen_active);
+    info!(log, "  Job handles: {}", status.num_job_handles);
+    print_volume_info(log, &status.info, 1);
+
+    Ok(())
+}
+
+fn print_volume_info(log: &Logger, info: &VolumeInfo, depth: usize) {
+    let indent = "  ".repeat(depth);
+    match info {
+        VolumeInfo::Volume {
+            sub_volumes,
+            read_only_parent,
+        } => {
+            info!(log, "{}Volume:", indent);
+            for (i, sv) in sub_volumes.iter().enumerate() {
+                info!(log, "{}  Sub-volume {}:", indent, i);
+                print_volume_info(log, sv, depth + 2);
+            }
+            if let Some(rop) = read_only_parent {
+                info!(log, "{}  Read-only parent:", indent);
+                print_volume_info(log, rop, depth + 2);
+            }
+        }
+        VolumeInfo::Upstairs {
+            upstairs_id,
+            session_id,
+            generation,
+            state,
+            read_only,
+            encrypted,
+            live_repair_in_progress,
+            reconcile_in_progress,
+            targets,
+            block_size,
+        } => {
+            info!(log, "{}Upstairs: {}", indent, upstairs_id);
+            info!(log, "{}  Session: {}", indent, session_id);
+            info!(log, "{}  Generation: {}", indent, generation);
+            info!(log, "{}  State: {:?}", indent, state);
+            info!(log, "{}  Read-only: {}", indent, read_only);
+            info!(log, "{}  Encrypted: {}", indent, encrypted);
+            if let Some(bs) = block_size {
+                info!(log, "{}  Block size: {}", indent, bs);
+            }
+            if *live_repair_in_progress {
+                warn!(log, "{}  Live repair in progress!", indent);
+            }
+            if *reconcile_in_progress {
+                warn!(log, "{}  Reconcile in progress!", indent);
+            }
+            for (i, ds) in targets.iter().enumerate() {
+                info!(
+                    log,
+                    "{}  Downstairs [{}]: {:?} addr={:?}",
+                    indent,
+                    i,
+                    ds.state,
+                    ds.target_addr,
+                );
+            }
+        }
+    }
+}
