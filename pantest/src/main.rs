@@ -131,19 +131,19 @@ async fn build_vcr_from_dsc(
         .into_inner();
 
     if region_count < 3 {
-        bail!("Need at least 3 regions, dsc reports {}", region_count,);
+        bail!("Need at least 3 regions, dsc reports {region_count}");
     }
 
     let sv_count = region_count / 3;
     let remainder = region_count % 3;
     info!(
         log,
-        "dsc has {} regions, {} sub-volumes", region_count, sv_count,
+        "dsc has {region_count} regions, {sv_count} sub-volumes",
     );
     if remainder != 0 {
         warn!(
             log,
-            "{} regions will not be part of any sub-volume", remainder,
+            "{remainder} regions will not be part of any sub-volume",
         );
     }
 
@@ -238,7 +238,7 @@ async fn cmd_attach(
             .await?;
 
     let volume_id_str = volume_id.to_string();
-    info!(log, "Attaching volume {}", volume_id_str);
+    info!(log, "Attaching volume {volume_id_str}");
 
     let result = pantry
         .attach(
@@ -262,11 +262,11 @@ async fn cmd_detach(
     volume_id: Uuid,
 ) -> Result<()> {
     let volume_id_str = volume_id.to_string();
-    info!(log, "Detaching volume {}", volume_id_str);
+    info!(log, "Detaching volume {volume_id_str}");
 
     pantry.detach(&volume_id_str).await.context("detach")?;
 
-    info!(log, "Detached volume {}", volume_id_str);
+    info!(log, "Detached volume {volume_id_str}");
 
     Ok(())
 }
@@ -282,7 +282,7 @@ async fn cmd_volume_status(
         .context("volume status")?
         .into_inner();
 
-    info!(log, "Volume status for {}", volume_id);
+    info!(log, "Volume status for {volume_id}");
     info!(log, "  Active: {}", status.active);
     info!(log, "  Seen active: {}", status.seen_active);
     info!(log, "  Job handles: {}", status.num_job_handles);
@@ -298,13 +298,13 @@ fn print_volume_info(log: &Logger, info: &VolumeInfo, depth: usize) {
             sub_volumes,
             read_only_parent,
         } => {
-            info!(log, "{}Volume:", indent);
+            info!(log, "{indent}Volume:");
             for (i, sv) in sub_volumes.iter().enumerate() {
-                info!(log, "{}  Sub-volume {}:", indent, i);
+                info!(log, "{indent}  Sub-volume {i}:");
                 print_volume_info(log, sv, depth + 2);
             }
             if let Some(rop) = read_only_parent {
-                info!(log, "{}  Read-only parent:", indent);
+                info!(log, "{indent}  Read-only parent:");
                 print_volume_info(log, rop, depth + 2);
             }
         }
@@ -320,27 +320,25 @@ fn print_volume_info(log: &Logger, info: &VolumeInfo, depth: usize) {
             targets,
             block_size,
         } => {
-            info!(log, "{}Upstairs: {}", indent, upstairs_id);
-            info!(log, "{}  Session: {}", indent, session_id);
-            info!(log, "{}  Generation: {}", indent, generation);
-            info!(log, "{}  State: {:?}", indent, state);
-            info!(log, "{}  Read-only: {}", indent, read_only);
-            info!(log, "{}  Encrypted: {}", indent, encrypted);
+            info!(log, "{indent}Upstairs: {upstairs_id}");
+            info!(log, "{indent}  Session: {session_id}");
+            info!(log, "{indent}  Generation: {generation}");
+            info!(log, "{indent}  State: {state:?}");
+            info!(log, "{indent}  Read-only: {read_only}");
+            info!(log, "{indent}  Encrypted: {encrypted}");
             if let Some(bs) = block_size {
-                info!(log, "{}  Block size: {}", indent, bs);
+                info!(log, "{indent}  Block size: {bs}");
             }
             if *live_repair_in_progress {
-                warn!(log, "{}  Live repair in progress!", indent);
+                warn!(log, "{indent}  Live repair in progress!");
             }
             if *reconcile_in_progress {
-                warn!(log, "{}  Reconcile in progress!", indent);
+                warn!(log, "{indent}  Reconcile in progress!");
             }
             for (i, ds) in targets.iter().enumerate() {
                 info!(
                     log,
-                    "{}  Downstairs [{}]: {:?} addr={:?}",
-                    indent,
-                    i,
+                    "{indent}  Downstairs [{i}]: {:?} addr={:?}",
                     ds.state,
                     ds.target_addr,
                 );
