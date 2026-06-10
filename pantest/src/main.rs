@@ -38,6 +38,11 @@ enum Cmd {
         #[clap(short, long)]
         volume_id: Option<Uuid>,
 
+        /// Encryption key (base64-encoded, 32 bytes).
+        /// Generate one with: $(openssl rand -base64 32)
+        #[clap(short, long)]
+        key: Option<String>,
+
         /// Generation number
         #[clap(short, long, default_value_t = 1)]
         generation: u64,
@@ -69,12 +74,21 @@ async fn main() -> Result<()> {
         Cmd::Attach {
             dsc,
             volume_id,
+            key,
             generation,
         } => {
             let volume_id = volume_id.unwrap_or_else(Uuid::new_v4);
-            let dsc_client = DscClient::new(&format!("http://{}", dsc));
-            cmd_attach(&log, &pantry, &dsc_client, dsc, volume_id, generation)
-                .await?;
+            let dsc_client = DscClient::new(&format!("http://{dsc}"));
+            cmd_attach(
+                &log,
+                &pantry,
+                &dsc_client,
+                dsc,
+                volume_id,
+                key,
+                generation,
+            )
+            .await?;
         }
         Cmd::Detach { volume_id } => {
             cmd_detach(&log, &pantry, volume_id).await?;
@@ -94,6 +108,7 @@ async fn build_vcr_from_dsc(
     dsc: &DscClient,
     dsc_addr: std::net::SocketAddr,
     volume_id: Uuid,
+    key: Option<String>,
     generation: u64,
 ) -> Result<VolumeConstructionRequest> {
     let ri = dsc
@@ -175,7 +190,7 @@ async fn build_vcr_from_dsc(
                 lossy: false,
                 read_only,
                 flush_timeout: None,
-                key: None,
+                key: key.clone(),
                 cert_pem: None,
                 key_pem: None,
                 root_cert_pem: None,
@@ -214,10 +229,15 @@ async fn cmd_attach(
     dsc: &DscClient,
     dsc_addr: std::net::SocketAddr,
     volume_id: Uuid,
+    key: Option<String>,
     generation: u64,
 ) -> Result<()> {
+    if key.is_some() {
+        info!(log, "Encryption enabled");
+    }
     let vcr =
-        build_vcr_from_dsc(log, dsc, dsc_addr, volume_id, generation).await?;
+        build_vcr_from_dsc(log, dsc, dsc_addr, volume_id, key, generation)
+            .await?;
 
     let volume_id_str = volume_id.to_string();
     info!(log, "Attaching volume {}", volume_id_str);
