@@ -1,6 +1,6 @@
 // Copyright 2026 Oxide Computer Company
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crucible_pantry_client::Client;
 use crucible_pantry_client::types::{
@@ -114,7 +114,7 @@ async fn build_vcr_from_dsc(
     let ri = dsc
         .dsc_get_region_info()
         .await
-        .map_err(|e| anyhow::anyhow!("get region info: {}", e))?
+        .context("get region info")?
         .into_inner();
 
     info!(
@@ -127,7 +127,7 @@ async fn build_vcr_from_dsc(
     let region_count = dsc
         .dsc_get_region_count()
         .await
-        .map_err(|e| anyhow::anyhow!("get region count: {}", e))?
+        .context("get region count")?
         .into_inner();
 
     if region_count < 3 {
@@ -150,7 +150,7 @@ async fn build_vcr_from_dsc(
     let read_only = dsc
         .dsc_get_read_only()
         .await
-        .map_err(|e| anyhow::anyhow!("get read_only: {}", e))?
+        .context("get read_only")?
         .into_inner();
 
     if read_only {
@@ -165,9 +165,7 @@ async fn build_vcr_from_dsc(
             let port = dsc
                 .dsc_get_port(cid)
                 .await
-                .map_err(|e| {
-                    anyhow::anyhow!("get port for cid {}: {}", cid, e,)
-                })?
+                .with_context(|| format!("get port for cid {cid}"))?
                 .into_inner();
             let addr =
                 std::net::SocketAddr::new(dsc_addr.ip(), port.try_into()?);
@@ -213,7 +211,7 @@ async fn cmd_status(log: &Logger, pantry: &Client) -> Result<()> {
     let status = pantry
         .pantry_status()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to get pantry status: {}", e))?
+        .context("get pantry status")?
         .into_inner();
 
     info!(log, "Pantry status:");
@@ -250,7 +248,7 @@ async fn cmd_attach(
             },
         )
         .await
-        .map_err(|e| anyhow::anyhow!("attach failed: {}", e))?
+        .context("attach")?
         .into_inner();
 
     info!(log, "Attached volume"; "id" => result.id);
@@ -266,10 +264,7 @@ async fn cmd_detach(
     let volume_id_str = volume_id.to_string();
     info!(log, "Detaching volume {}", volume_id_str);
 
-    pantry
-        .detach(&volume_id_str)
-        .await
-        .map_err(|e| anyhow::anyhow!("detach failed: {}", e))?;
+    pantry.detach(&volume_id_str).await.context("detach")?;
 
     info!(log, "Detached volume {}", volume_id_str);
 
@@ -284,7 +279,7 @@ async fn cmd_volume_status(
     let status = pantry
         .volume_status(&volume_id.to_string())
         .await
-        .map_err(|e| anyhow::anyhow!("volume status failed: {}", e))?
+        .context("volume status")?
         .into_inner();
 
     info!(log, "Volume status for {}", volume_id);
