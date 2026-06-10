@@ -134,6 +134,16 @@ async fn build_vcr_from_dsc(
         .map_err(|e| anyhow::anyhow!("get uuid for cid 0: {}", e))?
         .into_inner();
 
+    let read_only = dsc
+        .dsc_get_read_only()
+        .await
+        .map_err(|e| anyhow::anyhow!("get read_only: {}", e))?
+        .into_inner();
+
+    if read_only {
+        info!(log, "dsc reports read-only mode");
+    }
+
     let mut sub_volumes = Vec::new();
     let mut cid = 0u32;
 
@@ -167,7 +177,7 @@ async fn build_vcr_from_dsc(
                 id: Uuid::new_v4(),
                 target: targets,
                 lossy: false,
-                read_only: false,
+                read_only,
                 flush_timeout: None,
                 key: None,
                 cert_pem: None,

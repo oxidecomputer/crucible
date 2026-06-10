@@ -318,6 +318,31 @@
         }
       }
     },
+    "/readonly": {
+      "get": {
+        "summary": "Return true if downstairs were started read-only",
+        "operationId": "dsc_get_read_only",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Boolean",
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/regioncount": {
       "get": {
         "summary": "Get the count of regions.",
