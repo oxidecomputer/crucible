@@ -34,6 +34,10 @@ enum Cmd {
         #[clap(short, long)]
         dsc: std::net::SocketAddr,
 
+        /// Volume ID (auto-generated if not provided)
+        #[clap(short, long)]
+        volume_id: Option<Uuid>,
+
         /// Generation number
         #[clap(short, long, default_value_t = 1)]
         generation: u64,
@@ -62,9 +66,15 @@ async fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Status => cmd_status(&log, &pantry).await?,
-        Cmd::Attach { dsc, generation } => {
+        Cmd::Attach {
+            dsc,
+            volume_id,
+            generation,
+        } => {
+            let volume_id = volume_id.unwrap_or_else(Uuid::new_v4);
             let dsc_client = DscClient::new(&format!("http://{}", dsc));
-            cmd_attach(&log, &pantry, &dsc_client, dsc, generation).await?;
+            cmd_attach(&log, &pantry, &dsc_client, dsc, volume_id, generation)
+                .await?;
         }
         Cmd::Detach { volume_id } => {
             cmd_detach(&log, &pantry, volume_id).await?;
@@ -83,8 +93,9 @@ async fn build_vcr_from_dsc(
     log: &Logger,
     dsc: &DscClient,
     dsc_addr: std::net::SocketAddr,
+    volume_id: Uuid,
     generation: u64,
-) -> Result<(Uuid, VolumeConstructionRequest)> {
+) -> Result<VolumeConstructionRequest> {
     let ri = dsc
         .dsc_get_region_info()
         .await
@@ -121,12 +132,6 @@ async fn build_vcr_from_dsc(
         );
     }
 
-    let volume_id = dsc
-        .dsc_get_uuid(0)
-        .await
-        .map_err(|e| anyhow::anyhow!("get uuid for cid 0: {}", e))?
-        .into_inner();
-
     let read_only = dsc
         .dsc_get_read_only()
         .await
@@ -138,11 +143,10 @@ async fn build_vcr_from_dsc(
     }
 
     let mut sub_volumes = Vec::new();
-    let mut cid = 0u32;
 
     for sv in 0..sv_count {
         let mut targets = Vec::new();
-        for _ in 0..3 {
+        for cid in (sv * 3)..(sv * 3 + 3) {
             let port = dsc
                 .dsc_get_port(cid)
                 .await
@@ -153,7 +157,6 @@ async fn build_vcr_from_dsc(
             let addr =
                 std::net::SocketAddr::new(dsc_addr.ip(), port.try_into()?);
             targets.push(addr.to_string());
-            cid += 1;
         }
 
         info!(
@@ -188,7 +191,7 @@ async fn build_vcr_from_dsc(
         read_only_parent: None,
     };
 
-    Ok((volume_id, vcr))
+    Ok(vcr)
 }
 
 async fn cmd_status(log: &Logger, pantry: &Client) -> Result<()> {
@@ -210,10 +213,11 @@ async fn cmd_attach(
     pantry: &Client,
     dsc: &DscClient,
     dsc_addr: std::net::SocketAddr,
+    volume_id: Uuid,
     generation: u64,
 ) -> Result<()> {
-    let (volume_id, vcr) =
-        build_vcr_from_dsc(log, dsc, dsc_addr, generation).await?;
+    let vcr =
+        build_vcr_from_dsc(log, dsc, dsc_addr, volume_id, generation).await?;
 
     let volume_id_str = volume_id.to_string();
     info!(log, "Attaching volume {}", volume_id_str);
