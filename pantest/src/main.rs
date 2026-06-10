@@ -19,10 +19,6 @@ struct Args {
     #[clap(short, long)]
     pantry: std::net::SocketAddr,
 
-    /// IP:Port for a dsc server
-    #[clap(short, long)]
-    dsc: Option<std::net::SocketAddr>,
-
     #[clap(subcommand)]
     cmd: Cmd,
 }
@@ -34,6 +30,10 @@ enum Cmd {
 
     /// Attach a volume constructed from dsc info
     Attach {
+        /// IP:Port for a dsc server
+        #[clap(short, long)]
+        dsc: std::net::SocketAddr,
+
         /// Generation number
         #[clap(short, long, default_value_t = 1)]
         generation: u64,
@@ -62,10 +62,9 @@ async fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Status => cmd_status(&log, &pantry).await?,
-        Cmd::Attach { generation } => {
-            let dsc_addr = require_dsc(&args.dsc)?;
-            let dsc = DscClient::new(&format!("http://{}", dsc_addr));
-            cmd_attach(&log, &pantry, &dsc, dsc_addr, generation).await?;
+        Cmd::Attach { dsc, generation } => {
+            let dsc_client = DscClient::new(&format!("http://{}", dsc));
+            cmd_attach(&log, &pantry, &dsc_client, dsc, generation).await?;
         }
         Cmd::Detach { volume_id } => {
             cmd_detach(&log, &pantry, volume_id).await?;
@@ -76,12 +75,6 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn require_dsc(
-    dsc: &Option<std::net::SocketAddr>,
-) -> Result<std::net::SocketAddr> {
-    dsc.ok_or_else(|| anyhow::anyhow!("--dsc is required for this command"))
 }
 
 /// Query dsc for region info and downstairs targets, then build
