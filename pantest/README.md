@@ -14,10 +14,11 @@ separately.
 pantest -p 127.0.0.1:9999 status
 
 # Attach a volume (builds VCR from dsc region info)
-pantest -p 127.0.0.1:9999 -d 127.0.0.1:9998 attach
+pantest -p 127.0.0.1:9999 attach --dsc 127.0.0.1:9998
 
-# Attach with a specific generation number
-pantest -p 127.0.0.1:9999 -d 127.0.0.1:9998 attach --generation 5
+# Attach with a specific volume ID and generation number
+pantest -p 127.0.0.1:9999 attach --dsc 127.0.0.1:9998 \
+    --volume-id <uuid> --generation 5
 
 # Get volume status
 pantest -p 127.0.0.1:9999 volume-status <volume-uuid>
@@ -27,6 +28,6 @@ pantest -p 127.0.0.1:9999 detach <volume-uuid>
 ```
 
 The `attach` command queries dsc for region info, port numbers,
-and the volume UUID (from downstairs client ID 0), then
-constructs a VolumeConstructionRequest and sends it to the
-pantry.
+and read-only status, then constructs a
+VolumeConstructionRequest and sends it to the pantry. A volume
+ID is auto-generated if not provided.
