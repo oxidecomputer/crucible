@@ -20,6 +20,10 @@ pantest -p 127.0.0.1:9999 attach --dsc 127.0.0.1:9998
 pantest -p 127.0.0.1:9999 attach --dsc 127.0.0.1:9998 \
     --volume-id <uuid> --generation 5
 
+# Attach with encryption
+pantest -p 127.0.0.1:9999 attach --dsc 127.0.0.1:9998 \
+    --key $(openssl rand -base64 32)
+
 # Get volume status
 pantest -p 127.0.0.1:9999 volume-status <volume-uuid>
 
