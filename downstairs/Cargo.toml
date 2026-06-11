@@ -60,8 +60,6 @@ tracing-subscriber.workspace = true
 tracing.workspace = true
 usdt.workspace = true
 uuid.workspace = true
-tikv-jemallocator.workspace = true
-tikv-jemalloc-ctl.workspace = true
 crucible-workspace-hack.workspace = true
 
 [dev-dependencies]
