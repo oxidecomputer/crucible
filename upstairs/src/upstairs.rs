@@ -2082,7 +2082,7 @@ impl Upstairs {
                             self.log,
                             "deactivating client {i} in \
                              WaitQuorum during read-only \
-                             deactivation"
+                             reconciliation skip"
                         );
                         self.downstairs.clients[i].deactivate(&self.state);
                     }
@@ -4984,7 +4984,8 @@ pub(crate) mod test {
     #[tokio::test]
     async fn deactivate_ro_with_late_third_downstairs() {
         // Activate with only two downstairs
-        let mut up = Upstairs::test_default(None, true);
+        let ddef = RegionDefinition::default();
+        let mut up = Upstairs::test_default(Some(ddef), true);
         for cid in [ClientId::new(0), ClientId::new(1)] {
             for state in [
                 NegotiationStateData::Start,
@@ -5042,7 +5043,6 @@ pub(crate) mod test {
             NegotiationStateData::WaitForPromote,
             NegotiationStateData::WaitForRegionInfo,
             NegotiationStateData::GetExtentVersions,
-            NegotiationStateData::WaitQuorum(Default::default()),
         ] {
             up.ds_transition(
                 cid2,
@@ -5053,10 +5053,18 @@ pub(crate) mod test {
             );
         }
 
-        // Client 2 is now in WaitQuorum during deactivation. Call
-        // connect_ro_region_set which is the path triggered when a
-        // read-only downstairs reaches WaitQuorum.
-        up.connect_ro_region_set();
+        // Simulate an ExtentVersions message, which should put Client 2 into
+        // WaitQuorum.  It should then immediately shift to deactivating.
+        warn!(up.log, "about to send ExtentVersions message");
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(2),
+            action: ClientAction::Response(Message::ExtentVersions {
+                gen_numbers: vec![],
+                flush_numbers: vec![],
+                dirty_bits: vec![],
+            }),
+        }));
+        warn!(up.log, "done sending ExtentVersions message");
 
         // Client 2 should now be deactivating, not stuck.
         assert_eq!(
