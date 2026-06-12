@@ -1747,8 +1747,10 @@ dependencies = [
  "serde_json",
  "sha2",
  "slog",
+ "slog-term",
  "static_assertions",
  "subprocess",
+ "tempfile",
  "tokio",
  "uuid",
 ]

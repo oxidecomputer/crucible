@@ -35,4 +35,6 @@ crucible-workspace-hack.workspace = true
 
 [dev-dependencies]
 expectorate.workspace = true
+slog-term.workspace = true
 subprocess.workspace = true
+tempfile.workspace = true

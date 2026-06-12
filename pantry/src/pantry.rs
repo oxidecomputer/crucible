@@ -566,6 +566,17 @@ impl PantryJobs {
     }
 }
 
+enum PantryEntryState {
+    /// Volume construction and/or activation is in progress.
+    Attaching {
+        vcr: Box<VolumeConstructionRequest>,
+        job_id: Option<String>,
+    },
+
+    /// Volume is constructed and (at least at one point) active.
+    Attached(Arc<PantryEntry>),
+}
+
 /// Pantry stores opened Volumes in-memory
 pub struct Pantry {
     pub log: Logger,
@@ -573,7 +584,7 @@ pub struct Pantry {
     /// Store a Volume Construction Request and Volume, indexed by id. Use this
     /// Mutex -> Arc<Mutex> structure in order for multiple requests to act on
     /// multiple PantryEntry objects at the same time.
-    entries: Mutex<BTreeMap<String, Arc<PantryEntry>>>,
+    entries: Mutex<BTreeMap<String, PantryEntryState>>,
 
     /// Pantry can run background jobs on Volumes, and currently running jobs
     /// are stored here.
@@ -605,83 +616,167 @@ impl Pantry {
         volume_id: String,
         volume_construction_request: VolumeConstructionRequest,
     ) -> Result<(), CrucibleError> {
-        let mut entries = self.entries.lock().await;
-        if let Some(entry) = entries.get(&volume_id) {
-            // This function must be idempotent for the same inputs. If an entry
-            // at this ID exists already, compare the existing volume
-            // construction request, and return either Ok or conflict
+        // This function must be idempotent for the same inputs.
+        // Check existing state, and if no entry exists, insert
+        // an Attaching marker before releasing the lock so that
+        // concurrent callers see this volume is being worked on.
+        {
+            let mut entries = self.entries.lock().await;
+            match entries.get(&volume_id) {
+                Some(PantryEntryState::Attached(entry)) => {
+                    let inner = entry.inner.lock().await;
 
-            let inner = entry.inner.lock().await;
+                    if let Some(job_id) = &inner.activation_job_id {
+                        crucible_bail!(
+                            Unsupported,
+                            "existing entry for {volume_id} \
+                             with activation job id {job_id}",
+                        );
+                    }
 
-            if let Some(job_id) = &inner.activation_job_id {
-                crucible_bail!(
-                    Unsupported,
-                    "existing entry for {} with activation job id {}",
-                    volume_id,
-                    job_id,
-                );
-            }
+                    if inner.volume_construction_request
+                        == volume_construction_request
+                    {
+                        info!(
+                            self.log,
+                            "volume {volume_id} already an \
+                             entry, and has same volume \
+                             construction request, \
+                             returning OK",
+                        );
+                        return Ok(());
+                    } else {
+                        error!(
+                            self.log,
+                            "volume {volume_id} already an \
+                             entry, but has different volume \
+                             construction request, bailing!",
+                        );
+                        crucible_bail!(
+                            Unsupported,
+                            "Existing entry for {volume_id} \
+                             with different volume \
+                             construction request!",
+                        );
+                    }
+                }
 
-            if inner.volume_construction_request == volume_construction_request
-            {
-                info!(
-                    self.log,
-                    "volume {} already an entry, and has same volume \
-                    construction request, returning OK",
-                    volume_id,
-                );
+                // Another task is already constructing /
+                // activating this volume. Return an error so
+                // the caller can retry — on retry they will
+                // either hit the Attached idempotency check
+                // (if the first attach succeeded) or the None
+                // branch (if it failed and was cleaned up).
+                Some(PantryEntryState::Attaching {
+                    vcr,
+                    job_id: existing_job_id,
+                }) => {
+                    if **vcr == volume_construction_request {
+                        crucible_bail!(
+                            Unsupported,
+                            "volume {volume_id} attach \
+                             already in progress \
+                             (job_id: {existing_job_id:?})",
+                        );
+                    } else {
+                        crucible_bail!(
+                            Unsupported,
+                            "volume {volume_id} is being \
+                             attached with a different VCR \
+                             (job_id: {existing_job_id:?})",
+                        );
+                    }
+                }
 
-                return Ok(());
-            } else {
-                error!(
-                    self.log,
-                    "volume {} already an entry, but has different volume \
-                    construction request, bailing!",
-                    volume_id,
-                );
-
-                crucible_bail!(
-                    Unsupported,
-                    "Existing entry for {} with different volume construction \
-                    request!",
-                    volume_id,
-                );
+                // Reserve this volume_id with an Attaching
+                // marker so concurrent requests see that
+                // construction is in progress.
+                None => {
+                    entries.insert(
+                        volume_id.clone(),
+                        PantryEntryState::Attaching {
+                            vcr: Box::new(volume_construction_request.clone()),
+                            job_id: None,
+                        },
+                    );
+                }
             }
         }
 
-        // If no entry exists, then add one
         info!(
             self.log,
-            "no entry exists for volume {}, constructing...", volume_id
+            "no entry exists for volume {volume_id}, \
+             constructing...",
         );
 
+        // Construct and activate without holding the entries
+        // lock. On failure, clean up the Attaching marker.
         let volume = Volume::construct(
             volume_construction_request.clone(),
             None,
             self.log.clone(),
         )
-        .await?;
+        .await;
 
-        info!(self.log, "volume {} constructed ok", volume_id);
+        let volume = match volume {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    self.log,
+                    "volume {volume_id} construct \
+                     failed: {e}",
+                );
+                self.entries.lock().await.remove(&volume_id);
+                return Err(e.into());
+            }
+        };
 
-        volume.activate().await?;
+        info!(self.log, "volume {volume_id} constructed ok");
 
-        info!(self.log, "volume {} activated ok", volume_id);
+        if let Err(e) = volume.activate().await {
+            error!(
+                self.log,
+                "volume {volume_id} activate \
+                 failed: {e}",
+            );
+            self.entries.lock().await.remove(&volume_id);
+            return Err(e);
+        }
 
-        entries.insert(
-            volume_id.clone(),
-            Arc::new(PantryEntry {
-                log: self.log.new(o!("volume" => volume_id.clone())),
-                volume,
-                inner: Mutex::new(PantryEntryInner {
-                    volume_construction_request,
-                    active_observation: ActiveObservation::SawActive,
-                    activation_job_id: None,
-                }),
-            }),
-        );
+        info!(self.log, "volume {volume_id} activated ok");
 
-        info!(self.log, "volume {} constructed and inserted ok", volume_id);
+        // Verify our Attaching marker is still present. Nothing
+        // should remove it (detach rejects Attaching entries
+        // and waits for attach to finish or fail first), but
+        // check defensively in case the code evolves.
+        let mut entries = self.entries.lock().await;
+        match entries.get(&volume_id) {
+            Some(PantryEntryState::Attaching { .. }) => {
+                entries.insert(
+                    volume_id.clone(),
+                    PantryEntryState::Attached(Arc::new(PantryEntry {
+                        log: self.log.new(o!("volume" => volume_id.clone())),
+                        volume,
+                        inner: Mutex::new(PantryEntryInner {
+                            volume_construction_request,
+                            active_observation: ActiveObservation::SawActive,
+                            activation_job_id: None,
+                        }),
+                    })),
+                );
+            }
+            _ => {
+                drop(entries);
+                let _ = volume.deactivate().await;
+                crucible_bail!(
+                    Unsupported,
+                    "volume {volume_id} was removed \
+                     during attach",
+                );
+            }
+        }
+
+        info!(self.log, "volume {volume_id} constructed and inserted ok",);
 
         Ok(())
     }
@@ -693,87 +788,138 @@ impl Pantry {
         job_id: String,
         volume_construction_request: VolumeConstructionRequest,
     ) -> Result<(), CrucibleError> {
-        let mut entries = self.entries.lock().await;
-        if let Some(entry) = entries.get(&volume_id) {
-            // This function must be idempotent for the same inputs. If an entry
-            // at this ID exists already, compare the existing volume
-            // construction request, and return either Ok or conflict
+        // This function must be idempotent for the same inputs.
+        // Check existing state, and if no entry exists, insert
+        // an Attaching marker before releasing the lock.
+        {
+            let mut entries = self.entries.lock().await;
+            match entries.get(&volume_id) {
+                Some(PantryEntryState::Attached(entry)) => {
+                    let inner = entry.inner.lock().await;
 
-            let inner = entry.inner.lock().await;
+                    match &inner.activation_job_id {
+                        Some(entry_job_id) => {
+                            if *entry_job_id != job_id {
+                                crucible_bail!(
+                                    Unsupported,
+                                    "existing entry for \
+                                     {volume_id} with \
+                                     different activation \
+                                     job id {job_id}",
+                                );
+                            }
+                        }
 
-            match &inner.activation_job_id {
-                Some(entry_job_id) => {
-                    if *entry_job_id != job_id {
+                        None => {
+                            crucible_bail!(
+                                Unsupported,
+                                "existing entry for \
+                                 {volume_id} with no \
+                                 activation job id",
+                            );
+                        }
+                    }
+
+                    if inner.volume_construction_request
+                        == volume_construction_request
+                    {
+                        info!(
+                            self.log,
+                            "volume {volume_id} already an \
+                             entry, and has same volume \
+                             construction request, \
+                             returning OK",
+                        );
+                        return Ok(());
+                    } else {
+                        error!(
+                            self.log,
+                            "volume {volume_id} already an \
+                             entry, but has different volume \
+                             construction request, bailing!",
+                        );
                         crucible_bail!(
                             Unsupported,
-                            "existing entry for {} with different activation job id {}",
-                            volume_id,
-                            job_id,
+                            "Existing entry for {volume_id} \
+                             with different volume \
+                             construction request!",
+                        );
+                    }
+                }
+
+                Some(PantryEntryState::Attaching {
+                    vcr,
+                    job_id: existing_job_id,
+                }) => {
+                    if **vcr == volume_construction_request {
+                        crucible_bail!(
+                            Unsupported,
+                            "volume {volume_id} attach \
+                             already in progress \
+                             (job_id: {existing_job_id:?})",
+                        );
+                    } else {
+                        crucible_bail!(
+                            Unsupported,
+                            "volume {volume_id} is being \
+                             attached with a different VCR \
+                             (job_id: {existing_job_id:?})",
                         );
                     }
                 }
 
                 None => {
-                    // volume was attached with `attach`, not with this
-                    // function. return an error!
-
-                    crucible_bail!(
-                        Unsupported,
-                        "existing entry for {} with no activation job id",
-                        volume_id,
+                    entries.insert(
+                        volume_id.clone(),
+                        PantryEntryState::Attaching {
+                            vcr: Box::new(volume_construction_request.clone()),
+                            job_id: Some(job_id.clone()),
+                        },
                     );
                 }
             }
+        }
 
-            if inner.volume_construction_request == volume_construction_request
-            {
-                error!(
-                    self.log,
-                    "volume {} already an entry, and has same volume \
-                    construction request, returning OK",
-                    volume_id,
-                );
-
-                return Ok(());
-            } else {
-                error!(
-                    self.log,
-                    "volume {} already an entry, but has different volume \
-                    construction request, bailing!",
-                    volume_id,
-                );
-
-                crucible_bail!(
-                    Unsupported,
-                    "Existing entry for {} with different volume construction \
-                    request!",
-                    volume_id,
-                );
+        // To make this function idempotent, the user must
+        // supply the job id. If that job id already exists,
+        // clean up the Attaching marker and bail out.
+        {
+            let jobs = self.jobs.lock().await;
+            if jobs.contains_job(&job_id) {
+                self.entries.lock().await.remove(&volume_id);
+                crucible_bail!(Unsupported, "Existing job id {job_id}",);
             }
         }
 
-        // To make this function idempotent, the user must supply the job id. If
-        // that job id already exists, then bail out.
-        let mut jobs = self.jobs.lock().await;
-
-        if jobs.contains_job(&job_id) {
-            crucible_bail!(Unsupported, "Existing job id {}", job_id,);
-        }
-
-        // If no entry exists, then add one
         info!(
             self.log,
-            "no entry exists for volume {}, constructing...", volume_id
+            "no entry exists for volume {volume_id}, \
+             constructing...",
         );
 
+        // Construct without holding any locks. On failure,
+        // clean up the Attaching marker.
         let volume = Volume::construct(
             volume_construction_request.clone(),
             None,
             self.log.clone(),
         )
-        .await?;
+        .await;
 
-        info!(self.log, "volume {} constructed ok", volume_id);
+        let volume = match volume {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    self.log,
+                    "volume {volume_id} construct \
+                     failed: {e}",
+                );
+                self.entries.lock().await.remove(&volume_id);
+                return Err(e.into());
+            }
+        };
+
+        info!(self.log, "volume {volume_id} constructed ok");
 
         let entry = Arc::new(PantryEntry {
             log: self.log.new(o!("volume" => volume_id.clone())),
@@ -785,35 +931,70 @@ impl Pantry {
             }),
         });
 
-        entries.insert(volume_id.clone(), entry.clone());
+        // Replace the Attaching marker with the Attached
+        // entry and register the background activation job.
+        {
+            let mut entries = self.entries.lock().await;
+            match entries.get(&volume_id) {
+                Some(PantryEntryState::Attaching { .. }) => {
+                    entries.insert(
+                        volume_id.clone(),
+                        PantryEntryState::Attached(entry.clone()),
+                    );
+                }
+                _ => {
+                    crucible_bail!(
+                        Unsupported,
+                        "volume {volume_id} was removed \
+                         during attach",
+                    );
+                }
+            }
+        }
 
-        info!(self.log, "volume {} constructed and inserted ok", volume_id);
+        info!(self.log, "volume {volume_id} constructed and inserted ok",);
 
         let join_handle = tokio::spawn(async move { entry.activate().await });
 
-        info!(self.log, "volume {} activating in background", volume_id);
+        info!(self.log, "volume {volume_id} activating in background",);
 
-        jobs.insert(volume_id, job_id.clone(), join_handle);
-        drop(jobs);
+        let mut jobs = self.jobs.lock().await;
+        jobs.insert(volume_id, job_id, join_handle);
 
         Ok(())
     }
 
-    /// Return a PantryEntry if it's in the map, or a 404.
+    /// Return a PantryEntry if it's in the map and attached, a
+    /// 503 if it's still being attached, or a 404.
     pub(crate) async fn entry_get(
         &self,
         volume_id: String,
     ) -> Result<Arc<PantryEntry>, HttpError> {
         let entries = self.entries.lock().await;
         match entries.get(&volume_id) {
-            Some(entry) => {
+            Some(PantryEntryState::Attached(entry)) => {
                 let entry = entry.clone();
                 drop(entries);
                 Ok(entry)
             }
 
+            Some(PantryEntryState::Attaching { .. }) => {
+                info!(
+                    self.log,
+                    "volume {volume_id} is still being \
+                     attached",
+                );
+                Err(HttpError::for_unavail(
+                    None,
+                    format!(
+                        "volume {volume_id} attach in \
+                         progress",
+                    ),
+                ))
+            }
+
             None => {
-                error!(self.log, "volume {} not in pantry", volume_id);
+                error!(self.log, "volume {volume_id} not in pantry",);
                 Err(HttpError::for_not_found(None, volume_id))
             }
         }
@@ -827,39 +1008,33 @@ impl Pantry {
     ) -> Result<Arc<PantryEntry>, HttpError> {
         let entry = self.entry_get(volume_id.clone()).await?;
 
-        let inner = entry.inner.lock().await;
-        match &inner.active_observation {
-            ActiveObservation::NeverSawActive => {
-                // Return the entry so that it can receive commands before it is
-                // active.
-                drop(inner);
-                Ok(entry)
-            }
+        let saw_active = {
+            let inner = entry.inner.lock().await;
+            matches!(inner.active_observation, ActiveObservation::SawActive,)
+        };
 
-            ActiveObservation::SawActive => {
-                // Before returning the entry, check if something else activated
-                // the volume.
-                if !entry.volume.query_is_active().await? {
-                    // If it's not active, then return "410 Gone". If this
-                    // volume is no longer active then it's likely a Propolis
-                    // has activated and taken over from the Pantry. Do not
-                    // return 503 in this case, no operation will be retryable
-                    // if inactive.
-
-                    Err(HttpError::for_client_error(
-                        Some(format!(
-                            "volume {} is no longer active!",
-                            volume_id
-                        )),
-                        dropshot::ClientErrorStatusCode::GONE,
-                        format!("volume {} is no longer active!", volume_id),
-                    ))
-                } else {
-                    drop(inner);
-                    Ok(entry)
-                }
+        if saw_active {
+            // Check if something else activated the volume.
+            // If it's not active, return "410 Gone" — likely a
+            // Propolis has activated and taken over from the
+            // Pantry. Do not return 503 in this case, no
+            // operation will be retryable if inactive.
+            if !entry.volume.query_is_active().await? {
+                return Err(HttpError::for_client_error(
+                    Some(format!(
+                        "volume {volume_id} is no longer \
+                         active!",
+                    )),
+                    dropshot::ClientErrorStatusCode::GONE,
+                    format!(
+                        "volume {volume_id} is no longer \
+                         active!",
+                    ),
+                ));
             }
         }
+
+        Ok(entry)
     }
 
     pub async fn volume_status(
@@ -917,33 +1092,29 @@ impl Pantry {
         &self,
         job_id: String,
     ) -> Result<Result<()>, HttpError> {
-        let mut jobs = self.jobs.lock().await;
-
-        // Remove the job from the list of jobs, then await on the join handle.
-        // If this errors, then the job has failed in some way, so don't leave
-        // it in the list of jobs.
-        match jobs.remove(&job_id) {
-            Some(join_handle) => {
-                let result: Result<(), CrucibleError> =
-                    join_handle.await.map_err(|e| {
-                        HttpError::for_internal_error(e.to_string())
-                    })?;
-
-                jobs.remove(&job_id);
-
-                if let Err(e) = &result {
-                    error!(self.log, "job {} failed with {}", job_id, e);
+        let join_handle = {
+            let mut jobs = self.jobs.lock().await;
+            match jobs.remove(&job_id) {
+                Some(handle) => handle,
+                None => {
+                    error!(self.log, "job {job_id} not a pantry job",);
+                    return Err(HttpError::for_not_found(
+                        None,
+                        job_id.to_string(),
+                    ));
                 }
-
-                Ok(result.map_err(|e| e.into()))
             }
+        };
 
-            None => {
-                error!(self.log, "job {} not a pantry job", job_id);
+        let result: Result<(), CrucibleError> = join_handle
+            .await
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
-                Err(HttpError::for_not_found(None, job_id.to_string()))
-            }
+        if let Err(e) = &result {
+            error!(self.log, "job {job_id} failed with {e}",);
         }
+
+        Ok(result.map_err(|e| e.into()))
     }
 
     pub async fn import_from_url(
@@ -1031,25 +1202,288 @@ impl Pantry {
     /// Remove an entry from the pantry, and detach it. If detach fails, the
     /// entry is still gone but this function will return an error.
     pub async fn detach(&self, volume_id: String) -> Result<(), CrucibleError> {
-        let mut entries = self.entries.lock().await;
+        let entry = {
+            let mut entries = self.entries.lock().await;
+            info!(
+                self.log,
+                "detach removing entry for volume \
+                 {volume_id}",
+            );
+            match entries.get(&volume_id) {
+                Some(PantryEntryState::Attaching { .. }) => {
+                    // Can't detach until attach finishes or
+                    // fails.
+                    crucible_bail!(
+                        Unsupported,
+                        "volume {volume_id} attach in \
+                         progress, cannot detach",
+                    );
+                }
 
-        info!(self.log, "detach removing entry for volume {}", volume_id);
+                Some(PantryEntryState::Attached(_)) => {
+                    match entries.remove(&volume_id) {
+                        Some(PantryEntryState::Attached(entry)) => Some(entry),
+                        _ => unreachable!(),
+                    }
+                }
 
-        match entries.remove(&volume_id) {
+                None => None,
+            }
+        };
+
+        match entry {
             Some(entry) => {
-                info!(self.log, "detaching volume {}", volume_id);
+                info!(self.log, "detaching volume {volume_id}",);
                 entry.detach().await?;
-                drop(entry);
             }
 
             None => {
                 info!(
                     self.log,
-                    "detach did nothing, no entry for volume {}", volume_id
+                    "detach did nothing, no entry for \
+                     volume {volume_id}",
                 );
             }
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slog::Drain;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn test_logger() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+    }
+
+    fn file_vcr(path: &str) -> VolumeConstructionRequest {
+        VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: 512,
+            sub_volumes: vec![],
+            read_only_parent: Some(Box::new(VolumeConstructionRequest::File {
+                id: Uuid::new_v4(),
+                block_size: 512,
+                path: path.to_string(),
+            })),
+        }
+    }
+
+    fn temp_disk() -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&vec![0u8; 512]).unwrap();
+        f
+    }
+
+    #[tokio::test]
+    async fn attach_idempotent_same_vcr() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+        let disk = temp_disk();
+        let path = disk.path().to_str().unwrap();
+
+        let id = Uuid::new_v4();
+        let vcr = file_vcr(path);
+
+        pantry.attach(id.to_string(), vcr.clone()).await.unwrap();
+
+        // Same VCR again should succeed (idempotent).
+        pantry.attach(id.to_string(), vcr).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn attach_rejects_different_vcr() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+        let disk = temp_disk();
+        let path = disk.path().to_str().unwrap();
+
+        let id = Uuid::new_v4();
+        let vcr1 = file_vcr(path);
+
+        // Use a different UUID to make a different VCR pointing
+        // at the same file.
+        let vcr2 = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: 512,
+            sub_volumes: vec![],
+            read_only_parent: Some(Box::new(VolumeConstructionRequest::File {
+                id: Uuid::new_v4(),
+                block_size: 512,
+                path: path.to_string(),
+            })),
+        };
+
+        pantry.attach(id.to_string(), vcr1).await.unwrap();
+
+        let err = pantry.attach(id.to_string(), vcr2).await.unwrap_err();
+
+        assert!(
+            err.to_string().contains("different"),
+            "expected 'different' error, got: {err}",
+        );
+    }
+
+    #[tokio::test]
+    async fn construct_failure_cleans_up_attaching() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+
+        // Use a path that does not exist so construct fails.
+        let vcr = file_vcr("/no/such/file");
+        let id = Uuid::new_v4();
+
+        let err = pantry.attach(id.to_string(), vcr).await;
+        assert!(err.is_err());
+
+        // The Attaching marker must have been cleaned up.
+        // A fresh attach to the same volume_id should work —
+        // the map entry should be gone.
+        let entries = pantry.entries.lock().await;
+        assert!(
+            !entries.contains_key(&id.to_string()),
+            "Attaching marker was not cleaned up",
+        );
+    }
+
+    #[tokio::test]
+    async fn entry_get_returns_503_for_attaching() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+        let id = Uuid::new_v4().to_string();
+
+        // Manually insert an Attaching marker.
+        {
+            let mut entries = pantry.entries.lock().await;
+            entries.insert(
+                id.clone(),
+                PantryEntryState::Attaching {
+                    vcr: Box::new(file_vcr("/fake")),
+                    job_id: None,
+                },
+            );
+        }
+
+        let Err(err) = pantry.entry_get(id).await else {
+            panic!("expected error for Attaching entry");
+        };
+        assert_eq!(err.status_code, http::StatusCode::SERVICE_UNAVAILABLE,);
+    }
+
+    #[tokio::test]
+    async fn entry_get_returns_404_for_missing() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+        let id = Uuid::new_v4().to_string();
+
+        let Err(err) = pantry.entry_get(id).await else {
+            panic!("expected error for missing entry");
+        };
+        assert_eq!(err.status_code, http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn detach_rejects_attaching() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+        let id = Uuid::new_v4().to_string();
+
+        {
+            let mut entries = pantry.entries.lock().await;
+            entries.insert(
+                id.clone(),
+                PantryEntryState::Attaching {
+                    vcr: Box::new(file_vcr("/fake")),
+                    job_id: None,
+                },
+            );
+        }
+
+        let err = pantry.detach(id).await.unwrap_err();
+        assert!(
+            err.to_string().contains("cannot detach"),
+            "expected 'cannot detach' error, got: {err}",
+        );
+    }
+
+    #[tokio::test]
+    async fn detach_after_attach() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+        let disk = temp_disk();
+        let path = disk.path().to_str().unwrap();
+
+        let id = Uuid::new_v4().to_string();
+        let vcr = file_vcr(path);
+
+        pantry.attach(id.clone(), vcr).await.unwrap();
+        pantry.detach(id.clone()).await.unwrap();
+
+        // After detach, entry_get should return 404.
+        let Err(err) = pantry.entry_get(id).await else {
+            panic!("expected 404 after detach");
+        };
+        assert_eq!(err.status_code, http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn status_shows_attached_volume() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+        let disk = temp_disk();
+        let path = disk.path().to_str().unwrap();
+
+        let id = Uuid::new_v4().to_string();
+        let vcr = file_vcr(path);
+
+        pantry.attach(id.clone(), vcr).await.unwrap();
+
+        let status = pantry.status().await.unwrap();
+        assert!(status.volumes.contains(&id));
+    }
+
+    #[tokio::test]
+    async fn attach_activate_background_and_get_job() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+        let disk = temp_disk();
+        let path = disk.path().to_str().unwrap();
+
+        let volume_id = Uuid::new_v4().to_string();
+        let job_id = Uuid::new_v4().to_string();
+        let vcr = file_vcr(path);
+
+        pantry
+            .attach_activate_background(volume_id.clone(), job_id.clone(), vcr)
+            .await
+            .unwrap();
+
+        // Wait for the background job to finish (File VCR
+        // activation is instant).
+        let result = pantry.get_job_result(job_id).await.unwrap();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn attach_activate_background_idempotent() {
+        let pantry = Pantry::new(test_logger()).unwrap();
+        let disk = temp_disk();
+        let path = disk.path().to_str().unwrap();
+
+        let volume_id = Uuid::new_v4().to_string();
+        let job_id = Uuid::new_v4().to_string();
+        let vcr = file_vcr(path);
+
+        pantry
+            .attach_activate_background(
+                volume_id.clone(),
+                job_id.clone(),
+                vcr.clone(),
+            )
+            .await
+            .unwrap();
+
+        // Same volume_id + job_id + vcr should succeed.
+        pantry
+            .attach_activate_background(volume_id, job_id, vcr)
+            .await
+            .unwrap();
     }
 }
