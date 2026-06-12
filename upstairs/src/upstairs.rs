@@ -2028,7 +2028,8 @@ impl Upstairs {
     ///
     /// Read only upstairs don't have any reconciliation to do. If we are the
     /// first downstairs to join, then activate the upstairs.  Otherwise just
-    /// move downstairs in WaitQuorum to Active.
+    /// move downstairs in WaitQuorum to Active. If the upstairs is
+    /// deactivating, deactivate any downstairs in WaitQuorum.
     ///
     /// # Panics
     /// If this upstairs is not read only.
@@ -2064,6 +2065,28 @@ impl Upstairs {
                 // the active region set.
                 info!(self.log, "Added downstairs to the active Upstairs");
                 self.downstairs.on_reconciliation_skipped(false);
+            }
+            UpstairsState::Deactivating(..) => {
+                // A downstairs has reached WaitQuorum, but we are
+                // already deactivating. Deactivate any client in
+                // WaitQuorum so the deactivation can complete.
+                for i in ClientId::iter() {
+                    if matches!(
+                        self.downstairs.clients[i].state(),
+                        DsState::Connecting {
+                            state: NegotiationState::WaitQuorum,
+                            ..
+                        }
+                    ) {
+                        info!(
+                            self.log,
+                            "deactivating client {i} in \
+                             WaitQuorum during read-only \
+                             reconciliation skip"
+                        );
+                        self.downstairs.clients[i].deactivate(&self.state);
+                    }
+                }
             }
             _ => {
                 warn!(
@@ -4954,5 +4977,117 @@ pub(crate) mod test {
             brw.wait().await,
             Err(CrucibleError::ModifyingReadOnlyRegion),
         ));
+    }
+
+    /// Verify that a read-only upstairs that is deactivating can
+    /// handle a downstairs reaching WaitQuorum.
+    #[tokio::test]
+    async fn deactivate_ro_with_late_third_downstairs() {
+        // Activate with only two downstairs
+        let ddef = RegionDefinition::default();
+        let mut up = Upstairs::test_default(Some(ddef), true);
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            for state in [
+                NegotiationStateData::Start,
+                NegotiationStateData::WaitForPromote,
+                NegotiationStateData::WaitForRegionInfo,
+                NegotiationStateData::GetExtentVersions,
+                NegotiationStateData::WaitQuorum(Default::default()),
+            ] {
+                up.ds_transition(
+                    cid,
+                    DsStateData::Connecting {
+                        mode: ConnectionMode::New,
+                        state,
+                    },
+                );
+            }
+        }
+        let (_rx, done) = BlockOpWaiter::pair();
+        up.state = UpstairsState::GoActive(done);
+
+        up.connect_ro_region_set();
+        assert!(matches!(&up.state, &UpstairsState::Active));
+
+        // Now request deactivation.
+        let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
+            done: ds_done_res,
+        }));
+
+        // Clients 0 and 1 were Active, so they are now deactivating.
+        assert_eq!(
+            up.ds_state(ClientId::new(0)),
+            DsState::Stopping(ClientStopReason::Deactivated),
+        );
+        assert_eq!(
+            up.ds_state(ClientId::new(1)),
+            DsState::Stopping(ClientStopReason::Deactivated),
+        );
+
+        // Client 2 never activated, it's still in WaitConnect and
+        // the deactivation loop considers it already done.
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::WaitConnect,
+                mode: ConnectionMode::New,
+            },
+        );
+
+        // Now simulate client 2 negotiating to WaitQuorum while
+        // deactivation is in progress.
+        let cid2 = ClientId::new(2);
+        for state in [
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+        ] {
+            up.ds_transition(
+                cid2,
+                DsStateData::Connecting {
+                    mode: ConnectionMode::New,
+                    state,
+                },
+            );
+        }
+
+        // Simulate an ExtentVersions message, which should put Client 2 into
+        // WaitQuorum.  It should then immediately shift to deactivating.
+        warn!(up.log, "about to send ExtentVersions message");
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(2),
+            action: ClientAction::Response(Message::ExtentVersions {
+                gen_numbers: vec![],
+                flush_numbers: vec![],
+                dirty_bits: vec![],
+            }),
+        }));
+        warn!(up.log, "done sending ExtentVersions message");
+
+        // Client 2 should now be deactivating, not stuck.
+        assert_eq!(
+            up.ds_state(cid2),
+            DsState::Stopping(ClientStopReason::Deactivated),
+        );
+
+        // Complete deactivation for all three clients by having
+        // their IO tasks stop.
+        for cid in ClientId::iter() {
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: cid,
+                action: ClientAction::TaskStopped(
+                    ClientRunResult::RequestedStop,
+                ),
+            }));
+        }
+
+        // Deactivation is complete, upstairs transitions to
+        // Initializing.
+        assert!(matches!(up.state, UpstairsState::Initializing));
+
+        let reply = ds_done_brw.wait().await;
+        assert!(reply.is_ok());
     }
 }
