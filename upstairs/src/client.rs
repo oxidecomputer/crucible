@@ -2422,10 +2422,12 @@ impl ClientIoTask {
 
             let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-            let server_name = tokio_rustls::rustls::ServerName::try_from(
-                format!("downstairs{}", self.client_id).as_str(),
-            )
-            .unwrap();
+            let server_name =
+                tokio_rustls::rustls::pki_types::ServerName::try_from(format!(
+                    "downstairs{}",
+                    self.client_id
+                ))
+                .unwrap();
 
             let sock = connector.connect(server_name, tcp).await.unwrap();
             let (read, write) = tokio::io::split(sock);

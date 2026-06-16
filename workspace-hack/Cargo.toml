@@ -17,6 +17,7 @@ publish = false
 [dependencies]
 aho-corasick = { version = "1" }
 arrayvec = { version = "0.7", default-features = false, features = ["std"] }
+aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 bstr = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
@@ -58,6 +59,7 @@ regex-automata = { version = "0.4", default-features = false, features = ["dfa-o
 regex-syntax = { version = "0.8" }
 reqwest-594e8ee84c453af0 = { package = "reqwest", version = "0.13", features = ["blocking", "json", "query", "stream"] }
 reqwest-5ef9efb8ec2df382 = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rustls = { version = "0.23" }
 schemars = { version = "0.8", features = ["bytes", "chrono", "semver", "url", "uuid1"] }
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
@@ -157,7 +159,6 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 zeroize = { version = "1", features = ["std", "zeroize_derive"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
-aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
 dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
@@ -169,10 +170,10 @@ mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.31", default-features = false, features = ["signal", "term"] }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", features = ["aws-lc-rs", "ring"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
@@ -189,10 +190,9 @@ rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs",
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", features = ["aws-lc-rs", "ring"] }
 
 [target.aarch64-apple-darwin.dependencies]
-aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "ring", "tls12", "webpki-tokio"] }
@@ -201,9 +201,9 @@ mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.31", default-features = false, features = ["signal", "term"] }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", features = ["aws-lc-rs", "ring"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
@@ -216,10 +216,9 @@ rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", features = ["aws-lc-rs", "ring"] }
 
 [target.x86_64-unknown-illumos.dependencies]
-aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 dof-468e82937335b1c9 = { package = "dof", version = "0.3", default-features = false, features = ["des"] }
 dof-9fbad63c4bcf4a8f = { package = "dof", version = "0.4", default-features = false, features = ["des"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
@@ -234,10 +233,10 @@ nom = { version = "7" }
 regex = { version = "1" }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", features = ["aws-lc-rs", "ring"] }
 toml_edit = { version = "0.19", features = ["serde"] }
 
 [target.x86_64-unknown-illumos.build-dependencies]
@@ -258,7 +257,7 @@ rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs",
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", features = ["aws-lc-rs", "ring"] }
 toml_edit = { version = "0.19", features = ["serde"] }
 
 ### END HAKARI SECTION
