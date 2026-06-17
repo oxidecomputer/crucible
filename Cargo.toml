@@ -62,7 +62,7 @@ clearscreen = "4.0.5"
 crossterm = { version = "0.28.1" }
 crucible-workspace-hack = "0.1.0"  # see [patch.crates-io.crucible-workspace-hack] for more
 csv = "1.4.0"
-dropshot = { version = "0.17.0", features = [ "usdt-probes" ] }
+dropshot = { version = "0.17.1", features = [ "usdt-probes" ] }
 dropshot-api-manager = "0.7.0"
 dropshot-api-manager-types = "0.7.0"
 expectorate = "1.2.0"
@@ -101,7 +101,7 @@ rangemap = "1.7.1"
 reqwest = { version = "0.13", features = ["default", "blocking", "json", "stream"] }
 ringbuffer = "0.16.0"
 rusqlite = { version = "0.37" }
-rustls-pemfile = { version = "1.0.4" }
+rustls-pemfile = { version = "2.2.0" }
 schemars = { version = "0.8", features = [ "chrono", "uuid1" ] }
 semver = "1"
 serde = { version = "1", features = [ "derive" ] }
@@ -123,7 +123,7 @@ tempfile = "3"
 test-strategy = "0.4.5"
 thiserror = "2"
 tokio = { version = "1.40", features = ["full"] }
-tokio-rustls = { version = "0.24.1" }
+tokio-rustls = { version = "0.26.0" }
 tokio-test = "*"
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "1.0"
