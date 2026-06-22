@@ -87,10 +87,33 @@ if pgrep -fl -U "$(id -u)" crucible-pantry > /dev/null 2>&1; then
     exit 1
 fi
 
-dsc_log=/tmp/test_pantry_hang_dsc.log
-dsc2_log=/tmp/test_pantry_hang_dsc2.log
-pantry_log=/tmp/test_pantry_hang_pantry.log
-pantest_log=/tmp/test_pantry_hang_pantest.log
+REGION_ROOT=${REGION_ROOT:-/var/tmp}
+MY_REGION_ROOT="${REGION_ROOT}/test_pantry_hang"
+if [[ -d "$MY_REGION_ROOT" ]]; then
+    rm -rf "$MY_REGION_ROOT"
+fi
+mkdir -p "$MY_REGION_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make region root $MY_REGION_ROOT"
+    exit 1
+fi
+
+WORK_ROOT=${WORK_ROOT:-/tmp}
+TEST_ROOT="${WORK_ROOT}/test_pantry_hang"
+if [[ -d "$TEST_ROOT" ]]; then
+    # Delete previous test data
+    rm -r "$TEST_ROOT"
+fi
+mkdir -p "$TEST_ROOT"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to make test root $TEST_ROOT"
+    exit 1
+fi
+
+dsc_log=${TEST_ROOT}/test_pantry_hang_dsc.log
+dsc2_log=${TEST_ROOT}/test_pantry_hang_dsc2.log
+pantry_log=${TEST_ROOT}/test_pantry_hang_pantry.log
+pantest_log=${TEST_ROOT}/test_pantry_hang_pantest.log
 
 echo "" > "$dsc_log"
 echo "" > "$dsc2_log"
@@ -115,13 +138,15 @@ echo ""
 echo "Step 1: Create and start dsc 1 (3 downstairs)"
 if ! ${dsc} create --cleanup \
     --ds-bin "$cds" \
+    --region-dir "$MY_REGION_ROOT"
     --extent-count 15 \
     --extent-size 100 >> "$dsc_log" 2>&1; then
     echo "ERROR: Failed to create dsc 1 regions"
+    echo "Check $dsc_log"
     exit 1
 fi
 
-${dsc} start --ds-bin "$cds" >> "$dsc_log" 2>&1 &
+${dsc} start --ds-bin "$cds" --region-dir "$MY_REGION_ROOT" >> "$dsc_log" 2>&1 &
 dsc_pid=$!
 sleep 3
 
