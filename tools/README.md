@@ -2,9 +2,34 @@
 
 Various scripts used for Crucible
 
-## dtrace
+## dtrace directory
 A collection of dtrace scripts for use on Crucible.  A README.md in that
 directory contains more information.
+
+## Notes on tests to be run by the nightly framework.
+Tests that run under the nightly collection should respect the meaning of
+the following variables, and make use of them.
+WORK_ROOT    The top level path inside which test logs and result files will be.
+ROOT         The top level path for the crucible repo.
+BINDIR       The location from ROOT where we should expect various crucible
+             binaries to be found.
+REGION_SETS  The number of downstairs region sets (groups of three downstairs)
+             that a test will create, if the test supports it.
+REGION_ROOT  Top level directory where Downstairs regions will be created.
+
+Specific to each test, a test should assign these for themselves:
+TEST_ROOT       A specific subdirectory inside WORK_ROOT where all the
+                tests logs and result files will be.  This directory will be
+                re-created on each run and any older directories with the same
+                name will be destroyed.
+MY_REGION_ROOT  Specific subdirectory inside REGION_ROOT where this specific
+                tests region directories will be created.  This directory
+                will be destroyed and re-created on test startup.
+
+Having all these global variables allows a higher level framework to
+supply locations for test artifacts as well as clean up or archive results
+for tests in the event of failures.  Tests themselves should clean out or
+handle a previous runs results if they exist when a test starts.
 
 ## hammer-loop.sh
 A loop test that runs the crucible-hammer test in a loop.  It is expected
