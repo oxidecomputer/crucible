@@ -6151,7 +6151,7 @@ mod integration_tests {
             crucible_pantry_client::types::VolumeStatus {
                 active: true,
                 seen_active: true,
-                num_job_handles: 0,
+                num_job_handles: 1,
                 info: _,
             }
         ));
@@ -6185,7 +6185,7 @@ mod integration_tests {
             crucible_pantry_client::types::VolumeStatus {
                 active: false,
                 seen_active: true,
-                num_job_handles: 0,
+                num_job_handles: 1,
                 info: _,
             }
         ));
