@@ -483,9 +483,28 @@ impl PantryEntry {
     }
 }
 
+pub enum PantryJob {
+    /// This job has been started and is running in a spawned task
+    Running {
+        handle: JoinHandle<Result<(), CrucibleError>>,
+    },
+
+    /// The job has finished with the result
+    Finished { result: Result<(), CrucibleError> },
+}
+
+impl PantryJob {
+    pub fn is_finished(&self) -> bool {
+        match &self {
+            PantryJob::Running { handle } => handle.is_finished(),
+            PantryJob::Finished { .. } => true,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct PantryJobs {
-    job_handles: BTreeMap<String, JoinHandle<Result<(), CrucibleError>>>,
+    job_handles: BTreeMap<String, PantryJob>,
     volume_id_to_job_ids: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -505,10 +524,7 @@ impl PantryJobs {
         }
     }
 
-    pub fn get(
-        &self,
-        job_id: &str,
-    ) -> Option<&JoinHandle<Result<(), CrucibleError>>> {
+    pub fn get(&self, job_id: &str) -> Option<&PantryJob> {
         self.job_handles.get(job_id)
     }
 
@@ -521,7 +537,7 @@ impl PantryJobs {
         volume_id: String,
         job_id: String,
         handle: JoinHandle<Result<(), CrucibleError>>,
-    ) -> Option<JoinHandle<Result<(), CrucibleError>>> {
+    ) -> Option<PantryJob> {
         let inserted = self
             .volume_id_to_job_ids
             .entry(volume_id)
@@ -530,13 +546,11 @@ impl PantryJobs {
 
         assert!(inserted);
 
-        self.job_handles.insert(job_id, handle)
+        self.job_handles
+            .insert(job_id, PantryJob::Running { handle })
     }
 
-    pub fn remove(
-        &mut self,
-        job_id: &str,
-    ) -> Option<JoinHandle<Result<(), CrucibleError>>> {
+    pub fn remove(&mut self, job_id: &str) -> Option<PantryJob> {
         // Does this job exist?
         let job = self.job_handles.remove(job_id);
 
@@ -600,90 +614,40 @@ impl Pantry {
         })
     }
 
+    /// Perform an attach and wait for activation to complete. This function
+    /// must be idempotent for repeated requests.
     pub async fn attach(
         &self,
         volume_id: String,
         volume_construction_request: VolumeConstructionRequest,
-    ) -> Result<(), CrucibleError> {
-        let mut entries = self.entries.lock().await;
-        if let Some(entry) = entries.get(&volume_id) {
-            // This function must be idempotent for the same inputs. If an entry
-            // at this ID exists already, compare the existing volume
-            // construction request, and return either Ok or conflict
+    ) -> Result<(), HttpError> {
+        self.attach_activate_background(
+            volume_id.clone(),
+            volume_id.clone(), // use as job_id
+            volume_construction_request,
+        )
+        .await
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
-            let inner = entry.inner.lock().await;
+        loop {
+            let is_finished = self.is_job_finished(volume_id.clone()).await?;
 
-            if let Some(job_id) = &inner.activation_job_id {
-                crucible_bail!(
-                    Unsupported,
-                    "existing entry for {} with activation job id {}",
-                    volume_id,
-                    job_id,
-                );
+            if is_finished {
+                break;
             }
 
-            if inner.volume_construction_request == volume_construction_request
-            {
-                info!(
-                    self.log,
-                    "volume {} already an entry, and has same volume \
-                    construction request, returning OK",
-                    volume_id,
-                );
-
-                return Ok(());
-            } else {
-                error!(
-                    self.log,
-                    "volume {} already an entry, but has different volume \
-                    construction request, bailing!",
-                    volume_id,
-                );
-
-                crucible_bail!(
-                    Unsupported,
-                    "Existing entry for {} with different volume construction \
-                    request!",
-                    volume_id,
-                );
-            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        // If no entry exists, then add one
-        info!(
-            self.log,
-            "no entry exists for volume {}, constructing...", volume_id
-        );
+        match self.get_job_result(volume_id).await {
+            Ok(result) => match result {
+                Ok(()) => Ok(()),
 
-        let volume = Volume::construct(
-            volume_construction_request.clone(),
-            None,
-            self.log.clone(),
-        )
-        .await?;
+                Err(e) => Err(HttpError::for_internal_error(e.to_string())),
+            },
 
-        info!(self.log, "volume {} constructed ok", volume_id);
-
-        volume.activate().await?;
-
-        info!(self.log, "volume {} activated ok", volume_id);
-
-        entries.insert(
-            volume_id.clone(),
-            Arc::new(PantryEntry {
-                log: self.log.new(o!("volume" => volume_id.clone())),
-                volume,
-                inner: Mutex::new(PantryEntryInner {
-                    volume_construction_request,
-                    active_observation: ActiveObservation::SawActive,
-                    activation_job_id: None,
-                }),
-            }),
-        );
-
-        info!(self.log, "volume {} constructed and inserted ok", volume_id);
-
-        Ok(())
+            Err(e) => Err(e),
+        }
     }
 
     /// Perform attach, with activation done in a job.
@@ -727,7 +691,7 @@ impl Pantry {
 
             if inner.volume_construction_request == volume_construction_request
             {
-                error!(
+                info!(
                     self.log,
                     "volume {} already an entry, and has same volume \
                     construction request, returning OK",
@@ -902,15 +866,13 @@ impl Pantry {
         job_id: String,
     ) -> Result<bool, HttpError> {
         let jobs = self.jobs.lock().await;
-        match jobs.get(&job_id) {
-            Some(join_handle) => Ok(join_handle.is_finished()),
 
-            None => {
-                error!(self.log, "job {} not a pantry job", job_id);
+        let Some(job) = jobs.get(&job_id) else {
+            error!(self.log, "job {} not a pantry job", job_id);
+            return Err(HttpError::for_not_found(None, job_id.to_string()));
+        };
 
-                Err(HttpError::for_not_found(None, job_id.to_string()))
-            }
-        }
+        Ok(job.is_finished())
     }
 
     pub async fn get_job_result(
@@ -919,21 +881,37 @@ impl Pantry {
     ) -> Result<Result<()>, HttpError> {
         let mut jobs = self.jobs.lock().await;
 
-        // Remove the job from the list of jobs, then await on the join handle.
-        // If this errors, then the job has failed in some way, so don't leave
-        // it in the list of jobs.
-        match jobs.remove(&job_id) {
-            Some(join_handle) => {
-                let result: Result<(), CrucibleError> =
-                    join_handle.await.map_err(|e| {
-                        HttpError::for_internal_error(e.to_string())
-                    })?;
+        match jobs.job_handles.get_mut(&job_id) {
+            Some(job) => {
+                // Await on the join handle. If this errors, then the job has
+                // failed in some way.
+                let result = match job {
+                    PantryJob::Running { handle } => {
+                        let result: Result<(), CrucibleError> =
+                            handle.await.map_err(|e| {
+                                HttpError::for_internal_error(e.to_string())
+                            })?;
 
-                jobs.remove(&job_id);
+                        *job = PantryJob::Finished {
+                            result: result.clone(),
+                        };
 
-                if let Err(e) = &result {
-                    error!(self.log, "job {} failed with {}", job_id, e);
-                }
+                        if let Err(e) = &result {
+                            error!(self.log, "job {job_id} failed with {e}");
+                        }
+
+                        result
+                    }
+
+                    PantryJob::Finished { result } => {
+                        info!(
+                            self.log,
+                            "job {job_id} finished with {result:?}",
+                        );
+
+                        result.clone()
+                    }
+                };
 
                 Ok(result.map_err(|e| e.into()))
             }
@@ -1028,25 +1006,49 @@ impl Pantry {
         Ok(job_id)
     }
 
-    /// Remove an entry from the pantry, and detach it. If detach fails, the
-    /// entry is still gone but this function will return an error.
-    pub async fn detach(&self, volume_id: String) -> Result<(), CrucibleError> {
-        let mut entries = self.entries.lock().await;
+    /// Detach the entry. If deactivation is successful, remove the entry from
+    /// the pantry. If detach fails, the caller can try again.
+    pub async fn detach(&self, volume_id: String) -> Result<(), HttpError> {
+        // Grab the entry and deactivate without holding the entries lock.
+        let entry = {
+            let entries = self.entries.lock().await;
 
-        info!(self.log, "detach removing entry for volume {}", volume_id);
+            info!(self.log, "detach removing entry for volume {}", volume_id);
 
-        match entries.remove(&volume_id) {
-            Some(entry) => {
-                info!(self.log, "detaching volume {}", volume_id);
-                entry.detach().await?;
-                drop(entry);
+            match entries.get(&volume_id) {
+                Some(entry) => entry.clone(),
+
+                None => {
+                    info!(
+                        self.log,
+                        "detach did nothing, no entry for volume {}", volume_id
+                    );
+
+                    return Ok(());
+                }
+            }
+        };
+
+        info!(self.log, "detaching volume {}", volume_id);
+
+        match entry.detach().await {
+            Ok(()) | Err(CrucibleError::UpstairsInactive) => {
+                // Ok, remove from entries list
+                self.entries.lock().await.remove(&volume_id);
             }
 
-            None => {
-                info!(
-                    self.log,
-                    "detach did nothing, no entry for volume {}", volume_id
-                );
+            Err(CrucibleError::UpstairsDeactivating) => {
+                // Some other task already called deactivate but this isn't
+                // deactivated yet. Signal to the caller that they should retry
+                // to poll this deactivation.
+                return Err(HttpError::for_unavail(
+                    None,
+                    String::from("upstairs deactivating"),
+                ));
+            }
+
+            Err(e) => {
+                return Err(HttpError::for_internal_error(e.to_string()));
             }
         }
 
