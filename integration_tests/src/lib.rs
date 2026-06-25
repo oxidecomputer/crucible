@@ -5923,6 +5923,56 @@ mod integration_tests {
         client.detach(&volume_id.to_string()).await.unwrap();
     }
 
+    // Test attaching and detaching the same volume multiple times
+    #[tokio::test]
+    async fn test_pantry_attach_detach_multiple() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Start a pantry, get the client for it
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        client.detach(&volume_id.to_string()).await.unwrap();
+
+        // Attach it again
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: tds.opts(),
+                generation: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr).unwrap(),
+                    )
+                    .unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_volume_replace_vcr() {
         // Test of a replacement of a downstairs given two
