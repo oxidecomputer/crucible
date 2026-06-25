@@ -578,6 +578,16 @@ impl PantryJobs {
 
         job
     }
+
+    pub fn gc_jobs_for_volume_id(&mut self, volume_id: &str) {
+        let Some(job_ids) = self.volume_id_to_job_ids.remove(volume_id) else {
+            return;
+        };
+
+        for job_id in job_ids {
+            self.job_handles.remove(&job_id);
+        }
+    }
 }
 
 /// Pantry stores opened Volumes in-memory
@@ -1033,7 +1043,10 @@ impl Pantry {
 
         match entry.detach().await {
             Ok(()) | Err(CrucibleError::UpstairsInactive) => {
-                // Ok, remove from entries list
+                // Remove all jobs related to this volume
+                self.jobs.lock().await.gc_jobs_for_volume_id(&volume_id);
+
+                // Remove the volume from the entries list
                 self.entries.lock().await.remove(&volume_id);
             }
 
