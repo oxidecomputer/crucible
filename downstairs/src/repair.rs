@@ -5,8 +5,9 @@ use std::sync::Arc;
 use crucible_downstairs_api::*;
 use crucible_downstairs_types::repair::{ExtentFilePath, ExtentPath, FileType};
 use dropshot::{
-    Body, CompressionConfig, ConfigDropshot, HandlerTaskMode, HttpError,
-    HttpResponseOk, HttpServerStarter, Path, RequestContext,
+    Body, ClientSpecifiesVersionInHeader, CompressionConfig, ConfigDropshot,
+    HandlerTaskMode, HttpError, HttpResponseOk, Path, RequestContext,
+    VersionPolicy,
 };
 use hyper::{Response, StatusCode};
 
@@ -68,10 +69,17 @@ pub fn repair_main(
     /*
      * Set up the server.
      */
-    let server =
-        HttpServerStarter::new(&config_dropshot, api, context.into(), log)
-            .map_err(|error| format!("failed to create server: {}", error))?
-            .start();
+    let server = dropshot::ServerBuilder::new(api, context.into(), log.clone())
+        .config(config_dropshot)
+        .version_policy(VersionPolicy::Dynamic(Box::new(
+            ClientSpecifiesVersionInHeader::new(
+                omicron_common::api::VERSION_HEADER,
+                crucible_downstairs_api::latest_version(),
+            ),
+        )))
+        .build_starter()
+        .map_err(|error| format!("failed to create server: {}", error))?
+        .start();
     let local_addr = server.local_addr();
 
     let h = tokio::spawn(async move {
@@ -194,6 +202,21 @@ impl CrucibleDownstairsRepairApi for CrucibleDownstairsRepairImpl {
         downstairs
             .show_work()
             .map(|_| HttpResponseOk(true))
+            .map_err(|e| HttpError::for_internal_error(e.to_string()))
+    }
+
+    /// Get memory usage report.
+    async fn get_memory(
+        rqctx: RequestContext<Self::Context>,
+    ) -> Result<
+        HttpResponseOk<crucible_downstairs_types::repair::MemoryReport>,
+        HttpError,
+    > {
+        let downstairs = &rqctx.context().downstairs;
+        downstairs
+            .memory_report()
+            .await
+            .map(HttpResponseOk)
             .map_err(|e| HttpError::for_internal_error(e.to_string()))
     }
 }

@@ -1219,6 +1219,28 @@ impl Region {
     pub fn read_only(&self) -> bool {
         self.read_only
     }
+
+    pub fn heap_size(&self) -> usize {
+        let extents_vec = self.extents.capacity() * size_of::<ExtentState>();
+        let extents_inner: usize =
+            self.extents.iter().map(|e| e.heap_size()).sum();
+        let dirty_extents =
+            self.dirty_extents.capacity() * size_of::<ExtentId>();
+        let dir = self.dir.capacity();
+        extents_vec + extents_inner + dirty_extents + dir
+    }
+
+    pub fn extent_meta_bytes(&self) -> usize {
+        self.extents.iter().map(|e| e.heap_size()).sum()
+    }
+
+    pub fn dirty_extent_count(&self) -> usize {
+        self.dirty_extents.len()
+    }
+
+    pub fn rayon_thread_count(&self) -> usize {
+        self.pool.current_num_threads()
+    }
 }
 
 #[cfg(feature = "omicron-build")]
