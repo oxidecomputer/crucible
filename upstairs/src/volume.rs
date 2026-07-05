@@ -455,6 +455,55 @@ impl VolumeInner {
         sv_vec
     }
 
+    fn checked_lba_end(start: u64, length: u64) -> Result<u64, CrucibleError> {
+        let Some(end) = start.checked_add(length) else {
+            crucible_bail!(OffsetInvalid);
+        };
+
+        Ok(end)
+    }
+
+    fn lba_ranges_fully_cover(
+        start: u64,
+        end: u64,
+        ranges: impl Iterator<Item = Range<u64>>,
+    ) -> bool {
+        if start >= end {
+            return false;
+        }
+
+        let mut next = start;
+
+        for range in ranges {
+            if range.start != next
+                || range.end <= range.start
+                || range.end > end
+            {
+                return false;
+            }
+
+            next = range.end;
+        }
+
+        next == end
+    }
+
+    fn check_lba_range_is_fully_covered(
+        start: u64,
+        end: u64,
+        affected_sub_volumes: &[(Range<u64>, &SubVolume)],
+    ) -> Result<(), CrucibleError> {
+        if !Self::lba_ranges_fully_cover(
+            start,
+            end,
+            affected_sub_volumes.iter().map(|(range, _)| range.clone()),
+        ) {
+            crucible_bail!(OffsetInvalid);
+        }
+
+        Ok(())
+    }
+
     #[allow(clippy::if_same_then_else)]
     pub fn read_only_parent_for_lba_range(
         &self,
@@ -508,14 +557,17 @@ impl VolumeInner {
 
         self.check_data_size(data.len()).await?;
 
-        let affected_sub_volumes = self.sub_volumes_for_lba_range(
-            offset.0,
-            data.len() as u64 / self.block_size,
-        );
+        let block_count = data.len() as u64 / self.block_size;
+        let end = Self::checked_lba_end(offset.0, block_count)?;
 
-        if affected_sub_volumes.is_empty() {
-            crucible_bail!(OffsetInvalid);
-        }
+        let affected_sub_volumes =
+            self.sub_volumes_for_lba_range(offset.0, block_count);
+
+        Self::check_lba_range_is_fully_covered(
+            offset.0,
+            end,
+            &affected_sub_volumes,
+        )?;
 
         // TODO parallel dispatch!
         for (coverage, sub_volume) in affected_sub_volumes {
@@ -960,14 +1012,17 @@ impl BlockIO for VolumeInner {
 
         let bs = self.check_data_size(data.len()).await? as usize;
 
-        let affected_sub_volumes = self.sub_volumes_for_lba_range(
-            offset.0,
-            data.len() as u64 / self.block_size,
-        );
+        let block_count = data.len() as u64 / self.block_size;
+        let end = Self::checked_lba_end(offset.0, block_count)?;
 
-        if affected_sub_volumes.is_empty() {
-            crucible_bail!(OffsetInvalid);
-        }
+        let affected_sub_volumes =
+            self.sub_volumes_for_lba_range(offset.0, block_count);
+
+        Self::check_lba_range_is_fully_covered(
+            offset.0,
+            end,
+            &affected_sub_volumes,
+        )?;
 
         // TODO parallel dispatch!
         let mut data_index = 0;
@@ -1018,7 +1073,10 @@ impl BlockIO for VolumeInner {
                 * self.block_size as usize;
         }
 
-        assert_eq!(data.len(), data_index);
+        debug_assert_eq!(data.len(), data_index);
+        if data.len() != data_index {
+            crucible_bail!(OffsetInvalid);
+        }
 
         cdt::volume__read__done!(|| (cc, self.uuid));
         Ok(())
@@ -1189,60 +1247,15 @@ impl SubVolume {
     ) -> Option<Range<u64>> {
         assert!(length >= 1);
 
-        let end = start + length - 1;
+        let end = start.checked_add(length)?;
 
-        // No coverage:
-        //
-        // lba_range:                  |-------------|
-        // argument range:  |-------|
-        // argument range:                                  |--------|
-        //
+        let overlap_start = std::cmp::max(start, self.lba_range.start);
+        let overlap_end = std::cmp::min(end, self.lba_range.end);
 
-        if end < self.lba_range.start {
-            return None;
-        }
-
-        if start >= self.lba_range.end {
-            return None;
-        }
-
-        // Total coverage:
-        //
-        // lba_range:                  |-------------|
-        // argument range:              |-------|
-        // argument range:                 |--------|
-
-        if self.lba_range.contains(&start) && self.lba_range.contains(&end) {
-            return Some(start..(start + length));
-        }
-
-        // Partial coverage:
-
-        if self.lba_range.contains(&start) {
-            assert!(!self.lba_range.contains(&end));
-
-            // lba_range:                  |-------------|
-            // argument range:                         |--------|
-            // coverage:                               ^^^
-
-            Some(start..self.lba_range.end)
-        } else if self.lba_range.contains(&end) {
-            assert!(!self.lba_range.contains(&start));
-
-            // lba_range:                  |-------------|
-            // argument range:          |-------|
-            // coverage:                   ^^^^^^
-            Some(self.lba_range.start..(end + 1))
-        } else if start < self.lba_range.start && end > self.lba_range.end {
-            // lba_range:                  |-------------|
-            // argument range:          |--------------------|
-            // coverage:                   ^^^^^^^^^^^^^^^
-            Some(self.lba_range.clone())
+        if overlap_start < overlap_end {
+            Some(overlap_start..overlap_end)
         } else {
-            panic!(
-                "should never get here! {:?} {} {}",
-                self.lba_range, start, length
-            );
+            None
         }
     }
 }
@@ -6100,11 +6113,11 @@ mod test {
 
 #[cfg(test)]
 mod volume_partial_coverage_tests {
+    use crate::volume::SubVolume;
     use crate::{
         BlockIO, BlockIndex, Buffer, BytesMut, CrucibleError, InMemoryBlockIO,
         Volume, VolumeBuilder,
     };
-    use crate::volume::SubVolume;
     use slog::Logger;
     use std::sync::Arc;
     use uuid::Uuid;
