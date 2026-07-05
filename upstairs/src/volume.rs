@@ -6097,3 +6097,135 @@ mod test {
         Volume::construct(vcr, None, csl()).await.unwrap_err();
     }
 }
+
+#[cfg(test)]
+mod volume_partial_coverage_tests {
+    use crate::{
+        BlockIO, BlockIndex, Buffer, BytesMut, CrucibleError, InMemoryBlockIO,
+        Volume, VolumeBuilder,
+    };
+    use crate::volume::SubVolume;
+    use slog::Logger;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    async fn two_subvolume_volume(
+        block_size: usize,
+        blocks_per_subvolume: usize,
+    ) -> Volume {
+        let log = Logger::root(slog::Discard, slog::o!());
+        let mut builder = VolumeBuilder::new(block_size as u64, log);
+
+        for _ in 0..2 {
+            let block_io: Arc<dyn BlockIO + Send + Sync> =
+                Arc::new(InMemoryBlockIO::new(
+                    Uuid::new_v4(),
+                    block_size as u64,
+                    block_size * blocks_per_subvolume,
+                ));
+
+            builder.add_subvolume(block_io).await.unwrap();
+        }
+
+        builder.into()
+    }
+
+    #[test]
+    fn subvolume_lba_range_coverage_handles_request_covering_entire_subvolume()
+    {
+        let block_size = 512;
+        let block_io: Arc<dyn BlockIO + Send + Sync> =
+            Arc::new(InMemoryBlockIO::new(
+                Uuid::new_v4(),
+                block_size as u64,
+                2 * block_size,
+            ));
+
+        let sub_volume = SubVolume {
+            lba_range: 2..4,
+            block_io,
+        };
+
+        /*
+         * request:   [1, 5)
+         * subvolume: [2, 4)
+         *
+         * The request overlaps the entire subvolume.  The helper should return the
+         * subvolume's coverage range, not panic.
+         */
+        assert_eq!(sub_volume.lba_range_coverage(1, 4), Some(2..4));
+    }
+
+    #[tokio::test]
+    async fn write_rejects_partially_covered_range_before_dispatch() {
+        let block_size = 512;
+        let blocks_per_subvolume = 2;
+        let volume =
+            two_subvolume_volume(block_size, blocks_per_subvolume).await;
+
+        let last_valid_block =
+            BlockIndex((2 * blocks_per_subvolume - 1) as u64);
+
+        volume
+            .write(
+                last_valid_block,
+                BytesMut::from(&vec![0x11; block_size][..]),
+            )
+            .await
+            .unwrap();
+
+        let result = volume
+            .write(
+                last_valid_block,
+                BytesMut::from(&vec![0x22; 2 * block_size][..]),
+            )
+            .await;
+
+        assert!(matches!(result, Err(CrucibleError::OffsetInvalid)));
+
+        let mut after = Buffer::new(1, block_size);
+        volume.read(last_valid_block, &mut after).await.unwrap();
+
+        assert_eq!(&after[..], &vec![0x11; block_size][..]);
+    }
+
+    #[tokio::test]
+    async fn write_unwritten_rejects_partially_covered_range_before_dispatch() {
+        let block_size = 512;
+        let blocks_per_subvolume = 2;
+        let volume =
+            two_subvolume_volume(block_size, blocks_per_subvolume).await;
+
+        let last_valid_block =
+            BlockIndex((2 * blocks_per_subvolume - 1) as u64);
+
+        let result = volume
+            .write_unwritten(
+                last_valid_block,
+                BytesMut::from(&vec![0x33; 2 * block_size][..]),
+            )
+            .await;
+
+        assert!(matches!(result, Err(CrucibleError::OffsetInvalid)));
+    }
+
+    #[tokio::test]
+    async fn read_rejects_partially_covered_range() {
+        let block_size = 512;
+        let blocks_per_subvolume = 2;
+        let volume =
+            two_subvolume_volume(block_size, blocks_per_subvolume).await;
+
+        /*
+         * subvolumes:     [0, 2) [2, 4)
+         * requested read:    [1, 5)
+         *
+         * This intersects the existing subvolumes but is not fully covered by them.
+         */
+        let mut data = Buffer::new(4, block_size);
+        let result = volume.read(BlockIndex(1), &mut data).await;
+
+        assert!(matches!(result, Err(CrucibleError::OffsetInvalid)));
+        assert_eq!(&data[..], &vec![0; 4 * block_size][..]);
+    }
+}
