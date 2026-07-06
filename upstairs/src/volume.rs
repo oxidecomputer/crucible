@@ -6118,6 +6118,7 @@ mod volume_partial_coverage_tests {
         BlockIO, BlockIndex, Buffer, BytesMut, CrucibleError, InMemoryBlockIO,
         Volume, VolumeBuilder,
     };
+    use proptest::prelude::*;
     use slog::Logger;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -6143,6 +6144,22 @@ mod volume_partial_coverage_tests {
         builder.into()
     }
 
+    fn subvolume_for_test(lba_range: std::ops::Range<u64>) -> SubVolume {
+        let block_size = 512;
+        let block_count = lba_range.end - lba_range.start;
+        let block_io: Arc<dyn BlockIO + Send + Sync> =
+            Arc::new(InMemoryBlockIO::new(
+                Uuid::new_v4(),
+                block_size,
+                block_size as usize * block_count as usize,
+            ));
+
+        SubVolume {
+            lba_range,
+            block_io,
+        }
+    }
+
     #[test]
     fn subvolume_lba_range_coverage_handles_request_covering_entire_subvolume()
     {
@@ -6163,10 +6180,52 @@ mod volume_partial_coverage_tests {
          * request:   [1, 5)
          * subvolume: [2, 4)
          *
-         * The request overlaps the entire subvolume.  The helper should return the
+         * The request overlaps the entire subvolume. The helper should return the
          * subvolume's coverage range, not panic.
          */
         assert_eq!(sub_volume.lba_range_coverage(1, 4), Some(2..4));
+    }
+
+    proptest! {
+        #[test]
+        fn subvolume_lba_range_coverage_matches_block_intersection(
+            sub_start in 0u64..32,
+            sub_len in 1u64..32,
+            req_start in 0u64..64,
+            req_len in 1u64..64,
+        ) {
+            let sub_end = sub_start + sub_len;
+            let req_end = req_start + req_len;
+            let sub_volume = subvolume_for_test(sub_start..sub_end);
+
+            let universe_end = std::cmp::max(sub_end, req_end);
+
+            let covered: Vec<u64> = (0..universe_end)
+                .filter(|&block| {
+                    sub_start <= block
+                        && block < sub_end
+                        && req_start <= block
+                        && block < req_end
+                })
+                .collect();
+
+            let expected = covered.first().map(|first| {
+                let last = *covered.last().unwrap();
+                *first..(last + 1)
+            });
+
+            prop_assert_eq!(
+                sub_volume.lba_range_coverage(req_start, req_len),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn subvolume_lba_range_coverage_returns_none_when_request_end_overflows() {
+        let sub_volume = subvolume_for_test(2..4);
+
+        assert_eq!(sub_volume.lba_range_coverage(u64::MAX, 1), None,);
     }
 
     #[tokio::test]
