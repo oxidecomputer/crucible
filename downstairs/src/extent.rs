@@ -115,6 +115,10 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         &mut self,
         block_context: &DownstairsBlockContext,
     ) -> Result<(), CrucibleError>;
+
+    /// Returns the heap bytes allocated by this extent's in-memory
+    /// metadata (not the on-disk file data).
+    fn heap_size(&self) -> usize;
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash
@@ -715,6 +719,19 @@ impl Extent {
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
         self.inner.get_block_contexts(block, count)
+    }
+
+    pub fn heap_size(&self) -> usize {
+        self.inner.heap_size()
+    }
+}
+
+impl ExtentState {
+    pub fn heap_size(&self) -> usize {
+        match self {
+            ExtentState::Opened(extent) => extent.heap_size(),
+            ExtentState::Closed => 0,
+        }
     }
 }
 

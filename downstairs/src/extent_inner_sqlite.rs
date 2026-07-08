@@ -118,6 +118,10 @@ impl ExtentInner for SqliteInner {
             .unwrap()
             .set_dirty_and_block_context(block_context)
     }
+
+    fn heap_size(&self) -> usize {
+        0
+    }
 }
 
 impl SqliteInner {
