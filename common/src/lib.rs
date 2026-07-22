@@ -2,7 +2,7 @@
 use std::fmt;
 use std::fs::File;
 use std::hash::Hasher;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, IsTerminal, Read, Write};
 use std::path::Path;
 
 use ErrorKind::NotFound;
@@ -379,7 +379,7 @@ pub fn build_logger() -> slog::Logger {
 
 /// Build a logger with the specific log level
 pub fn build_logger_with_level(level: slog::Level) -> slog::Logger {
-    let main_drain = if atty::is(atty::Stream::Stdout) {
+    let main_drain = if std::io::stdout().is_terminal() {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
         slog_async::Async::new(drain)
