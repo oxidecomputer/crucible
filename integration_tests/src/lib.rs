@@ -1211,6 +1211,18 @@ mod integration_tests {
 
         assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
 
+        // Manually send a flush.  With only one downstairs running, the flush
+        // still completes: the two stopped downstairs have their jobs moved to
+        // Skipped, so the flush is complete on all clients and acks back to us.
+        // This should not hang.
+        volume.flush(None).await?;
+
+        // A second read after the flush should also complete successfully.
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
+        volume.read(BlockIndex(0), &mut buffer).await?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
+
         Ok(())
     }
 
