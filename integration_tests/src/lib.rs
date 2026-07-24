@@ -1187,19 +1187,19 @@ mod integration_tests {
         tds.downstairs2.stop().await?;
         tds.downstairs3.stop().await?;
 
+        // Put the region under sub_volumes (not as a read_only_parent) so that
+        // flushes are actually sent to it.
         let vcr = VolumeConstructionRequest::Volume {
             id: Uuid::new_v4(),
             block_size: BLOCK_SIZE as u64,
-            sub_volumes: vec![],
-            read_only_parent: Some(Box::new(
-                VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    generation: 1,
-                },
-            )),
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                generation: 1,
+            }],
+            read_only_parent: None,
         };
 
         let volume = Volume::construct(vcr, None, csl()).await?;
