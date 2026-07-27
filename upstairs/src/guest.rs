@@ -235,6 +235,16 @@ impl Guest {
         self.send_and_wait(|done| BlockOp::FaultDownstairs { client_id, done })
             .await
     }
+
+    /// Run the work that the automatic flush timer performs
+    ///
+    /// This is used in tests to deterministically trigger the internal flush
+    /// that a read-only guest flush intentionally skips.
+    #[cfg(test)]
+    pub async fn flush_check(&self) -> Result<(), CrucibleError> {
+        self.send_and_wait(|done| BlockOp::FlushCheck { done })
+            .await
+    }
 }
 
 #[async_trait]

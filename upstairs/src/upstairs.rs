@@ -1172,7 +1172,10 @@ impl Upstairs {
                     done.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
-
+                if self.cfg.read_only {
+                    done.send_ok(());
+                    return;
+                }
                 let n = self.downstairs.active_client_count();
                 let required = if snapshot_details.is_some() { 3 } else { 2 };
                 if n < required {
@@ -1203,6 +1206,20 @@ impl Upstairs {
                     &self.state,
                     crate::client::ClientFaultReason::RequestedFault,
                 );
+                done.send_ok(());
+            }
+
+            #[cfg(test)]
+            BlockOp::FlushCheck { done } => {
+                // Deterministically run the work the automatic flush timer
+                // does, so a test can trigger the internal flush that a
+                // read-only guest flush intentionally skips.  We omit the
+                // timer's has_jobs guard because the test is forcing this
+                // explicitly.
+                if self.need_flush {
+                    let io_guard = self.try_acquire_io(0);
+                    self.submit_flush(None, None, io_guard);
+                }
                 done.send_ok(());
             }
         }

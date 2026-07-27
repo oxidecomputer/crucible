@@ -2654,20 +2654,12 @@ async fn test_no_read_only_live_repair() {
     assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
     assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
 
-    // Flush to clean out skipped jobs
-    {
-        // We must `spawn` here because `flush` will wait for the
-        // response to come back before returning
-        let jh = harness.spawn(|guest| async move {
-            guest.flush(None).await.unwrap();
-        });
-
-        harness.ds2.ack_flush().await;
-        harness.ds3.ack_flush().await;
-
-        // Wait for the flush to come back
-        jh.await.unwrap();
-    }
+    // Flush to clean out skipped jobs.  A read-only guest flush is acked
+    // locally and never sent to the downstairs, so we trigger the internal
+    // (automatic) flush instead, which does reach the downstairs.
+    harness.guest.flush_check().await.unwrap();
+    harness.ds2.ack_flush().await;
+    harness.ds3.ack_flush().await;
 
     // Confirm that DS1 has been disconnected (and cannot reply to jobs)
     {
