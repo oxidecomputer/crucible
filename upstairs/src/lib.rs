@@ -1576,6 +1576,11 @@ pub(crate) enum BlockOp {
         client_id: ClientId,
         done: BlockRes<()>,
     },
+
+    #[cfg(test)]
+    FlushCheck {
+        done: BlockRes<()>,
+    },
 }
 
 /**
