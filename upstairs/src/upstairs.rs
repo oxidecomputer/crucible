@@ -1173,6 +1173,10 @@ impl Upstairs {
                     return;
                 }
                 if self.cfg.read_only {
+                    // While we ACK a guest sent flush here, The upstairs
+                    // internally will still send a flush to all connected RO
+                    // downstairs, which they are expected to handle.  This
+                    // internal flush serves to clean out completed jobs.
                     done.send_ok(());
                     return;
                 }
