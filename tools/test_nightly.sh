@@ -17,6 +17,11 @@ export BINDIR=${BINDIR:-$ROOT/target/release}
 echo "Nightly starts at $(date)" | tee "$output_file"
 echo "Running on $(git log -1 --no-color | head -20)" | tee -a "$output_file"
 echo "" >> "$output_file"
+echo "System info:" | tee -a "$output_file"
+psrinfo -v | grep "operates at" | head -1 | tee -a "$output_file"
+cpu_count=$(psrinfo  | wc -l | tr -d ' ')
+echo "CPU count: $cpu_count" | tee -a "$output_file"
+prtconf | grep Memory | tee -a "$output_file"
 echo "Environment settings are (Some may be unset):" | tee -a "$output_file"
 echo "BINDIR is: $BINDIR" | tee -a "$output_file"
 echo "REGION_ROOT is: $REGION_ROOT" | tee -a "$output_file"
