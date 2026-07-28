@@ -145,7 +145,9 @@ pub enum CrucibleError {
     #[error("Invalid downstairs replace {0}")]
     ReplaceRequestInvalid(String),
 
-    #[error("missing context slot for block {block} in extent {extent}")]
+    #[error(
+        "missing context slot for block {block} in extent {extent} ({extent:03X})"
+    )]
     MissingContextSlot { block: u64, extent: u32 },
 
     #[error("metadata deserialization failed: {0}")]
