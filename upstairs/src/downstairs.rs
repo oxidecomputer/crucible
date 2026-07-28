@@ -2044,12 +2044,21 @@ impl Downstairs {
             ) {
                 c.set_active();
             } else {
-                warn!(
-                    self.log,
-                    "client {} is in state {:?} not ready for activation",
-                    i,
-                    c.state(),
-                );
+                if matches!(c.state(), DsState::Active) {
+                    info!(
+                        self.log,
+                        "client {} is in state {:?}, Already active",
+                        i,
+                        c.state(),
+                    );
+                } else {
+                    warn!(
+                        self.log,
+                        "client {} is in state {:?} not ready for activation",
+                        i,
+                        c.state(),
+                    );
+                }
             }
         }
     }
