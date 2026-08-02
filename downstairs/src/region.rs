@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use futures::TryStreamExt;
+use rayon::prelude::*;
 
 use tracing::instrument;
 
@@ -321,6 +322,7 @@ impl Region {
         };
 
         region.open_extents()?;
+        region.validate_extents()?;
 
         Ok(region)
     }
@@ -372,6 +374,59 @@ impl Region {
         }
         self.check_extents();
 
+        Ok(())
+    }
+
+    /// Validate every raw extent by hashing all blocks and checking
+    /// against stored on-disk hashes. Runs up to 20 extents in
+    /// parallel. SQLite-backed extents (read-only snapshots) are
+    /// skipped.
+    fn validate_extents(&self) -> Result<()> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(20)
+            .build()
+            .expect("Failed to build validation thread pool");
+
+        let errors: Vec<_> = pool.install(|| {
+            self.extents
+                .par_iter()
+                .filter_map(|e| {
+                    let extent = match e {
+                        ExtentState::Opened(extent) => extent,
+                        ExtentState::Closed => {
+                            panic!("validate on closed extent!")
+                        }
+                    };
+
+                    // SQLite extents don't support validate and
+                    // are only used for read-only snapshots.
+                    if extent.read_only() {
+                        return None;
+                    }
+
+                    if let Err(err) = extent.validate() {
+                        Some((extent.number, err))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        });
+
+        if !errors.is_empty() {
+            for (number, err) in &errors {
+                error!(
+                    self.log,
+                    "validation failed for extent {number}: {err}",
+                );
+            }
+            bail!("Region failed to validate ({} extents bad)", errors.len());
+        }
+        info!(
+            self.log,
+            "validated {} extents on startup",
+            self.extents.len(),
+        );
         Ok(())
     }
 
