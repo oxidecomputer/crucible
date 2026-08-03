@@ -1,4 +1,4 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 #[cfg(test)]
 mod integration_tests {
@@ -11,8 +11,12 @@ mod integration_tests {
     use base64::{Engine, engine};
     use crucible::volume::VolumeBuilder;
     use crucible::*;
+    use crucible_client_types::DownstairsInfo;
+    use crucible_client_types::DownstairsInfoStatus;
     use crucible_client_types::RegionExtentInfo;
+    use crucible_client_types::UpstairsInfoStatus;
     use crucible_client_types::VolumeConstructionRequest;
+    use crucible_client_types::VolumeInfo;
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
@@ -481,6 +485,17 @@ mod integration_tests {
                 .set_logger(csl())
                 .build()?;
             downstairs.clone_region(source).await
+        }
+
+        // Stop this downstairs, freeing the port it was listening on.  Used
+        // to simulate a downstairs that is not running.  The address that was
+        // assigned during spawn is still recorded in any CrucibleOpts we
+        // handed out, so the upstairs will try (and fail) to connect to it.
+        pub async fn stop(&mut self) -> Result<()> {
+            if let Some(downstairs) = self.downstairs.take() {
+                downstairs.stop().await?;
+            }
+            Ok(())
         }
 
         pub fn address(&self) -> SocketAddr {
@@ -1148,6 +1163,61 @@ mod integration_tests {
         volume.activate().await?;
 
         // Read one block: should be all 0x00
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
+        volume.read(BlockIndex(0), &mut buffer).await?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_just_read_one_downstairs() -> Result<()> {
+        // Create three read-only downstairs, but only leave one of them
+        // running.  A single read-only downstairs is enough to activate a
+        // read-only upstairs, so both activation and a read should succeed.
+        const BLOCK_SIZE: usize = 512;
+
+        // small(true) creates and starts all three downstairs read only.  We
+        // capture the opts (which record all three addresses) before stopping
+        // two of them, leaving only downstairs1 running.
+        let mut tds = DefaultTestDownstairsSet::small(true).await?;
+        let opts = tds.opts();
+
+        tds.downstairs2.stop().await?;
+        tds.downstairs3.stop().await?;
+
+        // Put the region under sub_volumes (not as a read_only_parent) so that
+        // flushes are actually sent to it.
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                generation: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Volume::construct(vcr, None, csl()).await?;
+        volume.activate().await?;
+
+        // Read one block: should be all 0x00
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
+        volume.read(BlockIndex(0), &mut buffer).await?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
+
+        // Manually send a flush.  With only one downstairs running, the flush
+        // still completes: the two stopped downstairs have their jobs moved to
+        // Skipped, so the flush is complete on all clients and acks back to us.
+        // This should not hang.
+        volume.flush(None).await?;
+
+        // A second read after the flush should also complete successfully.
         let mut buffer = Buffer::new(1, BLOCK_SIZE);
         volume.read(BlockIndex(0), &mut buffer).await?;
 
@@ -5919,6 +5989,56 @@ mod integration_tests {
         client.detach(&volume_id.to_string()).await.unwrap();
     }
 
+    // Test attaching and detaching the same volume multiple times
+    #[tokio::test]
+    async fn test_pantry_attach_detach_multiple() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Start a pantry, get the client for it
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        client.detach(&volume_id.to_string()).await.unwrap();
+
+        // Attach it again
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: tds.opts(),
+                generation: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr).unwrap(),
+                    )
+                    .unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_volume_replace_vcr() {
         // Test of a replacement of a downstairs given two
@@ -6147,7 +6267,8 @@ mod integration_tests {
             crucible_pantry_client::types::VolumeStatus {
                 active: true,
                 seen_active: true,
-                num_job_handles: 0,
+                num_job_handles: 1,
+                info: _,
             }
         ));
 
@@ -6180,7 +6301,8 @@ mod integration_tests {
             crucible_pantry_client::types::VolumeStatus {
                 active: false,
                 seen_active: true,
-                num_job_handles: 0,
+                num_job_handles: 1,
+                info: _,
             }
         ));
     }
@@ -6267,6 +6389,272 @@ mod integration_tests {
 
         if !child.snapshot_exists(&snapshot_name)? {
             bail!("snapshot disappeared after second flush!");
+        }
+
+        Ok(())
+    }
+
+    /// Validate the VolumeInfo from the Pantry
+    #[tokio::test]
+    async fn test_pantry_get_volume_info() {
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
+        let opts = tds.opts();
+
+        // Start a pantry, get the client for it, then use it to bulk_write
+        // in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        let status =
+            client.volume_status(&volume_id.to_string()).await.unwrap();
+
+        let crucible_pantry_client::types::VolumeStatus { info, .. } =
+            status.into_inner();
+
+        use crucible_pantry_client::types::DownstairsInfoStatus;
+        use crucible_pantry_client::types::UpstairsInfoStatus;
+
+        let crucible_pantry_client::types::VolumeInfo::Volume {
+            sub_volumes,
+            ..
+        } = info
+        else {
+            panic!("wrong variant");
+        };
+
+        assert_eq!(sub_volumes.len(), 1);
+
+        let crucible_pantry_client::types::VolumeInfo::Upstairs {
+            state,
+            block_size: _,
+            upstairs_id: _,
+            session_id: _,
+            generation,
+            read_only,
+            encrypted,
+            reconcile_in_progress,
+            live_repair_in_progress,
+            targets,
+        } = &sub_volumes[0]
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(*state, UpstairsInfoStatus::Active);
+        assert_eq!(*generation, 1);
+        assert!(!(*read_only));
+        assert!(*encrypted);
+        assert!(!(*reconcile_in_progress));
+        assert!(!(*live_repair_in_progress));
+
+        for (i, target) in targets.iter().enumerate() {
+            let crucible_pantry_client::types::DownstairsInfo {
+                region_id: _,
+                target_addr,
+                repair_addr: _,
+                state,
+            } = &target;
+
+            assert_eq!(
+                target_addr.as_ref().map(|x| x.parse().unwrap()),
+                Some(opts.target[i])
+            );
+            assert_eq!(*state, DownstairsInfoStatus::Active);
+        }
+    }
+
+    /// Validate the VolumeInfo for multiple sub-volumes and a read-only parent
+    #[tokio::test]
+    async fn test_volume_info_multiple_subvolumes() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        let tds1 = DefaultTestDownstairsSet::small(false).await?;
+        let tds2 = DefaultTestDownstairsSet::big(false).await?;
+        let tds3 = DefaultTestDownstairsSet::problem().await?;
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![
+                VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds1.blocks_per_extent(),
+                    extent_count: tds1.extent_count(),
+                    opts: tds1.opts(),
+                    generation: 1,
+                },
+                VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds2.blocks_per_extent(),
+                    extent_count: tds2.extent_count(),
+                    opts: tds2.opts(),
+                    generation: 2,
+                },
+            ],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds3.blocks_per_extent(),
+                    extent_count: tds3.extent_count(),
+                    opts: tds3.opts(),
+                    generation: 3,
+                },
+            )),
+        };
+
+        let volume = Volume::construct(vcr, None, csl()).await?;
+
+        volume.activate().await?;
+
+        // `problem` is 10M, so the total size should be `small` + `big`,
+        // meaning 5120 + 50M.
+
+        let sv1 = tds1.blocks_per_extent()
+            * tds1.extent_count() as u64
+            * BLOCK_SIZE as u64;
+
+        let sv2 = tds2.blocks_per_extent()
+            * tds2.extent_count() as u64
+            * BLOCK_SIZE as u64;
+
+        assert_eq!(volume.total_size().await?, sv1 + sv2);
+
+        // Verify the VolumeInfo for all three region sets
+
+        let info = volume.query_volume_info().await?;
+
+        let VolumeInfo::Volume {
+            sub_volumes,
+            read_only_parent,
+        } = info
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(sub_volumes.len(), 2);
+        assert!(read_only_parent.is_some());
+
+        // `small` downstairs set
+
+        let VolumeInfo::Upstairs {
+            state,
+            block_size: _,
+            upstairs_id: _,
+            session_id: _,
+            generation,
+            read_only,
+            encrypted,
+            reconcile_in_progress,
+            live_repair_in_progress,
+            targets,
+        } = &sub_volumes[0]
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(*state, UpstairsInfoStatus::Active);
+        assert_eq!(*generation, 1);
+        assert!(!(*read_only));
+        assert!(*encrypted);
+        assert!(!(*reconcile_in_progress));
+        assert!(!(*live_repair_in_progress));
+
+        let opts = tds1.opts();
+
+        for (i, target) in targets.iter().enumerate() {
+            let DownstairsInfo {
+                region_id: _,
+                target_addr,
+                repair_addr: _,
+                state,
+            } = &target;
+
+            assert_eq!(target_addr.as_ref(), Some(&opts.target[i]));
+            assert_eq!(*state, DownstairsInfoStatus::Active);
+        }
+
+        // `big` downstairs set
+
+        let VolumeInfo::Upstairs {
+            state,
+            block_size: _,
+            upstairs_id: _,
+            session_id: _,
+            generation,
+            read_only,
+            encrypted,
+            reconcile_in_progress,
+            live_repair_in_progress,
+            targets,
+        } = &sub_volumes[1]
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(*state, UpstairsInfoStatus::Active);
+        assert_eq!(*generation, 2);
+        assert!(!(*read_only));
+        assert!(*encrypted);
+        assert!(!(*reconcile_in_progress));
+        assert!(!(*live_repair_in_progress));
+
+        let opts = tds2.opts();
+
+        for (i, target) in targets.iter().enumerate() {
+            let DownstairsInfo {
+                region_id: _,
+                target_addr,
+                repair_addr: _,
+                state,
+            } = &target;
+
+            assert_eq!(target_addr.as_ref(), Some(&opts.target[i]));
+            assert_eq!(*state, DownstairsInfoStatus::Active);
+        }
+
+        // `problem` downstairs set
+
+        let Some(read_only_parent) = read_only_parent else {
+            panic!("should be Some");
+        };
+
+        let VolumeInfo::Upstairs {
+            state,
+            block_size: _,
+            upstairs_id: _,
+            session_id: _,
+            generation,
+            read_only,
+            encrypted,
+            reconcile_in_progress,
+            live_repair_in_progress,
+            targets,
+        } = &*read_only_parent
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(*state, UpstairsInfoStatus::Active);
+        assert_eq!(*generation, 3);
+        assert!(!(*read_only));
+        assert!(*encrypted);
+        assert!(!(*reconcile_in_progress));
+        assert!(!(*live_repair_in_progress));
+
+        let opts = tds3.opts();
+
+        for (i, target) in targets.iter().enumerate() {
+            let DownstairsInfo {
+                region_id: _,
+                target_addr,
+                repair_addr: _,
+                state,
+            } = &target;
+
+            assert_eq!(target_addr.as_ref(), Some(&opts.target[i]));
+            assert_eq!(*state, DownstairsInfoStatus::Active);
         }
 
         Ok(())

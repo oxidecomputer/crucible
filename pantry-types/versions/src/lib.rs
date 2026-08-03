@@ -31,3 +31,5 @@ mod impls;
 pub mod latest;
 #[path = "initial/mod.rs"]
 pub mod v1;
+#[path = "volume_info_enum/mod.rs"]
+pub mod v2;

@@ -1,9 +1,12 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
+
 //! Data structures specific to Crucible's `struct Upstairs`
+
 use crate::{
     BlockOp, BlockRes, Buffer, ClientId, ClientMap, ConnectionMode,
-    CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
-    RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts, cdt,
+    CrucibleOpts, DsState, DsStateData, EncryptionContext, GuestIoHandle,
+    Message, NegotiationStateData, RegionDefinition, RegionDefinitionStatus,
+    SnapshotDetails, WQCounts, cdt,
     client::{
         ClientAction, ClientNegotiationFailed, ClientRunResult,
         ClientStopReason, NegotiationResult, NegotiationState,
@@ -19,6 +22,7 @@ use crate::{
     stats::UpStatOuter,
 };
 use crucible_client_types::RegionExtentInfo;
+use crucible_client_types::VolumeInfo;
 use crucible_common::{BlockIndex, CrucibleError};
 use serde::{Deserialize, Serialize};
 
@@ -1095,6 +1099,10 @@ impl Upstairs {
                     }
                 };
             }
+            BlockOp::QueryVolumeInfo { done } => {
+                let status = self.get_volume_info();
+                done.send_ok(status);
+            }
             // Testing options
             BlockOp::QueryExtentInfo { done } => {
                 // Yes, test only
@@ -1164,7 +1172,14 @@ impl Upstairs {
                     done.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
-
+                if self.cfg.read_only {
+                    // While we ACK a guest sent flush here, The upstairs
+                    // internally will still send a flush to all connected RO
+                    // downstairs, which they are expected to handle.  This
+                    // internal flush serves to clean out completed jobs.
+                    done.send_ok(());
+                    return;
+                }
                 let n = self.downstairs.active_client_count();
                 let required = if snapshot_details.is_some() { 3 } else { 2 };
                 if n < required {
@@ -1195,6 +1210,20 @@ impl Upstairs {
                     &self.state,
                     crate::client::ClientFaultReason::RequestedFault,
                 );
+                done.send_ok(());
+            }
+
+            #[cfg(test)]
+            BlockOp::FlushCheck { done } => {
+                // Deterministically run the work the automatic flush timer
+                // does, so a test can trigger the internal flush that a
+                // read-only guest flush intentionally skips.  We omit the
+                // timer's has_jobs guard because the test is forcing this
+                // explicitly.
+                if self.need_flush {
+                    let io_guard = self.try_acquire_io(0);
+                    self.submit_flush(None, None, io_guard);
+                }
                 done.send_ok(());
             }
         }
@@ -2020,7 +2049,8 @@ impl Upstairs {
     ///
     /// Read only upstairs don't have any reconciliation to do. If we are the
     /// first downstairs to join, then activate the upstairs.  Otherwise just
-    /// move downstairs in WaitQuorum to Active.
+    /// move downstairs in WaitQuorum to Active. If the upstairs is
+    /// deactivating, deactivate any downstairs in WaitQuorum.
     ///
     /// # Panics
     /// If this upstairs is not read only.
@@ -2056,6 +2086,28 @@ impl Upstairs {
                 // the active region set.
                 info!(self.log, "Added downstairs to the active Upstairs");
                 self.downstairs.on_reconciliation_skipped(false);
+            }
+            UpstairsState::Deactivating(..) => {
+                // A downstairs has reached WaitQuorum, but we are
+                // already deactivating. Deactivate any client in
+                // WaitQuorum so the deactivation can complete.
+                for i in ClientId::iter() {
+                    if matches!(
+                        self.downstairs.clients[i].state(),
+                        DsState::Connecting {
+                            state: NegotiationState::WaitQuorum,
+                            ..
+                        }
+                    ) {
+                        info!(
+                            self.log,
+                            "deactivating client {i} in \
+                             WaitQuorum during read-only \
+                             reconciliation skip"
+                        );
+                        self.downstairs.clients[i].deactivate(&self.state);
+                    }
+                }
             }
             _ => {
                 warn!(
@@ -2251,6 +2303,99 @@ impl Upstairs {
     #[cfg(test)]
     pub(crate) fn ds_state(&self, client_id: ClientId) -> DsState {
         self.downstairs.clients[client_id].state()
+    }
+
+    pub fn get_volume_info(&self) -> VolumeInfo {
+        use crucible_client_types::DownstairsInfoConnectionMode;
+        use crucible_client_types::DownstairsInfoNegotiationStatus;
+        use crucible_client_types::DownstairsInfoStatus;
+        use crucible_client_types::UpstairsInfoStatus;
+
+        let mut targets = Vec::with_capacity(3);
+
+        for client in self.downstairs.clients.iter() {
+            let state = match client.state_data() {
+                DsStateData::Connecting { state, mode } => {
+                    DownstairsInfoStatus::Connecting {
+                        state: match state {
+                            NegotiationStateData::WaitConnect(_) => {
+                                DownstairsInfoNegotiationStatus::WaitConnect
+                            }
+
+                            NegotiationStateData::Start
+                            | NegotiationStateData::WaitForPromote
+                            | NegotiationStateData::WaitForRegionInfo
+                            | NegotiationStateData::GetExtentVersions => {
+                                DownstairsInfoNegotiationStatus::Negotiating
+                            }
+
+                            NegotiationStateData::WaitQuorum(_) => {
+                                DownstairsInfoNegotiationStatus::WaitQuorum
+                            }
+
+                            NegotiationStateData::Reconcile => {
+                                DownstairsInfoNegotiationStatus::Reconcile
+                            }
+
+                            NegotiationStateData::LiveRepairReady(_) => {
+                                DownstairsInfoNegotiationStatus::LiveRepairReady
+                            }
+                        },
+
+                        mode: match mode {
+                            ConnectionMode::New => {
+                                DownstairsInfoConnectionMode::New
+                            }
+                            ConnectionMode::Offline => {
+                                DownstairsInfoConnectionMode::Offline
+                            }
+                            ConnectionMode::Faulted => {
+                                DownstairsInfoConnectionMode::Faulted
+                            }
+                            ConnectionMode::Replaced => {
+                                DownstairsInfoConnectionMode::Replaced
+                            }
+                        },
+                    }
+                }
+
+                DsStateData::Active => DownstairsInfoStatus::Active,
+
+                DsStateData::LiveRepair => DownstairsInfoStatus::LiveRepair,
+
+                DsStateData::Stopping(_) => DownstairsInfoStatus::Stopping,
+            };
+
+            let target = crucible_client_types::DownstairsInfo {
+                region_id: client.id(),
+                target_addr: client.target_addr(),
+                repair_addr: client.repair_addr(),
+                state,
+            };
+
+            targets.push(target);
+        }
+
+        VolumeInfo::Upstairs {
+            state: match self.state {
+                UpstairsState::Initializing => UpstairsInfoStatus::Initializing,
+                UpstairsState::GoActive(_) => UpstairsInfoStatus::GoActive,
+                UpstairsState::Active => UpstairsInfoStatus::Active,
+                UpstairsState::Deactivating(_) => {
+                    UpstairsInfoStatus::Deactivating
+                }
+                UpstairsState::Disabled(_) => UpstairsInfoStatus::Disabled,
+            },
+            block_size: self.ddef.get_def().map(|ddef| ddef.block_size()),
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+            generation: self.cfg.generation(),
+            read_only: self.cfg.read_only,
+            encrypted: self.cfg.encrypted(),
+            reconcile_in_progress: self.downstairs.reconcile_in_progress(),
+            live_repair_in_progress: self.downstairs.live_repair_in_progress(),
+            targets,
+        }
     }
 }
 
@@ -4853,5 +4998,117 @@ pub(crate) mod test {
             brw.wait().await,
             Err(CrucibleError::ModifyingReadOnlyRegion),
         ));
+    }
+
+    /// Verify that a read-only upstairs that is deactivating can
+    /// handle a downstairs reaching WaitQuorum.
+    #[tokio::test]
+    async fn deactivate_ro_with_late_third_downstairs() {
+        // Activate with only two downstairs
+        let ddef = RegionDefinition::default();
+        let mut up = Upstairs::test_default(Some(ddef), true);
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            for state in [
+                NegotiationStateData::Start,
+                NegotiationStateData::WaitForPromote,
+                NegotiationStateData::WaitForRegionInfo,
+                NegotiationStateData::GetExtentVersions,
+                NegotiationStateData::WaitQuorum(Default::default()),
+            ] {
+                up.ds_transition(
+                    cid,
+                    DsStateData::Connecting {
+                        mode: ConnectionMode::New,
+                        state,
+                    },
+                );
+            }
+        }
+        let (_rx, done) = BlockOpWaiter::pair();
+        up.state = UpstairsState::GoActive(done);
+
+        up.connect_ro_region_set();
+        assert!(matches!(&up.state, &UpstairsState::Active));
+
+        // Now request deactivation.
+        let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
+            done: ds_done_res,
+        }));
+
+        // Clients 0 and 1 were Active, so they are now deactivating.
+        assert_eq!(
+            up.ds_state(ClientId::new(0)),
+            DsState::Stopping(ClientStopReason::Deactivated),
+        );
+        assert_eq!(
+            up.ds_state(ClientId::new(1)),
+            DsState::Stopping(ClientStopReason::Deactivated),
+        );
+
+        // Client 2 never activated, it's still in WaitConnect and
+        // the deactivation loop considers it already done.
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::WaitConnect,
+                mode: ConnectionMode::New,
+            },
+        );
+
+        // Now simulate client 2 negotiating to WaitQuorum while
+        // deactivation is in progress.
+        let cid2 = ClientId::new(2);
+        for state in [
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+        ] {
+            up.ds_transition(
+                cid2,
+                DsStateData::Connecting {
+                    mode: ConnectionMode::New,
+                    state,
+                },
+            );
+        }
+
+        // Simulate an ExtentVersions message, which should put Client 2 into
+        // WaitQuorum.  It should then immediately shift to deactivating.
+        warn!(up.log, "about to send ExtentVersions message");
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(2),
+            action: ClientAction::Response(Message::ExtentVersions {
+                gen_numbers: vec![],
+                flush_numbers: vec![],
+                dirty_bits: vec![],
+            }),
+        }));
+        warn!(up.log, "done sending ExtentVersions message");
+
+        // Client 2 should now be deactivating, not stuck.
+        assert_eq!(
+            up.ds_state(cid2),
+            DsState::Stopping(ClientStopReason::Deactivated),
+        );
+
+        // Complete deactivation for all three clients by having
+        // their IO tasks stop.
+        for cid in ClientId::iter() {
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: cid,
+                action: ClientAction::TaskStopped(
+                    ClientRunResult::RequestedStop,
+                ),
+            }));
+        }
+
+        // Deactivation is complete, upstairs transitions to
+        // Initializing.
+        assert!(matches!(up.state, UpstairsState::Initializing));
+
+        let reply = ds_done_brw.wait().await;
+        assert!(reply.is_ok());
     }
 }

@@ -1,4 +1,5 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
+
 use anyhow::bail;
 use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -39,7 +40,7 @@ pub enum CliMessage {
     Flush,
     // Run the generic test
     Generic(usize, bool, bool),
-    Info(VolumeInfo),
+    Info(VolumeExtentInfo),
     InfoPlease,
     IsActive,
     MyUuid(Uuid),
@@ -57,6 +58,8 @@ pub enum CliMessage {
     WriteUnwritten(usize),
     Unknown(u32, BytesMut),
     Uuid,
+    VolumeInfoPlease,
+    VolumeInfoJson(String),
 }
 
 #[derive(Debug)]
@@ -221,7 +224,7 @@ mod tests {
 
     #[test]
     fn rt_info() -> Result<()> {
-        let vi = VolumeInfo {
+        let vi = VolumeExtentInfo {
             block_size: 512,
             volumes: Vec::new(),
         };
@@ -312,6 +315,20 @@ mod tests {
     #[test]
     fn rt_generic() -> Result<()> {
         let input = CliMessage::Generic(2, true, true);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_volume_info_please() -> Result<()> {
+        let input = CliMessage::VolumeInfoPlease;
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_volume_info_json() -> Result<()> {
+        let input = CliMessage::VolumeInfoJson(r#"{"volume": {}}"#.to_string());
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

@@ -397,11 +397,13 @@ impl DownstairsClient {
                         !self.skipped_jobs.contains(x)
                             && repair_min_id.map(|r| *x >= r).unwrap_or(true)
                     });
-                    info!(
-                        self.log,
-                        " {ds_id} final dependency list {}",
-                        format_job_list(dependencies),
-                    );
+                    if !dependencies.is_empty() {
+                        info!(
+                            self.log,
+                            " {ds_id} final dependency list {}",
+                            format_job_list(dependencies),
+                        );
+                    }
                 }
             }
         }
@@ -1780,6 +1782,14 @@ impl DownstairsClient {
     pub(crate) fn id(&self) -> Option<Uuid> {
         self.region_uuid
     }
+
+    pub(crate) fn target_addr(&self) -> Option<SocketAddr> {
+        self.target_addr
+    }
+
+    pub(crate) fn repair_addr(&self) -> Option<SocketAddr> {
+        self.repair_addr
+    }
 }
 
 /// Tracks client negotiation progress
@@ -2412,10 +2422,12 @@ impl ClientIoTask {
 
             let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-            let server_name = tokio_rustls::rustls::ServerName::try_from(
-                format!("downstairs{}", self.client_id).as_str(),
-            )
-            .unwrap();
+            let server_name =
+                tokio_rustls::rustls::pki_types::ServerName::try_from(format!(
+                    "downstairs{}",
+                    self.client_id
+                ))
+                .unwrap();
 
             let sock = connector.connect(server_name, tcp).await.unwrap();
             let (read, write) = tokio::io::split(sock);
