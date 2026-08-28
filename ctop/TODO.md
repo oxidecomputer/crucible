@@ -16,6 +16,10 @@
 - [ ] Show visual indicator for which sessions are selected in the main list
 
 ### Normalization Improvements
+The table sparklines are always scaled to the busiest session on screen;
+'n' only affects the detail graph.  Whatever this turns into should
+probably cover both.
+
 - [ ] Change normalization toggle.
   - Make the same key rotate between the three options.
   - Rotate through
@@ -26,15 +30,32 @@
 ### Program improvements.
 - [ ] Allow recording of dtrace output to a file, live or just record mode.
 - [ ] Playback of recorded output file.
+  - `--dtrace-cmd "cat <file>"` already replays a captured file, but as
+    fast as it can be read.  What is missing is replaying at the rate
+    the records were produced.
 - [ ] Store more data points for each session during a live run.
 - [ ] Add an option to only run for a specific number of seconds then exit.
 - [ ] Add an option to keep the last state displayed, or, really, reproduce the
       final screen but after we have exited the curses window.
 - [ ] allow user to select which possible dtrace probes to display.
   - If job delta is not selected, then detailed graphs are not available.
+  - The formatting moved to cmon-common and a test checks every field's
+    header and row are the same width, so any field set will line up.
 - [ ] Allow some downstairs individual stats to be combined into a "sum", like
       connections for each downstairs summed into a single value.  Not all
       dtrace probes could do this, so give just options for ones we can.
+
+### Known issues
+- [ ] Esc in the table view redraws for nothing.  It only clears detail
+      mode, which is already off, but still reports that something
+      changed.
+- [ ] When the selected session expires, the replacement is picked using
+      the position it held before that pass removed anything.  If
+      sessions above it expired in the same pass, the cursor can land a
+      row or two from where it was.  It is clamped to the list, so the
+      worst case is a small jump.
+- [ ] ctop is only documented in tools/dtrace/README.md, under the
+      upstairs_raw.d entry.  It could use a page of its own.
 
 ### Test coverage
 The tests cover the pure functions: header and row formatting, the
