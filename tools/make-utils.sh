@@ -57,10 +57,12 @@ tar cvf ../../out/crucible-utils.tar \
 rm utils-info.txt
 popd
 
-# Add crucible-verify-raw
+# Add the utility binaries.  These are built by make-nightly.sh, which
+# runs before this script.
 pushd target/release
 tar -rf ../../out/crucible-utils.tar \
-    crucible-verify-raw
+    crucible-verify-raw \
+    ctop
 popd
 
 ls -l out/crucible-utils.tar

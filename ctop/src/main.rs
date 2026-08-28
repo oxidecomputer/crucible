@@ -3,28 +3,29 @@
 //! Standalone ctop - curses-based top-like display of crucible dtrace data
 
 use clap::Parser;
-use cmon_common::{DtraceDisplay, DtraceWrapper, short_state};
+use cmon_common::{
+    DtraceDisplay, DtraceWrapper, default_display_fields, format_header,
+    format_row,
+};
 use crossterm::{
-    cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{
-        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-        disable_raw_mode, enable_raw_mode,
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode,
     },
 };
 use crucible::DtraceInfo;
-use crucible_protocol::ClientId;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Direction, Layout},
     style::Color,
     widgets::canvas::{Canvas, Line, Points},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Row, Table, TableState},
 };
 use std::collections::{HashMap, VecDeque};
-use std::io::{self, Write};
+use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -39,12 +40,22 @@ use tokio::sync::{Notify, RwLock};
 /// - Sets strsize=2k for 2KB string buffers
 /// - Probes crucible_upstairs*:::up-status
 /// - Outputs JSON with pid and status
+///
+/// dtrace needs privileges to run, so ctop itself has to be started with
+/// them (`pfexec ctop`).  Without them dtrace exits immediately and the
+/// reason is reported on the status line.
 const DEFAULT_DTRACE_CMD: &str = r#"dtrace -Z -q -x strsize=2k -n 'crucible_upstairs*:::up-status { printf("{\"pid\":%d,\"status\":%s}\n", pid, json(copyinstr(arg1), "ok")); }'"#;
 
 /// Crucible top - monitor crucible upstairs via dtrace
 #[derive(Parser, Debug)]
 #[clap(name = "ctop", term_width = 80)]
-#[clap(about = "Curses-based crucible monitor", long_about = None)]
+#[clap(
+    about = "Curses-based crucible monitor",
+    long_about = "Curses-based crucible monitor.\n\n\
+                  Runs a dtrace command and displays the up-status probe \
+                  output from every crucible upstairs on the system.  \
+                  dtrace requires privileges, so run this as `pfexec ctop`."
+)]
 struct Args {
     /// Command to run to generate dtrace output
     #[clap(long, default_value = DEFAULT_DTRACE_CMD)]
@@ -54,6 +65,164 @@ struct Args {
 const STALE_THRESHOLD_SECS: u64 = 5;
 const REMOVE_THRESHOLD_SECS: u64 = 30;
 const MAX_DELTA_HISTORY: usize = 100;
+
+/// How often we look for keyboard input.  This only wakes the loop to
+/// drain the input queue; whether anything is redrawn is a separate
+/// decision made below.
+const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Floor between redraws driven by new dtrace records.  Each upstairs
+/// reports once a second, so on a sled running dozens of them the
+/// records arrive often enough to repaint the screen continuously.  The
+/// numbers still only change once a second, so there is nothing to see
+/// for the effort.
+const REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Redraw at least this often even when nothing has arrived, so the
+/// clock and the stale markers stay current.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How many trailing lines of the dtrace command's stderr to keep for
+/// reporting.  We only need enough to show why it gave up.
+const MAX_STDERR_LINES: usize = 5;
+
+/// What the dtrace command is doing.
+///
+/// An empty table is ambiguous: it means either that no upstairs is
+/// running or that dtrace never started.  The latter is easy to hit,
+/// because dtrace needs privileges and exits right away without them,
+/// so the display reports which one it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum ReaderStatus {
+    /// Started, but no probe record has arrived yet.
+    #[default]
+    Waiting,
+    /// At least one record has been parsed.
+    Running,
+    /// The command is no longer running.  The string says why.
+    Stopped(String),
+}
+
+/// The status line to show under the header, or None once records are
+/// arriving and the table speaks for itself.
+fn reader_status_line(status: &ReaderStatus) -> Option<String> {
+    match status {
+        ReaderStatus::Waiting => {
+            Some("waiting for dtrace output...".to_string())
+        }
+        ReaderStatus::Running => None,
+        ReaderStatus::Stopped(message) => Some(message.clone()),
+    }
+}
+
+/// Session ids in the order they are displayed.
+fn sorted_session_ids(state: &CtopState) -> Vec<String> {
+    let mut sessions: Vec<&SessionData> = state.sessions.values().collect();
+    sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
+    sessions
+        .into_iter()
+        .map(|s| s.dtrace_info.session_id.clone())
+        .collect()
+}
+
+/// Move the selection `delta` rows through the displayed order.
+fn move_selection(state: &mut CtopState, delta: isize) {
+    let ids = sorted_session_ids(state);
+    if ids.is_empty() {
+        return;
+    }
+
+    let current = state
+        .selected_session
+        .as_ref()
+        .and_then(|id| ids.iter().position(|s| s == id))
+        .unwrap_or(0);
+
+    let last = ids.len() as isize - 1;
+    let next = (current as isize).saturating_add(delta).clamp(0, last);
+    state.selected_session = Some(ids[next as usize].clone());
+}
+
+/// What the display loop should do after a key.
+enum KeyAction {
+    Quit,
+    /// The key changed something, so redraw without waiting.
+    Redraw,
+    Ignored,
+}
+
+/// Apply one key press to the shared state.
+async fn handle_key(
+    key_event: KeyEvent,
+    state: &Arc<RwLock<CtopState>>,
+    page_size: usize,
+) -> KeyAction {
+    let mut state_guard = state.write().await;
+    // Navigation only applies to the table.
+    let navigable = !state_guard.detail_mode;
+
+    match key_event {
+        KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => return KeyAction::Quit,
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => return KeyAction::Quit,
+        KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            // Toggle detail mode
+            state_guard.detail_mode = !state_guard.detail_mode;
+        }
+        KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            // Toggle normalize mode (only affects detail view)
+            state_guard.normalize_detail = !state_guard.normalize_detail;
+        }
+        KeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if navigable => move_selection(&mut state_guard, -1),
+        KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if navigable => move_selection(&mut state_guard, 1),
+        KeyEvent {
+            code: KeyCode::PageUp,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if navigable => {
+            move_selection(&mut state_guard, -(page_size as isize))
+        }
+        KeyEvent {
+            code: KeyCode::PageDown,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if navigable => move_selection(&mut state_guard, page_size as isize),
+        KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            // Exit detail mode
+            state_guard.detail_mode = false;
+        }
+        _ => return KeyAction::Ignored,
+    }
+
+    KeyAction::Redraw
+}
 
 /// Data for a single session
 #[derive(Debug, Clone)]
@@ -70,374 +239,13 @@ struct SessionData {
 #[derive(Debug, Default)]
 struct CtopState {
     sessions: HashMap<String, SessionData>,
-    selected_index: usize,
-    scroll_offset: usize,
+    /// Session id of the selected row.  Keyed on the session rather
+    /// than its position, so sessions coming and going above the
+    /// cursor do not move it onto a different session.
+    selected_session: Option<String>,
     detail_mode: bool,
     normalize_detail: bool, // Use global min/max for detail view scaling
-}
-
-/// Default display fields (same as dtrace command defaults)
-fn default_display_fields() -> Vec<DtraceDisplay> {
-    vec![
-        DtraceDisplay::Pid,
-        DtraceDisplay::Session,
-        DtraceDisplay::State,
-        DtraceDisplay::NextJobId,
-        DtraceDisplay::JobDelta,
-        DtraceDisplay::ExtentLimit,
-        DtraceDisplay::DsReconciled,
-        DtraceDisplay::DsReconcileNeeded,
-    ]
-}
-
-/// Format header line for the given display fields
-fn format_header(dd: &[DtraceDisplay]) -> String {
-    let mut result = String::new();
-    for display_item in dd.iter() {
-        match display_item {
-            DtraceDisplay::Pid => {
-                result.push_str(&format!(" {:>5}", "PID"));
-            }
-            DtraceDisplay::Session => {
-                result.push_str(&format!(" {:>8}", "SESSION"));
-            }
-            DtraceDisplay::UpstairsId => {
-                result.push_str(&format!(" {:>8}", "UPSTAIRS"));
-            }
-            DtraceDisplay::State => {
-                result.push_str(&format!(
-                    " {:>3} {:>3} {:>3}",
-                    "DS0", "DS1", "DS2"
-                ));
-            }
-            DtraceDisplay::UpCount => {
-                result.push_str(&format!(" {:>3}", "UPW"));
-            }
-            DtraceDisplay::DsCount => {
-                result.push_str(&format!(" {:>5}", "DSW"));
-            }
-            DtraceDisplay::IoCount | DtraceDisplay::IoSummary => {
-                result.push_str(&format!(
-                    " {:>5} {:>5} {:>5}",
-                    "IP0", "IP1", "IP2"
-                ));
-                result
-                    .push_str(&format!(" {:>5} {:>5} {:>5}", "D0", "D1", "D2"));
-                result
-                    .push_str(&format!(" {:>5} {:>5} {:>5}", "S0", "S1", "S2"));
-
-                if matches!(display_item, DtraceDisplay::IoCount) {
-                    result.push_str(&format!(
-                        " {:>4} {:>4} {:>4}",
-                        "E0", "E1", "E2"
-                    ));
-                }
-            }
-            DtraceDisplay::Reconcile => {
-                result.push_str(&format!(
-                    " {:>4} {:>4} {:>4}",
-                    "REC", "NREC", "AREC"
-                ));
-            }
-            DtraceDisplay::DsReconciled => {
-                result.push_str(&format!(" {:>4}", "ERR"));
-            }
-            DtraceDisplay::DsReconcileNeeded => {
-                result.push_str(&format!(" {:>4}", "ERN"));
-            }
-            DtraceDisplay::LiveRepair => {
-                result.push_str(&format!(
-                    " {:>4} {:>4} {:>4}",
-                    "LRC0", "LRC1", "LRC0"
-                ));
-                result.push_str(&format!(
-                    " {:>4} {:>4} {:>4}",
-                    "LRA0", "LRA1", "LRA2"
-                ));
-            }
-            DtraceDisplay::Connected => {
-                result.push_str(&format!(
-                    " {:>4} {:>4} {:>4}",
-                    "CON0", "CON1", "CON2"
-                ));
-            }
-            DtraceDisplay::Replaced => {
-                result.push_str(&format!(
-                    " {:>4} {:>4} {:>4}",
-                    "RPL0", "RPL1", "RPL2"
-                ));
-            }
-            DtraceDisplay::ExtentLiveRepair => {
-                result.push_str(&format!(
-                    " {:>4} {:>4} {:>4}",
-                    "EXR0", "EXR1", "EXR2"
-                ));
-                result.push_str(&format!(
-                    " {:>4} {:>4} {:>4}",
-                    "EXC0", "EXC1", "EXC2"
-                ));
-            }
-            DtraceDisplay::ExtentLimit => {
-                result.push_str(&format!(" {:>4}", "EXTL"));
-            }
-            DtraceDisplay::NextJobId => {
-                result.push_str(&format!("  {:>10}", "NEXTJOB"));
-            }
-            DtraceDisplay::JobDelta => {
-                result.push_str(&format!(" {:>5}", "DELTA"));
-            }
-            DtraceDisplay::DsDelay => {
-                result.push_str(&format!(
-                    " {:>5} {:>5} {:>5}",
-                    "DLY0", "DLY1", "DLY2"
-                ));
-            }
-            DtraceDisplay::WriteBytesOut => {
-                result.push_str(&format!(" {:>10}", "WRBYTES"));
-            }
-            DtraceDisplay::RoLrSkipped => {
-                result.push_str(&format!(
-                    " {:>4} {:>4} {:>4}",
-                    "RLS0", "RLS1", "RLS2"
-                ));
-            }
-            DtraceDisplay::DsIoInProgress => {
-                result.push_str(&format!(
-                    " {:>5} {:>5} {:>5}",
-                    "IP0", "IP1", "IP2"
-                ));
-            }
-            DtraceDisplay::DsIoDone => {
-                result
-                    .push_str(&format!(" {:>5} {:>5} {:>5}", "D0", "D1", "D2"));
-            }
-            DtraceDisplay::DsIoSkipped => {
-                result
-                    .push_str(&format!(" {:>5} {:>5} {:>5}", "S0", "S1", "S2"));
-            }
-            DtraceDisplay::DsIoError => {
-                result
-                    .push_str(&format!(" {:>4} {:>4} {:>4}", "E0", "E1", "E2"));
-            }
-        }
-    }
-    result
-}
-
-/// Format a row for a single process
-fn format_row(
-    pid: u32,
-    d_out: &DtraceInfo,
-    precomputed_delta: Option<u64>,
-    dd: &[DtraceDisplay],
-) -> String {
-    let mut result = String::new();
-
-    for display_item in dd.iter() {
-        match display_item {
-            DtraceDisplay::Pid => {
-                // Note: stale indicator is now shown in the first column
-                result.push_str(&format!(" {:>5}", pid));
-            }
-            DtraceDisplay::Session => {
-                let session_short =
-                    d_out.session_id.chars().take(8).collect::<String>();
-                result.push_str(&format!(" {:>8}", session_short));
-            }
-            DtraceDisplay::UpstairsId => {
-                let upstairs_short =
-                    d_out.upstairs_id.chars().take(8).collect::<String>();
-                result.push_str(&format!(" {:>8}", upstairs_short));
-            }
-            DtraceDisplay::State => {
-                result.push_str(&format!(
-                    " {:>3} {:>3} {:>3}",
-                    short_state(&d_out.ds_state[0]),
-                    short_state(&d_out.ds_state[1]),
-                    short_state(&d_out.ds_state[2]),
-                ));
-            }
-            DtraceDisplay::UpCount => {
-                result.push_str(&format!(" {:3}", d_out.up_count));
-            }
-            DtraceDisplay::DsCount => {
-                result.push_str(&format!(" {:5}", d_out.ds_count));
-            }
-            DtraceDisplay::IoCount | DtraceDisplay::IoSummary => {
-                result.push_str(&format!(
-                    " {:5} {:5} {:5}",
-                    d_out.ds_io_count.in_progress[ClientId::new(0)],
-                    d_out.ds_io_count.in_progress[ClientId::new(1)],
-                    d_out.ds_io_count.in_progress[ClientId::new(2)],
-                ));
-                result.push_str(&format!(
-                    " {:5} {:5} {:5}",
-                    d_out.ds_io_count.done[ClientId::new(0)],
-                    d_out.ds_io_count.done[ClientId::new(1)],
-                    d_out.ds_io_count.done[ClientId::new(2)],
-                ));
-                result.push_str(&format!(
-                    " {:5} {:5} {:5}",
-                    d_out.ds_io_count.skipped[ClientId::new(0)],
-                    d_out.ds_io_count.skipped[ClientId::new(1)],
-                    d_out.ds_io_count.skipped[ClientId::new(2)],
-                ));
-                if matches!(display_item, DtraceDisplay::IoCount) {
-                    result.push_str(&format!(
-                        " {:4} {:4} {:4}",
-                        d_out.ds_io_count.error[ClientId::new(0)],
-                        d_out.ds_io_count.error[ClientId::new(1)],
-                        d_out.ds_io_count.error[ClientId::new(2)],
-                    ));
-                }
-            }
-            DtraceDisplay::Reconcile => {
-                result.push_str(&format!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_reconciled,
-                    d_out.ds_reconcile_needed,
-                    d_out.ds_reconcile_aborted,
-                ));
-            }
-            DtraceDisplay::DsReconciled => {
-                result.push_str(&format!(" {:>4}", d_out.ds_reconciled));
-            }
-            DtraceDisplay::DsReconcileNeeded => {
-                result.push_str(&format!(" {:>4}", d_out.ds_reconcile_needed));
-            }
-            DtraceDisplay::LiveRepair => {
-                result.push_str(&format!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_live_repair_completed[0],
-                    d_out.ds_live_repair_completed[1],
-                    d_out.ds_live_repair_completed[2],
-                ));
-                result.push_str(&format!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_live_repair_aborted[0],
-                    d_out.ds_live_repair_aborted[1],
-                    d_out.ds_live_repair_aborted[2],
-                ));
-            }
-            DtraceDisplay::Connected => {
-                result.push_str(&format!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_connected[0],
-                    d_out.ds_connected[1],
-                    d_out.ds_connected[2],
-                ));
-            }
-            DtraceDisplay::Replaced => {
-                result.push_str(&format!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_replaced[0],
-                    d_out.ds_replaced[1],
-                    d_out.ds_replaced[2],
-                ));
-            }
-            DtraceDisplay::ExtentLiveRepair => {
-                result.push_str(&format!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_extents_repaired[0],
-                    d_out.ds_extents_repaired[1],
-                    d_out.ds_extents_repaired[2],
-                ));
-                result.push_str(&format!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_extents_confirmed[0],
-                    d_out.ds_extents_confirmed[1],
-                    d_out.ds_extents_confirmed[2],
-                ));
-            }
-            DtraceDisplay::ExtentLimit => {
-                result.push_str(&format!(" {:4}", d_out.ds_extent_limit));
-            }
-            DtraceDisplay::NextJobId => {
-                result.push_str(&format!(" {:>10}", d_out.next_job_id));
-            }
-            DtraceDisplay::JobDelta => {
-                if let Some(delta) = precomputed_delta {
-                    result.push_str(&format!(" {:5}", delta));
-                } else {
-                    result.push_str(&format!(" {:>5}", "---"));
-                }
-            }
-            DtraceDisplay::DsDelay => {
-                result.push_str(&format!(
-                    " {:5} {:5} {:5}",
-                    d_out.ds_delay_us[0],
-                    d_out.ds_delay_us[1],
-                    d_out.ds_delay_us[2],
-                ));
-            }
-            DtraceDisplay::WriteBytesOut => {
-                result.push_str(&format!(" {:10}", d_out.write_bytes_out));
-            }
-            DtraceDisplay::RoLrSkipped => {
-                result.push_str(&format!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_ro_lr_skipped[0],
-                    d_out.ds_ro_lr_skipped[1],
-                    d_out.ds_ro_lr_skipped[2],
-                ));
-            }
-            DtraceDisplay::DsIoInProgress => {
-                result.push_str(&format!(
-                    " {:5} {:5} {:5}",
-                    d_out.ds_io_count.in_progress[ClientId::new(0)],
-                    d_out.ds_io_count.in_progress[ClientId::new(1)],
-                    d_out.ds_io_count.in_progress[ClientId::new(2)],
-                ));
-            }
-            DtraceDisplay::DsIoDone => {
-                result.push_str(&format!(
-                    " {:5} {:5} {:5}",
-                    d_out.ds_io_count.done[ClientId::new(0)],
-                    d_out.ds_io_count.done[ClientId::new(1)],
-                    d_out.ds_io_count.done[ClientId::new(2)],
-                ));
-            }
-            DtraceDisplay::DsIoSkipped => {
-                result.push_str(&format!(
-                    " {:5} {:5} {:5}",
-                    d_out.ds_io_count.skipped[ClientId::new(0)],
-                    d_out.ds_io_count.skipped[ClientId::new(1)],
-                    d_out.ds_io_count.skipped[ClientId::new(2)],
-                ));
-            }
-            DtraceDisplay::DsIoError => {
-                result.push_str(&format!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_io_count.error[ClientId::new(0)],
-                    d_out.ds_io_count.error[ClientId::new(1)],
-                    d_out.ds_io_count.error[ClientId::new(2)],
-                ));
-            }
-        }
-    }
-    result
-}
-
-/// Calculate the number of visible rows for session display
-///
-/// Terminal layout (total FIXED_LINES = 7):
-///   1 header (timestamp)
-///   1 blank line
-///   1 column headers
-///   N session lines (variable, returned by this function)
-///   1 scroll indicator (↑ more above)
-///   1 scroll indicator (↓ more below)
-///   1 blank line
-///   1 footer (help text)
-///
-/// Returns at least 1 visible row to prevent crashes.
-fn calculate_visible_rows(terminal_height: u16) -> usize {
-    const FIXED_LINES: u16 = 7;
-    if terminal_height > FIXED_LINES {
-        (terminal_height - FIXED_LINES) as usize
-    } else {
-        1 // Minimum to avoid crashes
-    }
+    reader_status: ReaderStatus,
 }
 
 /// Render a sparkline from delta history
@@ -508,18 +316,40 @@ async fn subprocess_reader_task(
         return Err("Empty dtrace command".into());
     }
 
-    // Execute the command through a shell to properly handle quoting
+    // Execute the command through a shell to properly handle quoting.
+    // kill_on_drop so the dtrace child does not outlive us.
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(&dtrace_cmd)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
     let stdout = child
         .stdout
         .take()
         .ok_or("Failed to capture subprocess stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("Failed to capture subprocess stderr")?;
+
+    // Drain stderr in the background, keeping the last few lines.  This
+    // has to be drained rather than ignored, or a chatty command would
+    // block once the pipe filled.  dtrace explains itself here, so this
+    // is the text worth showing if the command gives up.
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr_lines = BufReader::new(stderr).lines();
+        let mut tail: VecDeque<String> = VecDeque::new();
+        while let Ok(Some(line)) = stderr_lines.next_line().await {
+            tail.push_back(line);
+            if tail.len() > MAX_STDERR_LINES {
+                tail.pop_front();
+            }
+        }
+        tail
+    });
 
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
@@ -534,6 +364,7 @@ async fn subprocess_reader_task(
 
         // Update state
         let mut state_guard = state.write().await;
+        state_guard.reader_status = ReaderStatus::Running;
 
         let session_data = state_guard
             .sessions
@@ -575,8 +406,27 @@ async fn subprocess_reader_task(
         notify.notify_one();
     }
 
-    // Wait for child to exit
-    let _ = child.wait().await;
+    // stdout has closed, so the command is finished one way or another.
+    // Report why: an empty display otherwise looks the same whether
+    // dtrace is running with nothing to show or never started at all.
+    let stderr_tail = stderr_task.await.unwrap_or_default();
+    let reason = stderr_tail
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let message = match child.wait().await {
+        Ok(status) if reason.is_empty() => {
+            format!("dtrace command exited ({status})")
+        }
+        Ok(status) => format!("dtrace command exited ({status}): {reason}"),
+        Err(e) => format!("dtrace command failed: {e}"),
+    };
+
+    state.write().await.reader_status = ReaderStatus::Stopped(message);
+    notify.notify_one();
 
     Ok(())
 }
@@ -584,7 +434,6 @@ async fn subprocess_reader_task(
 /// Render full-screen detail view for a selected session
 fn render_detail_view(
     session_data: &SessionData,
-    _terminal_size: (u16, u16),
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     global_min: Option<u64>,
     global_max: Option<u64>,
@@ -719,17 +568,136 @@ fn render_detail_view(
     Ok(())
 }
 
+/// Draw the session table.
+///
+/// Returns how many session rows fit, which page up/down use as their
+/// page size.
+#[allow(clippy::too_many_arguments)]
+fn render_table_view(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    sessions: &[&SessionData],
+    display_fields: &[DtraceDisplay],
+    table_state: &mut TableState,
+    reader_status: &ReaderStatus,
+    now: Instant,
+    timestamp: u64,
+    global_max: u64,
+) -> io::Result<usize> {
+    let selected = table_state.selected();
+    let mut visible_rows = 1;
+
+    terminal.draw(|f| {
+        let chunks = Layout::default()
+            .constraints([
+                Constraint::Length(1), // timestamp
+                Constraint::Length(1), // dtrace command status
+                Constraint::Min(0),    // session table
+                Constraint::Length(1), // key help
+            ])
+            .split(f.area());
+
+        f.render_widget(
+            Paragraph::new(format!("ctop - Unix timestamp: {timestamp}")),
+            chunks[0],
+        );
+        f.render_widget(
+            Paragraph::new(
+                reader_status_line(reader_status).unwrap_or_default(),
+            ),
+            chunks[1],
+        );
+
+        let area = chunks[2];
+        // One line of the table area goes to the column header.
+        visible_rows = (area.height as usize).saturating_sub(1).max(1);
+
+        // Rows carry a one character selected/stale indicator, so pad
+        // the header by the same amount to keep the columns lined up.
+        let header = format!(" {}", format_header(display_fields));
+        // Whatever width the columns do not use goes to the sparkline.
+        let spark_width =
+            (area.width as usize).saturating_sub(header.chars().count());
+
+        let rows: Vec<Row> = sessions
+            .iter()
+            .enumerate()
+            .map(|(idx, s)| {
+                let stale = now.duration_since(s.last_updated)
+                    > Duration::from_secs(STALE_THRESHOLD_SECS);
+
+                // Selection wins over the stale marker.
+                let indicator = if Some(idx) == selected {
+                    '>'
+                } else if stale {
+                    '*'
+                } else {
+                    ' '
+                };
+
+                let row = format_row(
+                    s.pid,
+                    &s.dtrace_info,
+                    s.current_delta,
+                    display_fields,
+                );
+                let spark =
+                    render_sparkline(&s.delta_history, spark_width, global_max);
+
+                Row::new(vec![format!("{indicator}{row}{spark}")])
+            })
+            .collect();
+
+        // One full width column: format_row has already laid the row
+        // out, and the table clips it to the area instead of letting a
+        // row wider than the terminal wrap and push the layout apart.
+        let table = Table::new(rows, [Constraint::Min(0)])
+            .header(Row::new(vec![header]))
+            .column_spacing(0);
+
+        // Rendering with the state lets the table scroll itself to keep
+        // the selected row on screen.
+        f.render_stateful_widget(table, area, table_state);
+
+        // Key help on the left, position in the list on the right.
+        let position = match (selected, sessions.len()) {
+            (_, 0) => " no sessions".to_string(),
+            (Some(i), n) => format!(" [{}/{}]", i + 1, n),
+            (None, n) => format!(" [{n}]"),
+        };
+        let footer = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(position.chars().count() as u16),
+            ])
+            .split(chunks[3]);
+
+        f.render_widget(
+            Paragraph::new(format!(
+                "[↑↓/PgUp/PgDn: Navigate | 'd': Details | 'q': Quit] \
+                 > = selected, * = stale ({STALE_THRESHOLD_SECS}s)"
+            )),
+            footer[0],
+        );
+        f.render_widget(Paragraph::new(position), footer[1]);
+    })?;
+
+    Ok(visible_rows)
+}
+
 /// Display task - renders the screen and handles keyboard input
+///
+/// This takes over the terminal, so it is responsible for handing it
+/// back.  The loop runs in `display_loop` so that the terminal is
+/// restored whether that returns normally or with an error.
 async fn display_task(
     state: Arc<RwLock<CtopState>>,
     notify: Arc<Notify>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Set up terminal
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
 
-    // Set up panic handler to restore terminal
+    // Restore the terminal on the way out of a panic as well.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
@@ -737,385 +705,177 @@ async fn display_task(
         original_hook(panic_info);
     }));
 
-    let display_fields = default_display_fields();
+    let result = display_loop(state, notify).await;
 
-    // Track detail mode and persistent terminal for detail view
-    let mut was_in_detail_mode = false;
-    let mut detail_terminal: Option<Terminal<CrosstermBackend<io::Stdout>>> =
-        None;
+    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+
+    result
+}
+
+/// Redraw and handle input until the user quits.
+///
+/// Both views draw through the one terminal, which clips whatever it is
+/// given to the area it has and follows terminal resizes on its own.
+///
+/// Drawing is paced rather than done on every wake-up.  Input is
+/// answered immediately so the display keeps up with the keyboard, but
+/// arriving records only get a repaint every REDRAW_MIN_INTERVAL, and a
+/// quiet screen still refreshes every REFRESH_INTERVAL to keep the
+/// clock and the stale markers honest.
+async fn display_loop(
+    state: Arc<RwLock<CtopState>>,
+    notify: Arc<Notify>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let display_fields = default_display_fields();
+    let mut table_state = TableState::default();
+    let mut page_size = 1;
+
+    let mut records_pending = true;
+    let mut last_draw = Instant::now();
 
     loop {
-        // Wait for notification or timeout
         tokio::select! {
-            _ = notify.notified() => {},
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+            _ = notify.notified() => {
+                records_pending = true;
+            }
+            _ = tokio::time::sleep(INPUT_POLL_INTERVAL) => {}
         }
 
-        // Get current time
+        // Take everything the keyboard has already queued.  Handling
+        // one key per pass would let a held down arrow build a backlog
+        // that keeps scrolling after the key is released.
+        let mut input_pending = false;
+        while event::poll(Duration::ZERO)? {
+            match event::read()? {
+                Event::Key(key_event) => {
+                    match handle_key(key_event, &state, page_size).await {
+                        KeyAction::Quit => return Ok(()),
+                        KeyAction::Redraw => input_pending = true,
+                        KeyAction::Ignored => {}
+                    }
+                }
+                // ratatui resizes itself on the next draw, we just have
+                // to know that one is needed.
+                Event::Resize(..) => input_pending = true,
+                _ => {}
+            }
+        }
+
+        // Input redraws at once; records wait for the floor; and an
+        // idle screen still refreshes on its own.
+        let since_draw = last_draw.elapsed();
+        let draw = input_pending
+            || (records_pending && since_draw >= REDRAW_MIN_INTERVAL)
+            || since_draw >= REFRESH_INTERVAL;
+        if !draw {
+            // Leave records_pending set so the next pass can draw them.
+            continue;
+        }
+        records_pending = false;
+        last_draw = Instant::now();
+
         let now = Instant::now();
-        let system_time = std::time::SystemTime::now();
-        let duration = system_time
+        let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .as_secs();
 
-        // Get terminal size
-        let terminal_size = crossterm::terminal::size()?;
-
-        // Clean up sessions that haven't been updated in REMOVE_THRESHOLD_SECS
+        // Drop sessions that stopped reporting a while ago.  The
+        // selection names a session rather than a row, so it only has
+        // to move when the selected session is the one that went away,
+        // and then it takes over whatever slid into its place.
         {
             let mut state_guard = state.write().await;
-            let sessions_before = state_guard.sessions.len();
+
+            let previous_position =
+                state_guard.selected_session.as_ref().and_then(|id| {
+                    sorted_session_ids(&state_guard)
+                        .iter()
+                        .position(|s| s == id)
+                });
 
             state_guard.sessions.retain(|_, session_data| {
                 now.duration_since(session_data.last_updated)
                     <= Duration::from_secs(REMOVE_THRESHOLD_SECS)
             });
 
-            let sessions_after = state_guard.sessions.len();
+            let selection_gone = state_guard
+                .selected_session
+                .as_ref()
+                .is_some_and(|id| !state_guard.sessions.contains_key(id));
 
-            // Adjust selected_index if sessions were removed
-            if sessions_after < sessions_before && sessions_after > 0 {
-                state_guard.selected_index =
-                    state_guard.selected_index.min(sessions_after - 1);
-                state_guard.scroll_offset =
-                    state_guard.scroll_offset.min(sessions_after - 1);
-            } else if sessions_after == 0 {
-                state_guard.selected_index = 0;
-                state_guard.scroll_offset = 0;
+            if selection_gone || state_guard.selected_session.is_none() {
+                let remaining = sorted_session_ids(&state_guard);
+                let slot = previous_position
+                    .unwrap_or(0)
+                    .min(remaining.len().saturating_sub(1));
+                state_guard.selected_session = remaining.get(slot).cloned();
             }
-
-            drop(state_guard);
         }
 
-        // Read state to check mode
-        let state_guard = state.read().await;
-        let in_detail_mode = state_guard.detail_mode;
-        let selected_index = state_guard.selected_index;
-        let normalize_detail = state_guard.normalize_detail;
-
-        // If in detail mode, render detail view and skip table
-        if in_detail_mode {
-            // Create terminal on first entry to detail mode
-            if !was_in_detail_mode {
-                execute!(stdout, Clear(ClearType::All))?;
-                // Create a new stdout handle for the Terminal
-                let detail_stdout = io::stdout();
-                let backend = CrosstermBackend::new(detail_stdout);
-                detail_terminal = Some(Terminal::new(backend)?);
-            }
-
-            let mut sessions: Vec<&SessionData> =
-                state_guard.sessions.values().collect();
-            sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
-
-            // Calculate global min/max across all sessions for normalization
-            let global_min = sessions
-                .iter()
-                .flat_map(|s| s.delta_history.iter())
-                .copied()
-                .min();
-            let global_max = sessions
-                .iter()
-                .flat_map(|s| s.delta_history.iter())
-                .copied()
-                .max();
-
-            if let Some(selected_session) = sessions.get(selected_index) {
-                // Clone the session data so we can drop the lock
-                let session_clone = (*selected_session).clone();
-                drop(state_guard);
-
-                if let Some(terminal) = detail_terminal.as_mut() {
-                    render_detail_view(
-                        &session_clone,
-                        terminal_size,
-                        terminal,
-                        global_min,
-                        global_max,
-                        normalize_detail,
-                    )?;
-                }
-            } else {
-                drop(state_guard);
-            }
-
-            was_in_detail_mode = true;
-        } else {
-            // Exiting detail mode - drop terminal and redraw table
-            if was_in_detail_mode {
-                detail_terminal = None;
-                execute!(stdout, Clear(ClearType::All))?;
-            }
-            was_in_detail_mode = false;
-
-            // Move cursor to top-left
-            execute!(stdout, cursor::MoveTo(0, 0))?;
-            // Table mode - render normal view
-            drop(state_guard);
-
-            // Display header (clear line first to remove artifacts)
-            execute!(stdout, cursor::MoveTo(0, 0))?;
-            write!(stdout, "ctop - Unix timestamp: {}", duration.as_secs())?;
-            execute!(stdout, Clear(ClearType::UntilNewLine))?;
-            write!(stdout, "\r\n")?;
-            execute!(stdout, Clear(ClearType::UntilNewLine))?;
-            write!(stdout, "\r\n")?;
-
-            // Display column headers
-            write!(stdout, "{}", format_header(&display_fields))?;
-            execute!(stdout, Clear(ClearType::UntilNewLine))?;
-            write!(stdout, "\r\n")?;
-
-            let (terminal_width, terminal_height) = terminal_size;
-
-            // Read state and display sessions sorted by PID (then session_id)
+        {
             let state_guard = state.read().await;
             let mut sessions: Vec<&SessionData> =
                 state_guard.sessions.values().collect();
             sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
 
-            // Calculate global max across all sessions for consistent sparkline
-            // scaling
-            let global_max = sessions
-                .iter()
-                .flat_map(|s| s.delta_history.iter())
-                .copied()
-                .max()
-                .unwrap_or(1);
+            let selected =
+                state_guard.selected_session.as_ref().and_then(|id| {
+                    sessions
+                        .iter()
+                        .position(|s| &s.dtrace_info.session_id == id)
+                });
 
-            let selected_index = state_guard.selected_index;
-            let scroll_offset = state_guard.scroll_offset;
+            if state_guard.detail_mode {
+                // Min and max over every session, for the normalized
+                // view that compares one session against the rest.
+                let global_min = sessions
+                    .iter()
+                    .flat_map(|s| s.delta_history.iter())
+                    .copied()
+                    .min();
+                let global_max = sessions
+                    .iter()
+                    .flat_map(|s| s.delta_history.iter())
+                    .copied()
+                    .max();
 
-            // Calculate visible window
-            let total_sessions = sessions.len();
-            let has_more_above = scroll_offset > 0;
-            let visible_rows = calculate_visible_rows(terminal_height);
-
-            let scroll_end = (scroll_offset + visible_rows).min(total_sessions);
-            let has_more_below = scroll_end < total_sessions;
-
-            // Display scroll indicator if there are sessions above
-            if has_more_above {
-                write!(stdout, "  ↑ More above")?;
-                execute!(stdout, Clear(ClearType::UntilNewLine))?;
-                write!(stdout, "\r\n")?;
-            }
-
-            // Display visible sessions
-            for (idx, session_data) in sessions
-                .iter()
-                .enumerate()
-                .skip(scroll_offset)
-                .take(visible_rows)
-            {
-                let is_stale = now.duration_since(session_data.last_updated)
-                    > Duration::from_secs(STALE_THRESHOLD_SECS);
-
-                // Add indicator: > for selected, * for stale, space otherwise
-                // Selection indicator (>) takes priority over stale indicator (*)
-                let indicator = if idx == selected_index {
-                    ">"
-                } else if is_stale {
-                    "*"
-                } else {
-                    " "
-                };
-                write!(stdout, "{}", indicator)?;
-
-                let row = format_row(
-                    session_data.pid,
-                    &session_data.dtrace_info,
-                    session_data.current_delta,
-                    &display_fields,
-                );
-                write!(stdout, "{}", row)?;
-
-                // Render sparkline right-aligned to fill remaining space to terminal edge
-                // Account for the indicator character (1 char)
-                let row_len = row.chars().count() + 1;
-                if terminal_width > row_len as u16 {
-                    let sparkline_width = terminal_width as usize - row_len;
-                    let sparkline = render_sparkline(
-                        &session_data.delta_history,
-                        sparkline_width,
+                if let Some(session) = selected.and_then(|i| sessions.get(i)) {
+                    render_detail_view(
+                        session,
+                        &mut terminal,
+                        global_min,
                         global_max,
-                    );
-                    write!(stdout, "{}", sparkline)?;
+                        state_guard.normalize_detail,
+                    )?;
                 }
+            } else {
+                // Scale every sparkline the same way so activity can be
+                // compared between rows.
+                let global_max = sessions
+                    .iter()
+                    .flat_map(|s| s.delta_history.iter())
+                    .copied()
+                    .max()
+                    .unwrap_or(1);
 
-                execute!(stdout, Clear(ClearType::UntilNewLine))?;
-                write!(stdout, "\r\n")?;
+                table_state.select(selected);
+
+                page_size = render_table_view(
+                    &mut terminal,
+                    &sessions,
+                    &display_fields,
+                    &mut table_state,
+                    &state_guard.reader_status,
+                    now,
+                    timestamp,
+                    global_max,
+                )?;
             }
-
-            // Display scroll indicator if there are sessions below
-            if has_more_below {
-                let num_more = total_sessions - scroll_end;
-                write!(stdout, "  ↓ More below ({} more)", num_more)?;
-                execute!(stdout, Clear(ClearType::UntilNewLine))?;
-                write!(stdout, "\r\n")?;
-            }
-
-            drop(state_guard);
-
-            // Display footer
-            execute!(stdout, Clear(ClearType::UntilNewLine))?;
-            write!(stdout, "\r\n")?;
-            write!(
-                stdout,
-                "[↑↓/PgUp/PgDn: Navigate | 'd': Details | 'q': Quit] > = selected, * = stale ({}s)",
-                STALE_THRESHOLD_SECS
-            )?;
-            execute!(stdout, Clear(ClearType::UntilNewLine))?;
-            write!(stdout, "\r\n")?;
-
-            // Clear from cursor to end of screen (removes any leftover lines)
-            execute!(stdout, Clear(ClearType::FromCursorDown))?;
-
-            stdout.flush()?;
-        } // End of table mode rendering
-
-        // Check for keyboard input (non-blocking)
-        if event::poll(Duration::from_millis(0))?
-            && let Event::Key(key_event) = event::read()?
-        {
-            let mut state_guard = state.write().await;
-            let num_sessions = state_guard.sessions.len();
-
-            match key_event {
-                KeyEvent {
-                    code: KeyCode::Char('q'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => break,
-                KeyEvent {
-                    code: KeyCode::Char('c'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => break,
-                KeyEvent {
-                    code: KeyCode::Char('d'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    // Toggle detail mode
-                    state_guard.detail_mode = !state_guard.detail_mode;
-                }
-                KeyEvent {
-                    code: KeyCode::Char('n'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    // Toggle normalize mode (only affects detail view)
-                    state_guard.normalize_detail =
-                        !state_guard.normalize_detail;
-                }
-                KeyEvent {
-                    code: KeyCode::Up,
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    // Move selection up (only in table mode)
-                    if !state_guard.detail_mode
-                        && num_sessions > 0
-                        && state_guard.selected_index > 0
-                    {
-                        state_guard.selected_index -= 1;
-
-                        // Scroll up if selection moves above visible window
-                        if state_guard.selected_index
-                            < state_guard.scroll_offset
-                        {
-                            state_guard.scroll_offset =
-                                state_guard.selected_index;
-                        }
-                    }
-                }
-                KeyEvent {
-                    code: KeyCode::Down,
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    // Move selection down (only in table mode)
-                    if !state_guard.detail_mode
-                        && num_sessions > 0
-                        && state_guard.selected_index < num_sessions - 1
-                    {
-                        state_guard.selected_index += 1;
-
-                        // Calculate visible rows to determine scroll behavior
-                        let visible_rows =
-                            calculate_visible_rows(terminal_size.1);
-
-                        // Scroll down if selection moves below visible window
-                        let scroll_end =
-                            state_guard.scroll_offset + visible_rows;
-                        if state_guard.selected_index >= scroll_end {
-                            state_guard.scroll_offset += 1;
-                        }
-                    }
-                }
-                KeyEvent {
-                    code: KeyCode::PageUp,
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    // Page up (only in table mode)
-                    if !state_guard.detail_mode && num_sessions > 0 {
-                        // Calculate visible rows
-                        let visible_rows =
-                            calculate_visible_rows(terminal_size.1);
-
-                        // Move up by visible_rows
-                        state_guard.selected_index = state_guard
-                            .selected_index
-                            .saturating_sub(visible_rows);
-                        state_guard.scroll_offset = state_guard
-                            .scroll_offset
-                            .saturating_sub(visible_rows);
-                    }
-                }
-                KeyEvent {
-                    code: KeyCode::PageDown,
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    // Page down (only in table mode)
-                    if !state_guard.detail_mode && num_sessions > 0 {
-                        // Calculate visible rows
-                        let visible_rows =
-                            calculate_visible_rows(terminal_size.1);
-
-                        // Move down by visible_rows
-                        let new_selected =
-                            state_guard.selected_index + visible_rows;
-                        state_guard.selected_index =
-                            new_selected.min(num_sessions - 1);
-
-                        let new_scroll =
-                            state_guard.scroll_offset + visible_rows;
-                        state_guard.scroll_offset = new_scroll
-                            .min(num_sessions.saturating_sub(visible_rows));
-                    }
-                }
-                KeyEvent {
-                    code: KeyCode::Esc,
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    // Exit detail mode
-                    state_guard.detail_mode = false;
-                }
-                _ => {}
-            }
-            drop(state_guard);
         }
     }
-
-    // Clean up terminal
-    execute!(stdout, LeaveAlternateScreen)?;
-    disable_raw_mode()?;
-
-    Ok(())
 }
 
 /// Main entry point for ctop
@@ -1127,14 +887,26 @@ pub async fn ctop_loop(
 
     let state_reader = Arc::clone(&state);
     let notify_reader = Arc::clone(&notify);
+    let state_err = Arc::clone(&state);
+    let notify_err = Arc::clone(&notify);
 
-    // Spawn subprocess reader task
+    // Spawn subprocess reader task.  The display owns the screen, so a
+    // failure to even start the command is recorded in shared state
+    // instead of printed, which would land in the alternate screen
+    // buffer and be lost.
     let reader_handle = tokio::spawn(async move {
-        if let Err(e) =
+        // Render the error before awaiting the lock: the boxed error is
+        // not Send, so it cannot be held across an await point.
+        let failure =
             subprocess_reader_task(dtrace_cmd, state_reader, notify_reader)
                 .await
-        {
-            eprintln!("Subprocess reader error: {}", e);
+                .err()
+                .map(|e| format!("dtrace command failed: {e}"));
+
+        if let Some(message) = failure {
+            state_err.write().await.reader_status =
+                ReaderStatus::Stopped(message);
+            notify_err.notify_one();
         }
     });
 
@@ -1209,10 +981,10 @@ mod tests {
     //!
     //! ```bash
     //! # Run all ctop unit tests
-    //! cargo test -p ctop --lib
+    //! cargo test -p ctop --bin ctop
     //!
     //! # Run specific test
-    //! cargo test -p ctop --lib test_render_sparkline_normalization
+    //! cargo test -p ctop --bin ctop test_render_sparkline_normalization
     //! ```
 
     use super::*;
@@ -1466,9 +1238,110 @@ mod tests {
         let state = CtopState::default();
 
         assert_eq!(state.sessions.len(), 0);
-        assert_eq!(state.selected_index, 0);
+        assert!(state.selected_session.is_none());
         assert!(!state.detail_mode);
         assert!(!state.normalize_detail);
+    }
+
+    /// Build a state holding sessions with the given (pid, session id)
+    /// pairs, so selection movement can be exercised.
+    fn state_with(sessions: &[(u32, &str)]) -> CtopState {
+        let info_json = r#"{
+            "upstairs_id": "u", "session_id": "REPLACE", "up_count": 1,
+            "up_counters": {
+                "apply": 1, "action_downstairs": 1, "action_guest": 1,
+                "action_deferred_block": 0, "action_deferred_message": 0,
+                "action_flush_check": 0, "action_stat_check": 0,
+                "action_control_check": 0, "action_noop": 0
+            },
+            "next_job_id": 1000, "ds_count": 3, "write_bytes_out": 1,
+            "ds_state": ["Active", "Active", "Active"],
+            "ds_io_count": {
+                "in_progress": [0,0,0], "done": [0,0,0],
+                "skipped": [0,0,0], "error": [0,0,0]
+            },
+            "ds_reconciled": 0, "ds_reconcile_needed": 0,
+            "ds_reconcile_aborted": 0,
+            "ds_live_repair_completed": [0,0,0],
+            "ds_live_repair_aborted": [0,0,0],
+            "ds_connected": [1,1,1], "ds_replaced": [0,0,0],
+            "ds_extents_repaired": [0,0,0], "ds_extents_confirmed": [0,0,0],
+            "ds_extent_limit": 0, "ds_delay_us": [0,0,0],
+            "ds_ro_lr_skipped": [0,0,0]
+        }"#;
+
+        let mut state = CtopState::default();
+        for (pid, id) in sessions {
+            let dtrace_info: DtraceInfo =
+                serde_json::from_str(&info_json.replace("REPLACE", id))
+                    .unwrap();
+            state.sessions.insert(
+                id.to_string(),
+                SessionData {
+                    pid: *pid,
+                    dtrace_info,
+                    last_job_id: 0,
+                    last_updated: Instant::now(),
+                    current_delta: None,
+                    delta_history: VecDeque::new(),
+                },
+            );
+        }
+        state
+    }
+
+    #[test]
+    fn test_sorted_session_ids_orders_by_pid_then_session() {
+        let state = state_with(&[(20, "bbb"), (10, "zzz"), (20, "aaa")]);
+        assert_eq!(sorted_session_ids(&state), vec!["zzz", "aaa", "bbb"]);
+    }
+
+    #[test]
+    fn test_move_selection_walks_and_clamps() {
+        let mut state = state_with(&[(1, "a"), (2, "b"), (3, "c")]);
+
+        // No selection yet starts from the top of the list.
+        move_selection(&mut state, 1);
+        assert_eq!(state.selected_session.as_deref(), Some("b"));
+
+        move_selection(&mut state, 1);
+        assert_eq!(state.selected_session.as_deref(), Some("c"));
+
+        // Past either end just stops there rather than wrapping.
+        move_selection(&mut state, 5);
+        assert_eq!(state.selected_session.as_deref(), Some("c"));
+        move_selection(&mut state, -99);
+        assert_eq!(state.selected_session.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn test_move_selection_with_no_sessions() {
+        let mut state = state_with(&[]);
+        move_selection(&mut state, 1);
+        assert!(state.selected_session.is_none());
+    }
+
+    /// The point of keying the selection on the session id: a session
+    /// appearing or expiring above the cursor must not slide the
+    /// cursor onto a different session.
+    #[test]
+    fn test_selection_survives_sessions_coming_and_going() {
+        let mut state = state_with(&[(1, "a"), (2, "b"), (3, "c")]);
+        state.selected_session = Some("c".to_string());
+
+        // A new session sorts in above the selected one.
+        let added = state_with(&[(2, "a2")]);
+        state.sessions.extend(added.sessions);
+        assert_eq!(sorted_session_ids(&state), vec!["a", "a2", "b", "c"]);
+        assert_eq!(state.selected_session.as_deref(), Some("c"));
+
+        // And one above it goes away.
+        state.sessions.remove("a");
+        assert_eq!(state.selected_session.as_deref(), Some("c"));
+
+        // Moving up from there lands on its actual neighbour.
+        move_selection(&mut state, -1);
+        assert_eq!(state.selected_session.as_deref(), Some("b"));
     }
 
     #[test]

@@ -554,9 +554,43 @@ alan@cat:crucible$ pfexec dtrace -s upstairs_count.d
            repair            repair            repair     1    1    1    0    0    0    0    0    0    0    0    0
 ```
 ## upstairs_raw.d
-This is a dtrace script that just dumps the `DtraceInfo` structure in json
-format.  The output of this can be sent to other commands for additional
-processing.
+This is a dtrace script that dumps the `DtraceInfo` structure from the
+`up-status` probe in json format.  The upstairs fires this probe once a
+second, so you get one line per upstairs per second.
+
+Each line is wrapped in an object that adds the pid of the upstairs that
+produced it:
+```
+{"pid":<pid>,"status":{ ...DtraceInfo... }}
+```
+The script matches every crucible upstairs on the system, so lines from
+different processes arrive interleaved.  The pid, along with the
+`session_id` inside the status, is what tells them apart.
+
+The output is meant to be sent to another command for additional
+processing.  `cmon dtrace` renders it as a table:
+```
+alan@cat:crucible$ pfexec dtrace -s upstairs_raw.d | cmon dtrace
+   PID  SESSION DS0 DS1 DS2    NEXTJOB DELTA EXTL RECD RECN
+  1441 b8b1f0a2 ACT ACT ACT    4192837   ---    0    0    0
+  1454 3c9d5e17 ACT ACT ACT      51204   ---    0    0    0
+ 13485 f42a7c80 ACT  LR ACT     998311   ---   41  324    0
+  1441 b8b1f0a2 ACT ACT ACT    4205440 12603    0    0    0
+  1454 3c9d5e17 ACT ACT ACT      51204     0    0    0    0
+ 13485 f42a7c80 ACT  LR ACT    1002265  3954   41  324    0
+```
+`DELTA` is how much `NEXTJOB` moved since that session's previous line,
+which is why the first line of each session shows `---` instead.
+
+Use `-o` to pick which fields to show, and `cmon dtrace-decode` to list
+the field names and the columns each one produces.
+
+If the upstairs is not yet running, add the -Z flag to dtrace so it will
+wait to find the matching probe.
+
+`ctop` displays the same data in a curses interface.  It runs an
+equivalent dtrace command itself (with -Z), so it does not need this
+script.
 
 ## tracegw.d
 This is a dtrace example script for counting IOs into and out of
