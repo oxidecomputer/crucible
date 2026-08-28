@@ -37,6 +37,7 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 generic-array = { version = "0.14", default-features = false, features = ["more_lengths", "zeroize"] }
+hashbrown = { version = "0.15" }
 hex = { version = "0.4" }
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
