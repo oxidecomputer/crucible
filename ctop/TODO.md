@@ -33,3 +33,24 @@
 - [ ] Allow some downstairs individual stats to be combined into a "sum", like
       connections for each downstairs summed into a single value.  Not all
       dtrace probes could do this, so give just options for ones we can.
+
+### Test coverage
+The tests cover the pure functions: header and row formatting, the
+sparkline, the selection helpers, and JSON parsing.  These are the gaps,
+moved here out of the comments they used to sit in.
+
+- [ ] Mock the dtrace subprocess so the reader task can be tested: state
+      updates, delta calculation, malformed JSON, and the paths that
+      report why the command stopped.  Having the reader take something
+      implementing AsyncRead rather than spawning the command itself
+      would be enough.
+- [ ] Use ratatui's TestBackend to check what actually gets drawn:
+      selected and stale markers, the scroll window, the sparkline
+      filling the width it is given, and the detail view layout.
+- [ ] Drive the key handling: navigation, the detail and normalize
+      toggles, and that quitting restores the terminal.
+- [ ] Session lifecycle: a session going stale, then being removed, and
+      what the selection does when the selected session is the one that
+      goes away.
+- [ ] Replay captured dtrace output from a real system and check it
+      parses with no errors.

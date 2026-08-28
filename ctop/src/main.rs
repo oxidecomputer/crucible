@@ -249,11 +249,17 @@ struct CtopState {
 }
 
 /// Render a sparkline from delta history
+///
 /// Uses Unicode block characters to show trend: ▁▂▃▄▅▆▇█
-/// If global_max is provided, scales relative to that value for
-/// cross-session comparison
-/// The sparkline is right-aligned: newest value at rightmost column,
-/// older values scroll left, padding with spaces on the left if needed
+///
+/// One column per recorded sample, newest at the right, older values
+/// scrolling left and the left padded with spaces when there are fewer
+/// samples than columns.  The axis counts samples rather than time: a
+/// session that stops reporting records nothing, so its sparkline
+/// holds its shape rather than showing a gap.
+///
+/// Values are scaled against `global_max`, which the caller takes over
+/// every session so that activity can be compared between rows.
 fn render_sparkline(
     history: &VecDeque<u64>,
     width: usize,
@@ -378,7 +384,9 @@ async fn subprocess_reader_task(
                 delta_history: VecDeque::new(),
             });
 
-        // Calculate delta (jobs per second)
+        // Jobs issued since this session's previous record.  The
+        // upstairs fires the probe once a second, so this is a rate
+        // per second as long as records keep arriving.
         let current_job_id = wrapper.status.next_job_id.0;
         let delta = if session_data.last_job_id != 0 {
             let d = current_job_id.saturating_sub(session_data.last_job_id);
@@ -974,69 +982,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for ctop
-    //!
-    //! # Test Coverage Overview
-    //!
-    //! These unit tests validate the pure functions and data structures that
-    //! power ctop's display logic, focusing on areas that don't require async
-    //! runtime or terminal mocking.
-    //!
-    //! ## Current Coverage
-    //!
-    //! ### Display Formatting (format_header, format_row)
-    //! - Column header generation for all DtraceDisplay field types
-    //! - Multi-column fields (State shows DS0/DS1/DS2)
-    //! - IO summary fields with multiple columns per downstairs
-    //! - Empty field handling
-    //!
-    //! ### Sparkline Rendering (render_sparkline)
-    //! - Empty history handling
-    //! - Zero-width rendering
-    //! - Single and multiple value rendering
-    //! - Width limiting (showing only recent samples)
-    //! - Normalization using global max value
-    //! - Unicode block character validation (▁▂▃▄▅▆▇█)
-    //! - Ascending/descending trend visualization
-    //!
-    //! ### State Management
-    //! - Default CtopState initialization
-    //! - Delta history ring buffer behavior (MAX_DELTA_HISTORY)
-    //! - Constants validation (STALE_THRESHOLD_SECS, MAX_DELTA_HISTORY)
-    //!
-    //! ## What's NOT Tested (See integration_test.rs for full list)
-    //!
-    //! - Async tasks (subprocess_reader_task, display_task)
-    //! - Terminal rendering and keyboard input
-    //! - Session lifecycle and state updates
-    //! - DTrace subprocess integration
-    //! - Multi-session coordination
-    //!
-    //! ## Testing Strategy
-    //!
-    //! These tests focus on **testable units** - pure functions with no I/O.
-    //! For components requiring mocking (terminal, subprocess, async runtime),
-    //! see the testing improvement proposals in integration_test.rs.
-    //!
-    //! ## Running Tests
-    //!
-    //! ```bash
-    //! # Run all ctop unit tests
-    //! cargo test -p ctop --bin ctop
-    //!
-    //! # Run specific test
-    //! cargo test -p ctop --bin ctop test_render_sparkline_normalization
-    //! ```
-
     use super::*;
-
-    // ============================================================================
-    // Display Field Configuration Tests
-    // ============================================================================
-    //
-    // These tests verify the default display configuration that users see when
-    // they first run ctop. The fields should provide a good overview of upstairs
-    // state without overwhelming the display.
 
     #[test]
     fn test_default_display_fields() {
@@ -1053,14 +999,6 @@ mod tests {
         assert_eq!(fields[6], DtraceDisplay::DsReconciled);
         assert_eq!(fields[7], DtraceDisplay::DsReconcileNeeded);
     }
-
-    // ============================================================================
-    // Header Formatting Tests
-    // ============================================================================
-    //
-    // These tests verify that format_header() generates correct column headers
-    // for various field types. Some fields (like State, IoSummary) expand into
-    // multiple columns representing the three downstairs replicas.
 
     #[test]
     fn test_format_header_basic_fields() {
@@ -1108,25 +1046,6 @@ mod tests {
         // Empty fields should produce empty header
         assert_eq!(header, "");
     }
-
-    // ============================================================================
-    // Sparkline Rendering Tests
-    // ============================================================================
-    //
-    // Sparklines provide a compact visualization of job delta trends over time.
-    // They use Unicode block characters (▁▂▃▄▅▆▇█) to represent values.
-    //
-    // Key behaviors tested:
-    // - Empty history and edge cases (zero width, single values)
-    // - Width limiting (showing only the most recent N samples)
-    // - Normalization across sessions (global_max parameter)
-    // - Unicode character validity
-    //
-    // TODO: Consider property-based testing (proptest) to generate random
-    // histories and verify properties like:
-    // - Sparkline length <= requested width
-    // - All characters are valid block characters
-    // - Normalized values respect global_max
 
     #[test]
     fn test_render_sparkline_empty() {
@@ -1218,15 +1137,11 @@ mod tests {
         );
     }
 
+    /// Sparklines scale against a max taken over every session, so
+    /// that activity can be compared between rows.  Auto-scaling each
+    /// session to its own range would make that comparison meaningless.
     #[test]
     fn test_render_sparkline_normalization() {
-        // This test verifies a critical feature: sparklines are normalized using
-        // a global_max value computed across ALL sessions. This allows users to
-        // visually compare activity levels between different upstairs instances.
-        //
-        // Without global normalization, each session would auto-scale to its own
-        // range, making cross-session comparison meaningless.
-
         let mut history = VecDeque::new();
         history.push_back(50);
         history.push_back(100);
@@ -1260,19 +1175,6 @@ mod tests {
         assert_eq!(chars1[1], '▄', "Value 100 with max=200 should be ▄");
         assert_eq!(chars2[1], '█', "Value 100 with max=100 should be █");
     }
-
-    // ============================================================================
-    // State Management Tests
-    // ============================================================================
-    //
-    // These tests verify the data structures that track session state:
-    // - CtopState: Overall application state (sessions map, selection, mode)
-    // - SessionData: Per-session data including delta history ring buffer
-    // - Constants: STALE_THRESHOLD_SECS, MAX_DELTA_HISTORY
-    //
-    // Note: These tests only validate initialization and constants. Full
-    // state lifecycle testing (session updates, transitions) requires async
-    // mocking infrastructure.
 
     #[test]
     fn test_ctop_state_default() {
@@ -1385,17 +1287,10 @@ mod tests {
         assert_eq!(state.selected_session.as_deref(), Some("b"));
     }
 
+    /// The delta history is a ring buffer: once it is full, the oldest
+    /// sample is dropped rather than the buffer growing.
     #[test]
     fn test_session_data_delta_history_max_size() {
-        // Delta history uses a ring buffer (VecDeque) to maintain a sliding window
-        // of recent job delta values for sparkline rendering. This test verifies
-        // the ring buffer behavior: old values are evicted when capacity is reached.
-        //
-        // In production, subprocess_reader_task maintains this ring buffer by:
-        // 1. Computing delta = new_job_id - old_job_id
-        // 2. Pushing delta to back of deque
-        // 3. Popping from front if len > MAX_DELTA_HISTORY
-
         let mut delta_history = VecDeque::new();
 
         // Simulate adding more than MAX_DELTA_HISTORY items
@@ -1416,70 +1311,4 @@ mod tests {
             (MAX_DELTA_HISTORY + 9) as u64
         ); // Last item is most recent
     }
-
-    // Note: Constant validation tests removed - clippy warns that assertions
-    // on constants are optimized out. Constants are validated at compile time
-    // by their usage in the code.
-
-    // ============================================================================
-    // Future Testing Opportunities
-    // ============================================================================
-    //
-    // The following areas could benefit from additional testing infrastructure:
-    //
-    // ## 1. Async Task Testing (mockall crate)
-    //
-    // Mock the subprocess Command to test subprocess_reader_task:
-    // - Emit controlled JSON lines
-    // - Verify state updates (sessions map, delta calculations)
-    // - Test error handling (invalid JSON, subprocess crashes)
-    // - Test session expiration and cleanup
-    //
-    // ## 2. Terminal UI Testing (ratatui::TestBackend)
-    //
-    // Capture terminal output to verify:
-    // - Header and row formatting in actual terminal context
-    // - Stale session indicators (*) appear correctly
-    // - Selection indicators (>) highlight correct row
-    // - Sparklines render in available terminal width
-    // - Detail mode layout and graphing
-    //
-    // ## 3. Keyboard Input Testing
-    //
-    // Mock crossterm events to test:
-    // - Up/Down arrow navigation (selected_index changes)
-    // - 'd' toggles detail_mode
-    // - 'n' toggles normalize_detail
-    // - 'q' and Ctrl-C exit cleanly
-    // - Esc exits detail mode
-    //
-    // ## 4. Property-Based Testing (proptest)
-    //
-    // Generate random inputs to verify invariants:
-    // - Sparkline width never exceeds requested width
-    // - format_header produces valid UTF-8
-    // - Delta history never exceeds MAX_DELTA_HISTORY
-    // - selected_index never exceeds sessions.len()
-    //
-    // ## 5. Snapshot Testing (insta)
-    //
-    // Capture and compare terminal output snapshots:
-    // - Table view with various session counts
-    // - Detail view with different data patterns
-    // - Regression testing for layout changes
-    //
-    // ## 6. Performance Testing (criterion)
-    //
-    // Benchmark critical paths:
-    // - render_sparkline with full history
-    // - format_row with many display fields
-    // - Session sorting with 100+ sessions
-    //
-    // ## 7. End-to-End Testing
-    //
-    // Run ctop against real DTrace output:
-    // - Capture actual crucible DTrace JSON
-    // - Replay captured output to ctop
-    // - Verify no parsing errors
-    // - Compare against expected session data
 }

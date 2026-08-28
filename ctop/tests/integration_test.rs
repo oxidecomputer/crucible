@@ -2,84 +2,8 @@
 
 //! Integration tests for ctop
 //!
-//! # Test Coverage Overview
-//!
-//! These integration tests focus on validating the data flow from DTrace
-//! output through ctop's JSON parsing pipeline. They ensure that ctop can
-//! correctly handle the JSON format produced by the DTrace scripts used to
-//! monitor Crucible upstairs processes.
-//!
-//! ## Current Coverage
-//!
-//! - **JSON Parsing**: Valid, invalid, and incomplete DTrace JSON structures
-//! - **Data Format Validation**: Ensures expected fields are present and
-//!   correctly typed
-//!
-//! ## What's NOT Tested
-//!
-//! The following areas require more sophisticated testing infrastructure:
-//!
-//! ### Async Components
-//! - Subprocess spawning and management (tokio Command)
-//! - State updates from subprocess_reader_task
-//! - Async communication between reader and display tasks
-//! - Tokio Notify coordination
-//!
-//! ### Terminal UI
-//! - Keyboard input handling (arrow keys, 'd', 'q', etc.)
-//! - Screen rendering and layout
-//! - Detail mode transitions
-//! - Sparkline rendering in actual terminals
-//! - Alternate screen buffer management
-//!
-//! ### State Management
-//! - Session creation and updates
-//! - Session selection (up/down arrows)
-//! - Detail mode toggling
-//! - Stale session detection (5s threshold)
-//! - Delta history ring buffer behavior
-//!
-//! ### Edge Cases
-//! - Rapidly changing session data
-//! - Terminal resize during operation
-//! - Empty or missing DTrace output
-//!
-//! ## Proposed Testing Improvements
-//!
-//! Consider these testing strategies for more comprehensive coverage:
-//!
-//! ### 1. Subprocess Mocking
-//! Use a mock subprocess that emits controlled DTrace JSON output to test
-//! the full data pipeline without requiring actual DTrace.
-//!
-//! ### 2. Terminal Mocking
-//! Libraries like `ratatui::TestBackend` can capture terminal output for
-//! validation without requiring an actual terminal.
-//!
-//! ### 3. Property-Based Testing (proptest)
-//! Generate random but valid DTrace JSON structures to test parsing
-//! robustness and find edge cases.
-//!
-//! ### 4. Snapshot Testing (insta)
-//! Capture and verify terminal output snapshots for regression testing
-//! of UI layout and formatting.
-//!
-//! ### 5. End-to-End Tests
-//! Run ctop against real DTrace output (captured from actual crucible
-//! processes) to validate production behavior.
-//!
-//! ## Running Tests
-//!
-//! ```bash
-//! # Run all ctop tests (unit + integration)
-//! cargo test -p ctop
-//!
-//! # Run only integration tests
-//! cargo test -p ctop --test integration_test
-//!
-//! # Run specific integration test
-//! cargo test -p ctop --test integration_test test_parse_dtrace_json_format
-//! ```
+//! These check that the JSON the dtrace scripts emit parses into the
+//! types ctop uses.  See TODO.md for the coverage this does not have.
 
 use cmon_common::DtraceWrapper;
 
@@ -169,17 +93,3 @@ fn test_parse_incomplete_dtrace_json() {
     assert_eq!(parsed["pid"], 12345);
     assert!(parsed["status"].is_null());
 }
-
-// Note: Additional integration tests would ideally cover:
-// - Mock dtrace subprocess and verify parsing pipeline
-// - Test keyboard input handling (requires terminal mock)
-// - Test state transitions (detail mode, session selection)
-// - Test multi-session handling
-// - Test stale session detection
-// - Performance tests with many sessions
-//
-// These are challenging without a full terminal mocking framework
-// and subprocess mocking capabilities. Consider using:
-// - mockall crate for mocking
-// - proptest for property-based testing
-// - criterion for benchmarking

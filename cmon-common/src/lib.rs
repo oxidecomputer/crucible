@@ -482,9 +482,10 @@ mod tests {
         assert_eq!(short_state("XYZ"), "XYZ");
     }
 
+    /// The State column is three characters wide, so every
+    /// abbreviation has to fit in it.
     #[test]
     fn test_short_state_length() {
-        // All known states should produce 2-3 character abbreviations
         let known_states = vec![
             "Active",
             "WaitQuorum",
@@ -633,16 +634,5 @@ mod tests {
             format_header(&fields).chars().count(),
             format_row(1234, &info, Some(0), &fields).chars().count(),
         );
-    }
-
-    #[test]
-    fn test_dtrace_display_copy_clone() {
-        // Verify Copy and Clone work correctly
-        let display = DtraceDisplay::Pid;
-        let copied = display;
-        let cloned = display; // Copy trait, no need for .clone()
-
-        assert_eq!(format!("{:?}", display), format!("{:?}", copied));
-        assert_eq!(format!("{:?}", display), format!("{:?}", cloned));
     }
 }
