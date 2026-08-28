@@ -451,7 +451,8 @@ fn render_detail_view(
     };
     let current = session_data.current_delta.unwrap_or(0);
 
-    // Choose min/max based on normalize mode
+    // Normalizing scales the graph to every session rather than just
+    // this one, so that two sessions can be compared by eye.
     let (display_min, display_max) = if normalize {
         (
             global_min.unwrap_or(session_min),
@@ -461,13 +462,38 @@ fn render_detail_view(
         (session_min, session_max)
     };
 
+    // Labels for the y axis, high to low.  Deduplicated because a
+    // session sitting at one value collapses them all onto each other.
+    let y_range = display_max as f64 - display_min as f64;
+    let mut y_labels: Vec<u64> = vec![
+        display_max,
+        display_min + (y_range * 0.75) as u64,
+        display_min + (y_range * 0.5) as u64,
+        display_min + (y_range * 0.25) as u64,
+        display_min,
+    ];
+    y_labels.dedup();
+
+    // Width the labels need, plus a column of gap before the plot.
+    let label_width = y_labels
+        .iter()
+        .map(|v| v.to_string().chars().count())
+        .max()
+        .unwrap_or(1) as f64
+        + 1.0;
+
     // Render using ratatui (terminal is reused, ratatui handles diffing)
     terminal.draw(|f| {
         let area = f.area();
 
-        // Split area: 1 line at top for session data, rest for canvas
+        // A line of session data on top, the graph in the middle, and
+        // the keys on the bottom line where the table view puts them.
         let chunks = Layout::default()
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
             .split(area);
 
         // Format the session data row
@@ -484,53 +510,61 @@ fn render_detail_view(
         f.render_widget(data_paragraph, chunks[0]);
 
         // Create title
-        let session_short: String =
-            session_data.dtrace_info.session_id.chars().take(8).collect();
+        let session_short: String = session_data
+            .dtrace_info
+            .session_id
+            .chars()
+            .take(8)
+            .collect();
         let mode_str = if normalize { " [NORMALIZED]" } else { "" };
         let title = format!(
             " Delta History - PID {} - Session {}{} ",
             session_data.pid, session_short, mode_str
         );
 
-        // Create canvas widget in bottom area (1 line shorter)
+        // Give the y axis labels a strip of the plot to themselves by
+        // extending the x range to the left of the first sample, so
+        // they no longer sit on top of the oldest data points.
+        let samples = history.len().max(1) as f64;
+        let plot_width = chunks[1].width.saturating_sub(2) as f64;
+        let x_min = if plot_width > label_width + 1.0 {
+            -label_width * (samples / (plot_width - label_width))
+        } else {
+            0.0
+        };
+
+        // Min and max describe this session, which in normalized mode
+        // is not what the axis is scaled to, so say what the scale is
+        // rather than leaving the two looking like they disagree.
+        let stats = format!(
+            " Samples: {} | Min: {} | Max: {} | Avg: {} | Current: {} \
+             | Scale: {}-{} ",
+            history.len(),
+            session_min,
+            session_max,
+            avg,
+            current,
+            display_min,
+            display_max,
+        );
+
         let canvas = Canvas::default()
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(title)
-                    .title_bottom(format!(
-                        " Samples: {} | Min: {} | Max: {} | Avg: {} | Current: {} ",
-                        history.len(),
-                        session_min,
-                        session_max,
-                        avg,
-                        current
-                    ))
-                    .title_bottom(
-                        " ['d': Back | 'n': Toggle normalize | 'q': Quit] ",
-                    ),
+                    .title_bottom(stats),
             )
-            .x_bounds([0.0, history.len().max(1) as f64])
+            .x_bounds([x_min, samples])
             .y_bounds([display_min as f64, display_max as f64])
             .paint(|ctx| {
-                // Draw Y-axis labels (at left edge of graph)
-                let y_range = display_max as f64 - display_min as f64;
-                let y_positions = [
-                    display_max,
-                    display_min + (y_range * 0.75) as u64,
-                    display_min + (y_range * 0.5) as u64,
-                    display_min + (y_range * 0.25) as u64,
-                    display_min,
-                ];
-
-                for y_val in &y_positions {
+                for y_val in &y_labels {
                     ctx.print(
-                        0.0,
+                        x_min,
                         *y_val as f64,
                         ratatui::text::Span::styled(
-                            format!("{}", y_val),
-                            ratatui::style::Style::default()
-                                .fg(Color::Gray),
+                            format!("{y_val}"),
+                            ratatui::style::Style::default().fg(Color::Gray),
                         ),
                     );
                 }
@@ -563,6 +597,13 @@ fn render_detail_view(
             });
 
         f.render_widget(canvas, chunks[1]);
+
+        f.render_widget(
+            Paragraph::new(
+                "['d'/Esc: Back | 'n': Toggle normalize | 'q': Quit]",
+            ),
+            chunks[2],
+        );
     })?;
 
     Ok(())
