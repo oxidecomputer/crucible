@@ -239,6 +239,149 @@ cargo hakari generate
 cargo hakari manage-deps
 ```
 
+# Using Nix
+
+Crucible provides a Nix flake for reproducible builds and development environments.
+
+**Important**: Builds require relaxed sandbox mode to fetch git dependencies:
+```bash
+nix build .#dsc --option sandbox relaxed
+nix run .#start-downstairs --option sandbox relaxed
+```
+
+Or configure globally in `/etc/nix/nix.conf` or `~/.config/nix/nix.conf`:
+```
+sandbox = relaxed
+```
+
+## Development Shell
+
+Enter a development environment with Rust 1.90.0 and all dependencies:
+```bash
+nix develop
+```
+
+## Quick Start
+
+Start 5 downstairs instances:
+```bash
+nix run .#start-downstairs --option sandbox relaxed -- -n 5
+```
+
+Start a test cluster with 3 downstairs and run tests:
+```bash
+nix run .#test-cluster --option sandbox relaxed
+```
+
+## Running Downstairs
+
+Start 3 downstairs instances (default):
+```bash
+nix run .#start-downstairs
+```
+
+Start N downstairs instances:
+```bash
+nix run .#start-downstairs -- -n 5
+```
+
+Custom configuration:
+```bash
+nix run .#start-downstairs -- -n 3 -p 9000 -d /tmp/my-data
+```
+
+Enable encryption:
+```bash
+nix run .#start-downstairs -- -e
+```
+
+## Running Tests
+
+Run the full test suite (unencrypted):
+```bash
+nix run .#test-up
+```
+
+Run encrypted tests:
+```bash
+nix run .#test-up -- encrypted
+```
+
+Run DSC tests:
+```bash
+nix run .#test-dsc
+```
+
+Run test cluster with custom crutest arguments:
+```bash
+nix run .#test-cluster -- one -g 100 --verify-at-end
+```
+
+## Building Binaries
+
+Build individual packages:
+```bash
+nix build .#crucible-downstairs
+nix build .#dsc
+nix build .#crutest
+nix build .#crucible-hammer
+nix build .#crucible-agent
+nix build .#crucible-pantry
+```
+
+Build all test tools:
+```bash
+nix build .#crucible-test-tools
+```
+
+Binaries will be in `result/bin/`.
+
+## Docker Images
+
+Build downstairs Docker image:
+```bash
+nix build .#downstairs-docker
+docker load < result
+docker run -v /tmp/data:/data -p 8810:8810 crucible-downstairs:latest run -d /data -p 8810
+```
+
+Build test cluster Docker image:
+```bash
+nix build .#test-cluster-docker
+docker load < result
+docker run crucible-test-cluster:latest
+```
+
+The test cluster image automatically starts 3 downstairs instances via DSC.
+
+## Managing Downstairs with DSC
+
+Once downstairs are running via `nix run .#start-downstairs`, you can manage them:
+
+Check status:
+```bash
+./result/bin/dsc cmd state -c 0
+```
+
+Get port for downstairs client:
+```bash
+./result/bin/dsc cmd port -c 0
+```
+
+Dump downstairs state:
+```bash
+./result/bin/dsc cmd dump
+```
+
+Shutdown all downstairs:
+```bash
+./result/bin/dsc cmd shutdown
+```
+
+## Architecture Note
+
+Crucible's protocol requires exactly **3 downstairs instances** for triple replication and quorum. The `start-downstairs` command defaults to 3 instances, but allows specifying N for testing purposes. When using more than 3 downstairs, only the first 3 will be used by the upstairs client.
+
 ## License
 
 Unless otherwise noted, all components are licensed under the [Mozilla Public License Version 2.0](LICENSE).
