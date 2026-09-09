@@ -1,0 +1,15 @@
+[package]
+name = "cmon-common"
+version = "0.1.0"
+license = "MPL-2.0"
+edition = "2024"
+
+[dependencies]
+clap.workspace = true
+crucible.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
+crucible-workspace-hack.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
