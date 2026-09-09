@@ -30,7 +30,7 @@ enum Action {
     /// Read from stdin
     Dtrace {
         /// Fields to display from dtrace received input
-        #[clap(short, long, default_value = "io-count")]
+        #[clap(short, long, value_delimiter = ',', default_value = "io-count")]
         #[arg(value_enum)]
         output: Vec<DtraceDisplay>,
     },
@@ -134,6 +134,10 @@ fn dtrace_loop(output: Vec<DtraceDisplay>) {
     loop {
         let mut dtrace_out = String::new();
         match handle.read_line(&mut dtrace_out) {
+            // A zero length read means stdin has reached EOF, which
+            // happens as soon as the dtrace script feeding us exits.
+            // There is nothing more coming, so stop.
+            Ok(0) => break,
             Ok(_) => {
                 if count == 0 {
                     println!("{}", format_header(&output));
@@ -160,8 +164,10 @@ fn dtrace_loop(output: Vec<DtraceDisplay>) {
 
                 println!("{}", format_row(&d_out, delta, &output));
             }
+            // A read error on stdin is fatal.
             Err(e) => {
-                println!("Error: {:?}", e);
+                println!("Error: {e:?}");
+                break;
             }
         }
     }
