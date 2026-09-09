@@ -1,6 +1,9 @@
 // Copyright 2022 Oxide Computer Company
 use clap::{Parser, Subcommand};
-use cmon_common::{DtraceDisplay, DtraceWrapper, format_header, format_row};
+use cmon_common::{
+    DtraceDisplay, DtraceWrapper, default_display_fields, format_header,
+    format_row,
+};
 use crucible_control_client::Client;
 use std::collections::HashMap;
 use std::io::{self, BufRead};
@@ -29,7 +32,12 @@ enum Action {
     /// Read from stdin
     Dtrace {
         /// Fields to display from dtrace received input
-        #[clap(short, long, value_delimiter = ',', default_value = "io-count")]
+        #[clap(
+            short,
+            long,
+            value_delimiter = ',',
+            default_values_t = default_display_fields()
+        )]
         #[arg(value_enum)]
         output: Vec<DtraceDisplay>,
     },
