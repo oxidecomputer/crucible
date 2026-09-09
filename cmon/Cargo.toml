@@ -7,11 +7,10 @@ edition = "2024"
 [dependencies]
 clap.workspace = true
 clearscreen.workspace = true
+cmon-common.workspace = true
 crucible.workspace = true
 crucible-control-client.workspace = true
-crucible-protocol.workspace = true
 serde_json.workspace = true
 strum.workspace = true
-strum_macros.workspace = true
 tokio.workspace = true
 crucible-workspace-hack.workspace = true

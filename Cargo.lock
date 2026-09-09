@@ -960,14 +960,25 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clearscreen",
+ "cmon-common",
  "crucible",
  "crucible-control-client",
- "crucible-protocol",
+ "crucible-workspace-hack",
+ "serde_json",
+ "strum 0.27.2",
+ "tokio",
+]
+
+[[package]]
+name = "cmon-common"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "crucible",
  "crucible-workspace-hack",
  "serde_json",
  "strum 0.27.2",
  "strum_macros 0.28.0",
- "tokio",
 ]
 
 [[package]]
