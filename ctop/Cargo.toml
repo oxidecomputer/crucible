@@ -1,0 +1,13 @@
+[package]
+name = "ctop"
+version = "0.1.0"
+license = "MPL-2.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+cmon-common.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+crucible-workspace-hack.workspace = true

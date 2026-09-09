@@ -12,6 +12,7 @@ members = [
     "cmon-common",
     "crudd",
     "crutest",
+    "ctop",
     "downstairs",
     "downstairs-api",
     "downstairs-types",
