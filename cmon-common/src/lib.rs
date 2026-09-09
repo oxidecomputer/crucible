@@ -52,8 +52,8 @@ impl fmt::Display for DtraceDisplay {
     }
 }
 
-/// Translate what the default DsState string is (that we are getting from DTrace)
-/// into a three letter string for printing.
+/// Translate what the default DsState string is (that we are getting from
+/// DTrace) into a three letter string for printing.
 pub fn short_state(dss: &str) -> String {
     match dss {
         "Active" => "ACT".to_string(),
