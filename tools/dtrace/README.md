@@ -570,23 +570,23 @@ different processes arrive interleaved.  The pid, along with the
 The output is meant to be sent to another command for additional
 processing.  `cmon dtrace` renders it as a table:
 ```
-alan@cat:crucible$ pfexec dtrace -s upstairs_raw.d | \
-    cmon dtrace -o pid,session-id,state,next-job-id,job-delta,extent-limit
-   PID  SESSION DS0 DS1 DS2 NEXTJOB DELTA EXTL
-  1441 b8b1f0a2 ACT ACT ACT 4192837   ---    0
-  1454 3c9d5e17 ACT ACT ACT   51204   ---    0
- 13485 f42a7c80 ACT  LR ACT  998311   ---   41
-  1441 b8b1f0a2 ACT ACT ACT 4205440 12603    0
-  1454 3c9d5e17 ACT ACT ACT   51204     0    0
- 13485 f42a7c80 ACT  LR ACT 1002265  3954   41
+alan@cat:crucible$ pfexec dtrace -s upstairs_raw.d | cmon dtrace
+   PID  SESSION DS0 DS1 DS2    NEXTJOB DELTA EXTL RECD RECN
+  1441 b8b1f0a2 ACT ACT ACT    4192837   ---    0    0    0
+  1454 3c9d5e17 ACT ACT ACT      51204   ---    0    0    0
+ 13485 f42a7c80 ACT  LR ACT     998311   ---   41    0    0
+  1441 b8b1f0a2 ACT ACT ACT    4205440 12603    0    0    0
+  1454 3c9d5e17 ACT ACT ACT      51204     0    0    0    0
+ 13485 f42a7c80 ACT  LR ACT    1002265  3954   41    0    0
 ```
 `DELTA` is how much `NEXTJOB` moved since that session's previous line,
 which is why the first line of each session shows `---` instead.  A job
 ID only means anything within its own session, so the sessions are
 tracked separately.
 
-Use `-o` to pick which fields to show, and `cmon dtrace-decode` to see
-the columns each field produces.
+Above is the default set of fields for cmon.  Use `-o` to pick your own,
+as a comma separated list.  Use `cmon dtrace-decode` to see the names
+cmon takes and the columns each one produces.
 
 If the upstairs is not yet running, add the -Z flag to dtrace so it will
 wait to find the matching probe.

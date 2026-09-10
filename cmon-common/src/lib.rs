@@ -38,6 +38,8 @@ pub enum DtraceDisplay {
     UpCount,
     DsCount,
     Reconcile,
+    DsReconciled,
+    DsReconcileNeeded,
     LiveRepair,
     Connected,
     Replaced,
@@ -46,6 +48,31 @@ pub enum DtraceDisplay {
     NextJobId,
     JobDelta,
     DsDelay,
+    WriteBytesOut,
+    RoLrSkipped,
+    DsIoInProgress,
+    DsIoDone,
+    DsIoSkipped,
+    DsIoError,
+}
+
+/// The fields shown when none are asked for.
+///
+/// Enough to see what every upstairs on the system is doing without
+/// running off the side of an eighty column terminal: who it is, what
+/// its downstairs are up to, how fast work is being issued, and
+/// whether it is repairing anything.
+pub fn default_display_fields() -> Vec<DtraceDisplay> {
+    vec![
+        DtraceDisplay::Pid,
+        DtraceDisplay::SessionId,
+        DtraceDisplay::State,
+        DtraceDisplay::NextJobId,
+        DtraceDisplay::JobDelta,
+        DtraceDisplay::ExtentLimit,
+        DtraceDisplay::DsReconciled,
+        DtraceDisplay::DsReconcileNeeded,
+    ]
 }
 
 /// Print the name `-o` accepts for this field.
@@ -138,10 +165,16 @@ pub fn format_header(dd: &[DtraceDisplay]) -> String {
                     "REC", "NREC", "AREC"
                 ));
             }
+            DtraceDisplay::DsReconciled => {
+                result.push_str(&format!(" {:>4}", "RECD"));
+            }
+            DtraceDisplay::DsReconcileNeeded => {
+                result.push_str(&format!(" {:>4}", "RECN"));
+            }
             DtraceDisplay::LiveRepair => {
                 result.push_str(&format!(
                     " {:>4} {:>4} {:>4}",
-                    "LRC0", "LRC1", "LRC0"
+                    "LRC0", "LRC1", "LRC2"
                 ));
                 result.push_str(&format!(
                     " {:>4} {:>4} {:>4}",
@@ -173,14 +206,47 @@ pub fn format_header(dd: &[DtraceDisplay]) -> String {
             DtraceDisplay::ExtentLimit => {
                 result.push_str(&format!(" {:>4}", "EXTL"));
             }
+            // Job IDs run to seven digits on a long lived upstairs and
+            // eight is not far off, so give the column room rather
+            // than letting the number push the rest of the row over.
             DtraceDisplay::NextJobId => {
-                result.push_str(&format!(" {:>7}", "NEXTJOB"));
+                result.push_str(&format!(" {:>10}", "NEXTJOB"));
             }
             DtraceDisplay::JobDelta => {
                 result.push_str(&format!(" {:>5}", "DELTA"));
             }
             DtraceDisplay::DsDelay => {
-                result.push_str(&format!(" {:>5}", "DELAY"));
+                result.push_str(&format!(
+                    " {:>5} {:>5} {:>5}",
+                    "DLY0", "DLY1", "DLY2"
+                ));
+            }
+            DtraceDisplay::WriteBytesOut => {
+                result.push_str(&format!(" {:>10}", "WRBYTES"));
+            }
+            DtraceDisplay::RoLrSkipped => {
+                result.push_str(&format!(
+                    " {:>4} {:>4} {:>4}",
+                    "RLS0", "RLS1", "RLS2"
+                ));
+            }
+            DtraceDisplay::DsIoInProgress => {
+                result.push_str(&format!(
+                    " {:>5} {:>5} {:>5}",
+                    "IP0", "IP1", "IP2"
+                ));
+            }
+            DtraceDisplay::DsIoDone => {
+                result
+                    .push_str(&format!(" {:>5} {:>5} {:>5}", "D0", "D1", "D2"));
+            }
+            DtraceDisplay::DsIoSkipped => {
+                result
+                    .push_str(&format!(" {:>5} {:>5} {:>5}", "S0", "S1", "S2"));
+            }
+            DtraceDisplay::DsIoError => {
+                result
+                    .push_str(&format!(" {:>4} {:>4} {:>4}", "E0", "E1", "E2"));
             }
         }
     }
@@ -230,33 +296,33 @@ pub fn format_row(
                 ));
             }
             DtraceDisplay::UpCount => {
-                result.push_str(&format!(" {:3}", d_out.up_count));
+                result.push_str(&format!(" {:>3}", d_out.up_count));
             }
             DtraceDisplay::DsCount => {
-                result.push_str(&format!(" {:5}", d_out.ds_count));
+                result.push_str(&format!(" {:>5}", d_out.ds_count));
             }
             DtraceDisplay::IoCount | DtraceDisplay::IoSummary => {
                 result.push_str(&format!(
-                    " {:5} {:5} {:5}",
+                    " {:>5} {:>5} {:>5}",
                     d_out.ds_io_count.in_progress[ClientId::new(0)],
                     d_out.ds_io_count.in_progress[ClientId::new(1)],
                     d_out.ds_io_count.in_progress[ClientId::new(2)],
                 ));
                 result.push_str(&format!(
-                    " {:5} {:5} {:5}",
+                    " {:>5} {:>5} {:>5}",
                     d_out.ds_io_count.done[ClientId::new(0)],
                     d_out.ds_io_count.done[ClientId::new(1)],
                     d_out.ds_io_count.done[ClientId::new(2)],
                 ));
                 result.push_str(&format!(
-                    " {:5} {:5} {:5}",
+                    " {:>5} {:>5} {:>5}",
                     d_out.ds_io_count.skipped[ClientId::new(0)],
                     d_out.ds_io_count.skipped[ClientId::new(1)],
                     d_out.ds_io_count.skipped[ClientId::new(2)],
                 ));
                 if matches!(display_item, DtraceDisplay::IoCount) {
                     result.push_str(&format!(
-                        " {:4} {:4} {:4}",
+                        " {:>4} {:>4} {:>4}",
                         d_out.ds_io_count.error[ClientId::new(0)],
                         d_out.ds_io_count.error[ClientId::new(1)],
                         d_out.ds_io_count.error[ClientId::new(2)],
@@ -265,21 +331,27 @@ pub fn format_row(
             }
             DtraceDisplay::Reconcile => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_reconciled,
                     d_out.ds_reconcile_needed,
                     d_out.ds_reconcile_aborted,
                 ));
             }
+            DtraceDisplay::DsReconciled => {
+                result.push_str(&format!(" {:>4}", d_out.ds_reconciled));
+            }
+            DtraceDisplay::DsReconcileNeeded => {
+                result.push_str(&format!(" {:>4}", d_out.ds_reconcile_needed));
+            }
             DtraceDisplay::LiveRepair => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_live_repair_completed[0],
                     d_out.ds_live_repair_completed[1],
                     d_out.ds_live_repair_completed[2],
                 ));
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_live_repair_aborted[0],
                     d_out.ds_live_repair_aborted[1],
                     d_out.ds_live_repair_aborted[2],
@@ -287,7 +359,7 @@ pub fn format_row(
             }
             DtraceDisplay::Connected => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_connected[0],
                     d_out.ds_connected[1],
                     d_out.ds_connected[2],
@@ -295,7 +367,7 @@ pub fn format_row(
             }
             DtraceDisplay::Replaced => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_replaced[0],
                     d_out.ds_replaced[1],
                     d_out.ds_replaced[2],
@@ -303,23 +375,23 @@ pub fn format_row(
             }
             DtraceDisplay::ExtentLiveRepair => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_extents_repaired[0],
                     d_out.ds_extents_repaired[1],
                     d_out.ds_extents_repaired[2],
                 ));
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_extents_confirmed[0],
                     d_out.ds_extents_confirmed[1],
                     d_out.ds_extents_confirmed[2],
                 ));
             }
             DtraceDisplay::ExtentLimit => {
-                result.push_str(&format!(" {:4}", d_out.ds_extent_limit));
+                result.push_str(&format!(" {:>4}", d_out.ds_extent_limit));
             }
             DtraceDisplay::NextJobId => {
-                result.push_str(&format!(" {:>7}", d_out.next_job_id));
+                result.push_str(&format!(" {:>10}", d_out.next_job_id));
             }
             DtraceDisplay::JobDelta => match delta {
                 Some(delta) => result.push_str(&format!(" {delta:>5}")),
@@ -327,10 +399,53 @@ pub fn format_row(
             },
             DtraceDisplay::DsDelay => {
                 result.push_str(&format!(
-                    " {:5} {:5} {:5}",
+                    " {:>5} {:>5} {:>5}",
                     d_out.ds_delay_us[0],
                     d_out.ds_delay_us[1],
                     d_out.ds_delay_us[2],
+                ));
+            }
+            DtraceDisplay::WriteBytesOut => {
+                result.push_str(&format!(" {:>10}", d_out.write_bytes_out));
+            }
+            DtraceDisplay::RoLrSkipped => {
+                result.push_str(&format!(
+                    " {:>4} {:>4} {:>4}",
+                    d_out.ds_ro_lr_skipped[0],
+                    d_out.ds_ro_lr_skipped[1],
+                    d_out.ds_ro_lr_skipped[2],
+                ));
+            }
+            DtraceDisplay::DsIoInProgress => {
+                result.push_str(&format!(
+                    " {:>5} {:>5} {:>5}",
+                    d_out.ds_io_count.in_progress[ClientId::new(0)],
+                    d_out.ds_io_count.in_progress[ClientId::new(1)],
+                    d_out.ds_io_count.in_progress[ClientId::new(2)],
+                ));
+            }
+            DtraceDisplay::DsIoDone => {
+                result.push_str(&format!(
+                    " {:>5} {:>5} {:>5}",
+                    d_out.ds_io_count.done[ClientId::new(0)],
+                    d_out.ds_io_count.done[ClientId::new(1)],
+                    d_out.ds_io_count.done[ClientId::new(2)],
+                ));
+            }
+            DtraceDisplay::DsIoSkipped => {
+                result.push_str(&format!(
+                    " {:>5} {:>5} {:>5}",
+                    d_out.ds_io_count.skipped[ClientId::new(0)],
+                    d_out.ds_io_count.skipped[ClientId::new(1)],
+                    d_out.ds_io_count.skipped[ClientId::new(2)],
+                ));
+            }
+            DtraceDisplay::DsIoError => {
+                result.push_str(&format!(
+                    " {:>4} {:>4} {:>4}",
+                    d_out.ds_io_count.error[ClientId::new(0)],
+                    d_out.ds_io_count.error[ClientId::new(1)],
+                    d_out.ds_io_count.error[ClientId::new(2)],
                 ));
             }
         }
@@ -473,30 +588,13 @@ mod tests {
     /// format_header and format_row must agree on the width of every
     /// field, or the columns silently stop lining up.  Check each
     /// variant on its own so a failure names the field that drifted.
-    ///
-    /// DsDelay does not hold: it prints one `DELAY` heading over three
-    /// per-client values, so everything to its right is already
-    /// misaligned.  This move is not the place to change what gets
-    /// printed, so the field is listed as known-broken here and fixed
-    /// separately.
     #[test]
     fn test_header_and_row_widths_match() {
         let info = sample_dtrace_info();
-        let known_broken = [DtraceDisplay::DsDelay];
 
         for variant in DtraceDisplay::iter() {
             let header = format_header(&[variant]);
             let row = format_row(1234, &info, Some(0), &[variant]);
-
-            if known_broken.contains(&variant) {
-                assert_ne!(
-                    header.chars().count(),
-                    row.chars().count(),
-                    "{variant:?} lines up now, take it off the \
-                     known-broken list",
-                );
-                continue;
-            }
 
             assert_eq!(
                 header.chars().count(),
@@ -535,6 +633,24 @@ mod tests {
 
         assert!(count.starts_with(&summary));
         assert_eq!(count.chars().count(), summary.chars().count() + 15);
+    }
+
+    /// The default set is what you get with no `-o`, so it has to line
+    /// up and it has to fit on a terminal.
+    #[test]
+    fn test_default_display_fields_fit_eighty_columns() {
+        let info = sample_dtrace_info();
+        let fields = default_display_fields();
+
+        let header = format_header(&fields);
+        let row = format_row(1234, &info, Some(0), &fields);
+
+        assert_eq!(header.chars().count(), row.chars().count());
+        assert!(
+            header.chars().count() <= 80,
+            "default header is {} columns wide: {header:?}",
+            header.chars().count(),
+        );
     }
 
     /// A session's first record has no delta to report, and the
