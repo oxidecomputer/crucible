@@ -296,33 +296,33 @@ pub fn format_row(
                 ));
             }
             DtraceDisplay::UpCount => {
-                result.push_str(&format!(" {:3}", d_out.up_count));
+                result.push_str(&format!(" {:>3}", d_out.up_count));
             }
             DtraceDisplay::DsCount => {
-                result.push_str(&format!(" {:5}", d_out.ds_count));
+                result.push_str(&format!(" {:>5}", d_out.ds_count));
             }
             DtraceDisplay::IoCount | DtraceDisplay::IoSummary => {
                 result.push_str(&format!(
-                    " {:5} {:5} {:5}",
+                    " {:>5} {:>5} {:>5}",
                     d_out.ds_io_count.in_progress[ClientId::new(0)],
                     d_out.ds_io_count.in_progress[ClientId::new(1)],
                     d_out.ds_io_count.in_progress[ClientId::new(2)],
                 ));
                 result.push_str(&format!(
-                    " {:5} {:5} {:5}",
+                    " {:>5} {:>5} {:>5}",
                     d_out.ds_io_count.done[ClientId::new(0)],
                     d_out.ds_io_count.done[ClientId::new(1)],
                     d_out.ds_io_count.done[ClientId::new(2)],
                 ));
                 result.push_str(&format!(
-                    " {:5} {:5} {:5}",
+                    " {:>5} {:>5} {:>5}",
                     d_out.ds_io_count.skipped[ClientId::new(0)],
                     d_out.ds_io_count.skipped[ClientId::new(1)],
                     d_out.ds_io_count.skipped[ClientId::new(2)],
                 ));
                 if matches!(display_item, DtraceDisplay::IoCount) {
                     result.push_str(&format!(
-                        " {:4} {:4} {:4}",
+                        " {:>4} {:>4} {:>4}",
                         d_out.ds_io_count.error[ClientId::new(0)],
                         d_out.ds_io_count.error[ClientId::new(1)],
                         d_out.ds_io_count.error[ClientId::new(2)],
@@ -331,7 +331,7 @@ pub fn format_row(
             }
             DtraceDisplay::Reconcile => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_reconciled,
                     d_out.ds_reconcile_needed,
                     d_out.ds_reconcile_aborted,
@@ -345,13 +345,13 @@ pub fn format_row(
             }
             DtraceDisplay::LiveRepair => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_live_repair_completed[0],
                     d_out.ds_live_repair_completed[1],
                     d_out.ds_live_repair_completed[2],
                 ));
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_live_repair_aborted[0],
                     d_out.ds_live_repair_aborted[1],
                     d_out.ds_live_repair_aborted[2],
@@ -359,7 +359,7 @@ pub fn format_row(
             }
             DtraceDisplay::Connected => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_connected[0],
                     d_out.ds_connected[1],
                     d_out.ds_connected[2],
@@ -367,7 +367,7 @@ pub fn format_row(
             }
             DtraceDisplay::Replaced => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_replaced[0],
                     d_out.ds_replaced[1],
                     d_out.ds_replaced[2],
@@ -375,20 +375,20 @@ pub fn format_row(
             }
             DtraceDisplay::ExtentLiveRepair => {
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_extents_repaired[0],
                     d_out.ds_extents_repaired[1],
                     d_out.ds_extents_repaired[2],
                 ));
                 result.push_str(&format!(
-                    " {:4} {:4} {:4}",
+                    " {:>4} {:>4} {:>4}",
                     d_out.ds_extents_confirmed[0],
                     d_out.ds_extents_confirmed[1],
                     d_out.ds_extents_confirmed[2],
                 ));
             }
             DtraceDisplay::ExtentLimit => {
-                result.push_str(&format!(" {:4}", d_out.ds_extent_limit));
+                result.push_str(&format!(" {:>4}", d_out.ds_extent_limit));
             }
             DtraceDisplay::NextJobId => {
                 result.push_str(&format!(" {:>10}", d_out.next_job_id));
