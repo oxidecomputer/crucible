@@ -33,7 +33,7 @@ use ratatui::{
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Notify, RwLock};
@@ -57,6 +57,16 @@ const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How many trailing lines of the dtrace command's stderr to keep.  We
 /// only need enough to say why it gave up.
 const MAX_STDERR_LINES: usize = 5;
+
+/// How long a session can go without reporting before its row is
+/// marked stale.  The upstairs fires the probe once a second, so a few
+/// seconds of silence means something has its attention.
+const STALE_THRESHOLD_SECS: u64 = 5;
+
+/// How long a session can go without reporting before its row is
+/// dropped.  An upstairs that has exited is never coming back, and its
+/// row would otherwise sit there forever.
+const REMOVE_THRESHOLD_SECS: u64 = 30;
 
 #[derive(Parser, Debug)]
 #[clap(name = "ctop", term_width = 80)]
@@ -91,6 +101,10 @@ struct SessionData {
     dtrace_info: DtraceInfo,
     last_job_id: u64,
     current_delta: Option<u64>,
+
+    /// When the last record for this session arrived, which is what
+    /// makes a row stale and eventually removes it.
+    last_updated: Instant,
 }
 
 /// What the reader has collected, for the display to draw.
@@ -191,6 +205,7 @@ async fn reader_loop(
                     session.last_job_id = job_id;
                     session.pid = wrapper.pid;
                     session.dtrace_info = wrapper.status;
+                    session.last_updated = Instant::now();
                 }
                 // First record for this session, so there is nothing to
                 // take a delta against yet.
@@ -202,6 +217,7 @@ async fn reader_loop(
                             dtrace_info: wrapper.status,
                             last_job_id: job_id,
                             current_delta: None,
+                            last_updated: Instant::now(),
                         },
                     );
                 }
@@ -248,11 +264,27 @@ fn is_quit(key_event: KeyEvent) -> bool {
     )
 }
 
+/// Has this session gone quiet long enough to mark its row?
+fn is_stale(session: &SessionData, now: Instant) -> bool {
+    now.duration_since(session.last_updated)
+        > Duration::from_secs(STALE_THRESHOLD_SECS)
+}
+
+/// Has this session gone quiet long enough to drop its row?
+fn is_expired(session: &SessionData, now: Instant) -> bool {
+    now.duration_since(session.last_updated)
+        > Duration::from_secs(REMOVE_THRESHOLD_SECS)
+}
+
 /// Draw one frame: a clock, a row per session, and the keys.
+///
+/// `now` is passed in rather than read here so that every row in a
+/// frame is judged stale against the same instant.
 fn render_table_view(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     sessions: &[&SessionData],
     display_fields: &[DtraceDisplay],
+    now: Instant,
     timestamp: u64,
 ) -> io::Result<()> {
     terminal.draw(|f| {
@@ -272,25 +304,36 @@ fn render_table_view(
         let rows: Vec<Row> = sessions
             .iter()
             .map(|s| {
-                Row::new(vec![format_row(
+                let indicator = if is_stale(s, now) { '*' } else { ' ' };
+                let row = format_row(
                     s.pid,
                     &s.dtrace_info,
                     s.current_delta,
                     display_fields,
-                )])
+                );
+                Row::new(vec![format!("{indicator}{row}")])
             })
             .collect();
+
+        // Rows carry a one character indicator, so the header is padded
+        // by the same amount to keep the columns lined up.
+        let header = format!(" {}", format_header(display_fields));
 
         // One full width column: format_row has already laid the row
         // out, and the table clips it to the area instead of letting a
         // row wider than the terminal wrap and push the layout apart.
         let table = Table::new(rows, [Constraint::Min(0)])
-            .header(Row::new(vec![format_header(display_fields)]))
+            .header(Row::new(vec![header]))
             .column_spacing(0);
 
         f.render_widget(table, chunks[1]);
 
-        f.render_widget(Paragraph::new("['q': Quit]"), chunks[2]);
+        f.render_widget(
+            Paragraph::new(format!(
+                "['q': Quit]  * = stale ({STALE_THRESHOLD_SECS}s)"
+            )),
+            chunks[2],
+        );
     })?;
 
     Ok(())
@@ -305,9 +348,20 @@ async fn display_loop(
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     loop {
+        // One instant for the whole frame, so every row is judged
+        // against the same clock.
+        let now = Instant::now();
+
         // This is scoped so the lock is dropped before the wait below.
         {
-            let state = state.read().await;
+            let mut state = state.write().await;
+
+            // Drop sessions that stopped reporting a while ago.  An
+            // upstairs that has gone is not coming back, and its row
+            // would otherwise sit here for the life of the program.
+            state
+                .sessions
+                .retain(|_, session| !is_expired(session, now));
 
             // HashMap order is arbitrary, so sort or the rows shuffle
             // themselves on every frame.
@@ -324,6 +378,7 @@ async fn display_loop(
                 &mut terminal,
                 &sessions,
                 display_fields,
+                now,
                 timestamp,
             )?;
 
