@@ -1,12 +1,11 @@
 // Copyright 2022 Oxide Computer Company
 use clap::{Parser, Subcommand};
-use cmon_common::{DtraceDisplay, format_header, format_row};
+use cmon_common::{DtraceDisplay, DtraceWrapper, format_header, format_row};
 use crucible_control_client::Client;
+use std::collections::HashMap;
 use std::io::{self, BufRead};
 use strum::IntoEnumIterator;
 use tokio::time::{Duration, sleep};
-
-use crucible::DtraceInfo;
 
 /// Connect to crucible control server
 #[derive(Parser, Debug)]
@@ -126,11 +125,16 @@ async fn show_repair_stats(args: Args) {
 
 // Take input from stdin (assumed to be output from the dtrace raw script)
 // and print out the fields requested in the output Vec.
+//
+// The raw script matches every upstairs on the system, so records for
+// different sessions arrive interleaved.  A job ID only means anything
+// within its own session, so the last one seen is tracked per session
+// and a session's first record has no delta to report.
 fn dtrace_loop(output: Vec<DtraceDisplay>) {
     let stdin = io::stdin();
     let mut handle = stdin.lock();
     let mut count = 0;
-    let mut last_job_id: u64 = 0;
+    let mut last_job_id: HashMap<String, u64> = HashMap::new();
     loop {
         let mut dtrace_out = String::new();
         match handle.read_line(&mut dtrace_out) {
@@ -143,26 +147,27 @@ fn dtrace_loop(output: Vec<DtraceDisplay>) {
                     println!("{}", format_header(&output));
                 }
                 count = (count + 1) % 20;
-                let d_out: DtraceInfo = match serde_json::from_str(&dtrace_out)
-                {
-                    Ok(a) => a,
-                    Err(e) => {
-                        println!("Err {:?}", e);
-                        continue;
-                    }
-                };
+                let wrapper: DtraceWrapper =
+                    match serde_json::from_str(&dtrace_out) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            println!("Err {e:?}");
+                            continue;
+                        }
+                    };
 
-                // The first record has nothing to compare against, so
-                // it reports the job ID itself rather than a delta.
-                let job_id = d_out.next_job_id.0;
-                let delta = if last_job_id == 0 {
-                    job_id
-                } else {
-                    job_id - last_job_id
-                };
-                last_job_id = job_id;
+                // insert() hands back this session's previous job ID,
+                // or None the first time we see the session, which is
+                // exactly when there is no delta to report.
+                let job_id = wrapper.status.next_job_id.0;
+                let delta = last_job_id
+                    .insert(wrapper.status.session_id.clone(), job_id)
+                    .map(|last| job_id.saturating_sub(last));
 
-                println!("{}", format_row(&d_out, delta, &output));
+                println!(
+                    "{}",
+                    format_row(wrapper.pid, &wrapper.status, delta, &output)
+                );
             }
             // A read error on stdin is fatal.
             Err(e) => {

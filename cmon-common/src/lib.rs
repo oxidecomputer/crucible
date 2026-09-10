@@ -9,12 +9,29 @@
 
 use clap::ValueEnum;
 use crucible::{ClientId, DtraceInfo};
+use serde::Deserialize;
 use std::fmt;
 use strum_macros::EnumIter;
+
+/// One line of output from the raw dtrace script.
+///
+/// The probe itself only knows about the upstairs that fired it, so the
+/// script wraps each record with the pid of the process it came from.
+/// The script matches every upstairs on the system, so records from
+/// different processes arrive interleaved and the pid, along with the
+/// `session_id` inside the status allows us to match prior records.
+#[derive(Debug, Deserialize)]
+pub struct DtraceWrapper {
+    pub pid: u32,
+    pub status: DtraceInfo,
+}
 
 /// The possible fields we will display when receiving DTrace output.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, EnumIter)]
 pub enum DtraceDisplay {
+    Pid,
+    SessionId,
+    UpstairsId,
     State,
     IoCount,
     IoSummary,
@@ -31,24 +48,18 @@ pub enum DtraceDisplay {
     DsDelay,
 }
 
+/// Print the name `-o` accepts for this field.
+///
+/// Delegating to clap rather than writing the names out means dtrace-decode
+/// will always print the correct options.
 impl fmt::Display for DtraceDisplay {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            DtraceDisplay::State => write!(f, "state"),
-            DtraceDisplay::IoCount => write!(f, "io_count"),
-            DtraceDisplay::IoSummary => write!(f, "io_summary"),
-            DtraceDisplay::UpCount => write!(f, "up_count"),
-            DtraceDisplay::DsCount => write!(f, "ds_count"),
-            DtraceDisplay::Reconcile => write!(f, "reconcile"),
-            DtraceDisplay::LiveRepair => write!(f, "live_repair"),
-            DtraceDisplay::Connected => write!(f, "connected"),
-            DtraceDisplay::Replaced => write!(f, "replaced"),
-            DtraceDisplay::ExtentLiveRepair => write!(f, "extent_live_repair"),
-            DtraceDisplay::ExtentLimit => write!(f, "extent_under_repair"),
-            DtraceDisplay::NextJobId => write!(f, "next_job_id"),
-            DtraceDisplay::JobDelta => write!(f, "job_delta"),
-            DtraceDisplay::DsDelay => write!(f, "ds_delay"),
-        }
+        // No variant is #[value(skip)], which is the only way this
+        // returns None.
+        self.to_possible_value()
+            .expect("every variant has a clap value")
+            .get_name()
+            .fmt(f)
     }
 }
 
@@ -83,6 +94,15 @@ pub fn format_header(dd: &[DtraceDisplay]) -> String {
     let mut result = String::new();
     for display_item in dd.iter() {
         match display_item {
+            DtraceDisplay::Pid => {
+                result.push_str(&format!(" {:>5}", "PID"));
+            }
+            DtraceDisplay::SessionId => {
+                result.push_str(&format!(" {:>8}", "SESSION"));
+            }
+            DtraceDisplay::UpstairsId => {
+                result.push_str(&format!(" {:>8}", "UPSTAIRS"));
+            }
             DtraceDisplay::State => {
                 result.push_str(&format!(
                     " {:>3} {:>3} {:>3}",
@@ -169,19 +189,38 @@ pub fn format_header(dd: &[DtraceDisplay]) -> String {
 
 /// Build a single data row for the given display fields.
 ///
-/// `job_delta` is how far `next_job_id` moved since the previous
-/// record, which is the only value that cannot be derived from `d_out`
-/// alone, so the caller works it out and passes it in.
+/// `pid` and `delta` are the two values that cannot be derived from
+/// `d_out` alone, so the caller supplies them.  The pid arrives
+/// alongside the status in a [`DtraceWrapper`]; the delta is how far
+/// `next_job_id` moved since this session's previous record, and is
+/// `None` for a session's first record.
 ///
 /// Column widths here must match [`format_header`].
 pub fn format_row(
+    pid: u32,
     d_out: &DtraceInfo,
-    job_delta: u64,
+    delta: Option<u64>,
     dd: &[DtraceDisplay],
 ) -> String {
     let mut result = String::new();
     for display_item in dd.iter() {
         match display_item {
+            DtraceDisplay::Pid => {
+                result.push_str(&format!(" {pid:>5}"));
+            }
+            // The ids are UUIDs, which are far too wide to put in a
+            // table.  The leading characters are enough to tell the
+            // sessions on one machine apart.
+            DtraceDisplay::SessionId => {
+                let session_short =
+                    d_out.session_id.chars().take(8).collect::<String>();
+                result.push_str(&format!(" {session_short:>8}"));
+            }
+            DtraceDisplay::UpstairsId => {
+                let upstairs_short =
+                    d_out.upstairs_id.chars().take(8).collect::<String>();
+                result.push_str(&format!(" {upstairs_short:>8}"));
+            }
             DtraceDisplay::State => {
                 result.push_str(&format!(
                     " {:>3} {:>3} {:>3}",
@@ -282,9 +321,10 @@ pub fn format_row(
             DtraceDisplay::NextJobId => {
                 result.push_str(&format!(" {:>7}", d_out.next_job_id));
             }
-            DtraceDisplay::JobDelta => {
-                result.push_str(&format!(" {job_delta:5}"));
-            }
+            DtraceDisplay::JobDelta => match delta {
+                Some(delta) => result.push_str(&format!(" {delta:>5}")),
+                None => result.push_str(&format!(" {:>5}", "---")),
+            },
             DtraceDisplay::DsDelay => {
                 result.push_str(&format!(
                     " {:5} {:5} {:5}",
@@ -360,33 +400,35 @@ mod tests {
         }
     }
 
-    /// These strings are what `cmon dtrace -o` accepts, so they are
-    /// part of the command line and should not drift.
+    /// These strings are both what `dtrace-decode` prints and what
+    /// `-o` accepts, so they are part of the command line.
     #[test]
     fn test_dtrace_display_to_string() {
         assert_eq!(DtraceDisplay::State.to_string(), "state");
-        assert_eq!(DtraceDisplay::IoCount.to_string(), "io_count");
-        assert_eq!(DtraceDisplay::IoSummary.to_string(), "io_summary");
-        assert_eq!(DtraceDisplay::NextJobId.to_string(), "next_job_id");
-        assert_eq!(DtraceDisplay::JobDelta.to_string(), "job_delta");
-        assert_eq!(
-            DtraceDisplay::ExtentLimit.to_string(),
-            "extent_under_repair"
-        );
+        assert_eq!(DtraceDisplay::IoCount.to_string(), "io-count");
+        assert_eq!(DtraceDisplay::IoSummary.to_string(), "io-summary");
+        assert_eq!(DtraceDisplay::NextJobId.to_string(), "next-job-id");
+        assert_eq!(DtraceDisplay::JobDelta.to_string(), "job-delta");
+        assert_eq!(DtraceDisplay::ExtentLimit.to_string(), "extent-limit");
     }
 
+    /// Every label `dtrace-decode` prints has to round trip back
+    /// through `-o`, or the subcommand is telling you to type something
+    /// that does not work.
     #[test]
-    fn test_dtrace_display_all_variants_have_display() {
+    fn test_display_round_trips_through_value_enum() {
         for variant in DtraceDisplay::iter() {
-            let display = variant.to_string();
+            let name = variant.to_string();
             assert!(
-                !display.is_empty(),
-                "Variant {variant:?} has empty display",
+                !name.is_empty(),
+                "Variant {variant:?} has an empty display",
             );
-            assert!(
-                display.chars().all(|c| c.is_lowercase() || c == '_'),
-                "Variant {variant:?} display '{display}' should be \
-                 lowercase with underscores",
+
+            let parsed = DtraceDisplay::from_str(&name, false);
+            assert_eq!(
+                parsed,
+                Ok(variant),
+                "-o {name} does not parse back to {variant:?}",
             );
         }
     }
@@ -444,7 +486,7 @@ mod tests {
 
         for variant in DtraceDisplay::iter() {
             let header = format_header(&[variant]);
-            let row = format_row(&info, 0, &[variant]);
+            let row = format_row(1234, &info, Some(0), &[variant]);
 
             if known_broken.contains(&variant) {
                 assert_ne!(
@@ -472,7 +514,7 @@ mod tests {
         let info = sample_dtrace_info();
 
         assert_eq!(format_header(&[]), "");
-        assert_eq!(format_row(&info, 0, &[]), "");
+        assert_eq!(format_row(1234, &info, Some(0), &[]), "");
 
         let forward =
             format_header(&[DtraceDisplay::UpCount, DtraceDisplay::DsCount]);
@@ -487,10 +529,60 @@ mod tests {
     fn test_io_summary_drops_error_columns() {
         let info = sample_dtrace_info();
 
-        let count = format_row(&info, 0, &[DtraceDisplay::IoCount]);
-        let summary = format_row(&info, 0, &[DtraceDisplay::IoSummary]);
+        let count = format_row(1234, &info, Some(0), &[DtraceDisplay::IoCount]);
+        let summary =
+            format_row(1234, &info, Some(0), &[DtraceDisplay::IoSummary]);
 
         assert!(count.starts_with(&summary));
         assert_eq!(count.chars().count(), summary.chars().count() + 15);
+    }
+
+    /// A session's first record has no delta to report, and the
+    /// placeholder has to hold the column open so the rest of the row
+    /// does not shift left on that one line.
+    #[test]
+    fn test_format_row_missing_delta_keeps_width() {
+        let info = sample_dtrace_info();
+        let fields = [DtraceDisplay::JobDelta];
+
+        let with = format_row(1234, &info, Some(42), &fields);
+        let without = format_row(1234, &info, None, &fields);
+
+        assert!(with.contains("42"));
+        assert!(without.contains("---"));
+        assert_eq!(with.chars().count(), without.chars().count());
+    }
+
+    /// The ids are UUIDs and the columns are eight characters, so they
+    /// are truncated rather than allowed to push the table apart.
+    #[test]
+    fn test_id_fields_are_truncated() {
+        let info = sample_dtrace_info();
+        let fields = [DtraceDisplay::SessionId, DtraceDisplay::UpstairsId];
+        let row = format_row(1234, &info, Some(0), &fields);
+
+        assert!(row.contains("87654321"));
+        assert!(row.contains("12345678"));
+        assert!(!row.contains("-1111-"));
+        assert_eq!(format_header(&fields).chars().count(), row.chars().count(),);
+    }
+
+    /// What the dtrace script emits has to land in DtraceWrapper.  This
+    /// is the shape of one line of `upstairs_raw.d` output.
+    #[test]
+    fn test_dtrace_wrapper_parses_script_output() {
+        let line = format!(
+            r#"{{"pid":12345,"status":{}}}"#,
+            serde_json::to_string(&sample_dtrace_info()).unwrap()
+        );
+
+        let wrapper: DtraceWrapper = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(wrapper.pid, 12345);
+        assert_eq!(
+            wrapper.status.session_id,
+            "87654321-1111-2222-3333-444444444444"
+        );
+        assert_eq!(wrapper.status.ds_state[0], "Active");
     }
 }
