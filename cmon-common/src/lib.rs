@@ -30,7 +30,7 @@ pub struct DtraceWrapper {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, EnumIter)]
 pub enum DtraceDisplay {
     Pid,
-    Session,
+    SessionId,
     UpstairsId,
     State,
     IoCount,
@@ -97,7 +97,7 @@ pub fn format_header(dd: &[DtraceDisplay]) -> String {
             DtraceDisplay::Pid => {
                 result.push_str(&format!(" {:>5}", "PID"));
             }
-            DtraceDisplay::Session => {
+            DtraceDisplay::SessionId => {
                 result.push_str(&format!(" {:>8}", "SESSION"));
             }
             DtraceDisplay::UpstairsId => {
@@ -211,7 +211,7 @@ pub fn format_row(
             // The ids are UUIDs, which are far too wide to put in a
             // table.  The leading characters are enough to tell the
             // sessions on one machine apart.
-            DtraceDisplay::Session => {
+            DtraceDisplay::SessionId => {
                 let session_short =
                     d_out.session_id.chars().take(8).collect::<String>();
                 result.push_str(&format!(" {session_short:>8}"));
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn test_id_fields_are_truncated() {
         let info = sample_dtrace_info();
-        let fields = [DtraceDisplay::Session, DtraceDisplay::UpstairsId];
+        let fields = [DtraceDisplay::SessionId, DtraceDisplay::UpstairsId];
         let row = format_row(1234, &info, Some(0), &fields);
 
         assert!(row.contains("87654321"));

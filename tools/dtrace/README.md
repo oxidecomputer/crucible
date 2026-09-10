@@ -571,7 +571,7 @@ The output is meant to be sent to another command for additional
 processing.  `cmon dtrace` renders it as a table:
 ```
 alan@cat:crucible$ pfexec dtrace -s upstairs_raw.d | \
-    cmon dtrace -o pid,session,state,next-job-id,job-delta,extent-limit
+    cmon dtrace -o pid,session-id,state,next-job-id,job-delta,extent-limit
    PID  SESSION DS0 DS1 DS2 NEXTJOB DELTA EXTL
   1441 b8b1f0a2 ACT ACT ACT 4192837   ---    0
   1454 3c9d5e17 ACT ACT ACT   51204   ---    0
