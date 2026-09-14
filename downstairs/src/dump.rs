@@ -98,13 +98,37 @@ pub fn dump_region(
 
     assert!(!region_dir.is_empty());
     for (index, dir) in region_dir.iter().enumerate() {
-        // Open Region read only
-        let region = Region::open(dir, false, true, &log)?;
+        // Open Region read only, tolerating MissingContextSlot errors
+        let (region, open_errors) = Region::open_for_dump(dir, &log)?;
 
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
 
-        let max_block = total_extents as u64 * blocks_per_extent;
+        // Resolve a bare block argument to its extent before checking errors
+        if cmp_extent.is_none() {
+            if let Some(b) = block {
+                let max_block = total_extents as u64 * blocks_per_extent;
+                let ce = (b / blocks_per_extent) as u32;
+                if ce >= total_extents {
+                    bail!(
+                        "Requested block {} > max block {}",
+                        b,
+                        max_block - 1,
+                    );
+                }
+                cmp_extent = Some(ExtentId(ce));
+            }
+        }
+
+        // If any extent failed to open, decide whether to bail or warn.
+        for (eid, err) in &open_errors {
+            if cmp_extent == Some(*eid) {
+                // The user specifically requested this failed extent.
+                bail!("extent {} could not be opened: {}", eid, err);
+            }
+            println!("WARNING: extent {} skipped: {}", eid, err);
+        }
+
         /*
          * The extent number is the index in the overall hashmap.
          * For each entry in all_extents hashmap, we have an ExtInfo
@@ -114,29 +138,11 @@ pub fn dump_region(
         for e in &region.extents {
             let e = match e {
                 extent::ExtentState::Opened(extent) => extent,
-                extent::ExtentState::Closed => panic!("dump on closed extent!"),
+                // Closed here means the extent failed to open; we already
+                // warned above, so just skip it.
+                extent::ExtentState::Closed => continue,
             };
             let en = e.number();
-
-            /*
-             * If we want just a specific block, then figure out what extent
-             * that block belongs to so we can just display the
-             * requested information. We only need to do this
-             * once.
-             */
-            if cmp_extent.is_none() {
-                if let Some(b) = block {
-                    let ce = (b / blocks_per_extent) as u32;
-                    if ce >= total_extents {
-                        bail!(
-                            "Requested block {} > max block {}",
-                            b,
-                            max_block - 1,
-                        );
-                    }
-                    cmp_extent = Some(ExtentId(ce));
-                }
-            }
 
             /*
              * If we are looking at one extent in detail, we skip all the
@@ -583,8 +589,12 @@ fn show_extent(
          * in the Vec based on index.
          */
         for (index, dir) in region_dir.iter().enumerate() {
-            // Open Region read only
-            let mut region = Region::open(dir, false, true, &log)?;
+            let (mut region, open_errors) = Region::open_for_dump(dir, &log)?;
+            if let Some((_eid, err)) =
+                open_errors.iter().find(|(e, _)| *e == cmp_extent)
+            {
+                bail!("extent {} could not be opened: {}", cmp_extent, err);
+            }
 
             let response = region.region_read(
                 &RegionReadRequest(vec![RegionReadReq {
@@ -695,8 +705,12 @@ fn show_extent_block(
      * in the Vec based on index.
      */
     for (index, dir) in region_dir.iter().enumerate() {
-        // Open Region read only
-        let mut region = Region::open(dir, false, true, &log)?;
+        let (mut region, open_errors) = Region::open_for_dump(dir, &log)?;
+        if let Some((_eid, err)) =
+            open_errors.iter().find(|(e, _)| *e == cmp_extent)
+        {
+            bail!("extent {} could not be opened: {}", cmp_extent, err);
+        }
 
         let response = region.region_read(
             &RegionReadRequest(vec![RegionReadReq {
