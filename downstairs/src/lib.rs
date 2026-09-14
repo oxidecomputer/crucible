@@ -16,6 +16,7 @@ use crucible_common::{
     RegionDefinition, VerboseTimeout, build_logger, integrity_hash,
     mkdir_for_file,
 };
+use crucible_downstairs_types::repair::{ConnectionMemoryReport, MemoryReport};
 use crucible_protocol::{
     BlockContext, CRUCIBLE_MESSAGE_VERSION, CrucibleDecoder, JobId, Message,
     MessageWriter, ReadBlockContext, ReconciliationId, SnapshotDetails,
@@ -126,6 +127,17 @@ impl IOop {
             | IOop::ExtentLiveNoOp { dependencies } => dependencies,
         }
     }
+
+    fn heap_size(&self) -> usize {
+        let deps_bytes = std::mem::size_of_val(self.deps());
+        let payload_bytes = match self {
+            IOop::Write { writes, .. }
+            | IOop::WriteUnwritten { writes, .. } => writes.heap_size(),
+            IOop::Read { requests, .. } => requests.heap_size(),
+            _ => 0,
+        };
+        deps_bytes + payload_bytes
+    }
 }
 
 /// Read request for a particular extent
@@ -185,6 +197,10 @@ impl RegionReadRequest {
 
     fn iter(&self) -> impl Iterator<Item = &RegionReadReq> {
         self.0.iter()
+    }
+
+    fn heap_size(&self) -> usize {
+        self.0.capacity() * size_of::<RegionReadReq>()
     }
 }
 
@@ -431,6 +447,19 @@ impl RegionWrite {
 
     fn iter(&self) -> impl Iterator<Item = &RegionWriteReq> {
         self.0.iter()
+    }
+
+    fn heap_size(&self) -> usize {
+        let vec_bytes = self.0.capacity() * size_of::<RegionWriteReq>();
+        let inner_bytes: usize = self
+            .0
+            .iter()
+            .map(|req| {
+                req.write.block_contexts.capacity() * size_of::<BlockContext>()
+                    + req.write.data.len()
+            })
+            .sum();
+        vec_bytes + inner_bytes
     }
 }
 
@@ -1591,6 +1620,7 @@ impl ActiveConnection {
             } else {
                 self.work.completed.push(new_id);
             }
+            self.work.update_completed_hwm();
 
             cdt::work__done!(|| new_id.0);
             Ok(None)
@@ -2244,6 +2274,8 @@ impl DownstairsBuilder {
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
                 .unwrap(),
+            read_bytes_hwm: 0,
+            write_bytes_hwm: 0,
         })
     }
 }
@@ -2285,6 +2317,12 @@ pub struct Downstairs {
 
     // A reqwest client, to be reused when creating progenitor clients
     pub reqwest_client: reqwest::Client,
+
+    /// Largest read response buffer allocated (bytes)
+    read_bytes_hwm: usize,
+
+    /// Largest write data buffer received (bytes)
+    write_bytes_hwm: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2550,6 +2588,47 @@ impl Downstairs {
         self.active_upstairs.values().cloned().collect()
     }
 
+    pub fn memory_report(&self) -> MemoryReport {
+        let def = self.region.def();
+        let active = self.active_upstairs();
+        let connections = active
+            .iter()
+            .map(|conn_id| {
+                let work = self.work(*conn_id);
+                ConnectionMemoryReport {
+                    pending_jobs: work.pending_jobs.len(),
+                    pending_jobs_bytes: work.pending_jobs_bytes(),
+                    pending_jobs_capacity_hwm: work.pending_capacity_hwm,
+                    completed_ranges: work.completed.range_count(),
+                    completed_ranges_hwm: work.completed_ranges_hwm,
+                }
+            })
+            .collect();
+        let extent_count = def.extent_count();
+        let extent_meta_bytes = self.region.extent_meta_bytes();
+        MemoryReport {
+            extent_count,
+            extent_size: def.extent_size().value,
+            block_size: def.block_size(),
+            region_bytes: self.region.heap_size(),
+            extent_meta_bytes,
+            bytes_per_extent: if extent_count > 0 {
+                extent_meta_bytes / extent_count as usize
+            } else {
+                0
+            },
+            dirty_extent_count: self.region.dirty_extent_count(),
+            read_bytes_hwm: self.read_bytes_hwm,
+            write_bytes_hwm: self.write_bytes_hwm,
+            tokio_worker_threads: tokio::runtime::Handle::current()
+                .metrics()
+                .num_workers(),
+            rayon_threads: self.region.rayon_thread_count(),
+            active_connections: active.len(),
+            connections,
+        }
+    }
+
     /// Does one round of work for the given connection
     #[cfg(test)]
     async fn do_work_for(&mut self, conn_id: ConnectionId) -> Result<()> {
@@ -2679,6 +2758,12 @@ impl Downstairs {
             match v {
                 DownstairsRequest::ShowWork => {
                     show_work(&mut self);
+                }
+                DownstairsRequest::MemoryReport { done } => {
+                    let report = self.memory_report();
+                    if done.send(report).is_err() {
+                        warn!(log, "failed to reply to MemoryReport");
+                    }
                 }
                 DownstairsRequest::IsExtentClosed { eid, done } => {
                     let closed = matches!(
@@ -3117,12 +3202,33 @@ impl Downstairs {
     }
 
     /// Handles a single message, either negotiation or doing IO
+    fn update_hwm(&mut self, m: &Message) {
+        match m {
+            Message::Write { data, .. }
+            | Message::WriteUnwritten { data, .. } => {
+                let n = data.len();
+                if n > self.write_bytes_hwm {
+                    self.write_bytes_hwm = n;
+                }
+            }
+            Message::ReadRequest { count, .. } => {
+                let n =
+                    *count as usize * self.region.def().block_size() as usize;
+                if n > self.read_bytes_hwm {
+                    self.read_bytes_hwm = n;
+                }
+            }
+            _ => {}
+        }
+    }
+
     async fn on_message_for(
         &mut self,
         id: ConnectionId,
         m: Message,
         client_state: &DownstairsClientState,
     ) {
+        self.update_hwm(&m);
         let Some(state) = self.connection_state.get_mut(&id) else {
             warn!(self.log, "got message for disconnected id {id:?}; ignoring");
             return;
@@ -3230,6 +3336,9 @@ enum DownstairsRequest {
     /// This is fire-and-forget, so there's no oneshot reply channel
     ShowWork,
 
+    /// Returns a memory usage report
+    MemoryReport { done: oneshot::Sender<MemoryReport> },
+
     /// A message has arrived for the given id
     ///
     /// This is fire-and-forget; if the Downstairs doesn't like the message, it
@@ -3258,6 +3367,14 @@ impl DownstairsHandle {
         self.tx
             .send(DownstairsRequest::ShowWork)
             .context("could not send message on channel")
+    }
+
+    pub async fn memory_report(&self) -> Result<MemoryReport> {
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(DownstairsRequest::MemoryReport { done })
+            .context("could not send message on channel")?;
+        rx.await.context("could not receive result")
     }
 
     async fn new_connection(
@@ -3298,6 +3415,12 @@ pub struct Work {
     /// Track completed jobs since the last flush
     completed: CompletedJobs,
 
+    /// High-water mark for pending_jobs VecDeque capacity
+    pending_capacity_hwm: usize,
+
+    /// High-water mark for completed job range count
+    completed_ranges_hwm: usize,
+
     log: Logger,
 }
 
@@ -3306,6 +3429,8 @@ impl Work {
         Work {
             pending_jobs: VecDeque::new(),
             completed: CompletedJobs::new(last_flush),
+            pending_capacity_hwm: 0,
+            completed_ranges_hwm: 0,
             log,
         }
     }
@@ -3314,9 +3439,28 @@ impl Work {
         self.completed.completed().collect()
     }
 
+    fn pending_jobs_bytes(&self) -> usize {
+        let deque_bytes =
+            self.pending_jobs.capacity() * size_of::<PendingJob>();
+        let inner_bytes: usize =
+            self.pending_jobs.iter().map(|job| job.io.heap_size()).sum();
+        deque_bytes + inner_bytes
+    }
+
     /// Pushes a new job to the back of the queue
     fn add_pending_job(&mut self, job: PendingJob) {
         self.pending_jobs.push_back(job);
+        let cap = self.pending_jobs.capacity();
+        if cap > self.pending_capacity_hwm {
+            self.pending_capacity_hwm = cap;
+        }
+    }
+
+    fn update_completed_hwm(&mut self) {
+        let ranges = self.completed.range_count();
+        if ranges > self.completed_ranges_hwm {
+            self.completed_ranges_hwm = ranges;
+        }
     }
 
     /// Returns a list of pending job IDs
@@ -6246,5 +6390,330 @@ mod test {
         assert!(matches!(f, Ok(Message::YesItsMe { .. })));
 
         assert!(jh.stop().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn memory_report_no_connections() {
+        let dir = tempdir().unwrap();
+        let ds = create_test_downstairs(512, 4, 3, &dir).unwrap();
+
+        let report = ds.memory_report();
+        assert_eq!(report.extent_count, 3);
+        assert_eq!(report.extent_size, 4);
+        assert_eq!(report.block_size, 512);
+        assert_eq!(report.active_connections, 0);
+        assert!(report.connections.is_empty());
+        // 3 extents, each with two BlockBitArrays of 4 blocks.
+        // Each BlockBitArray uses ceil(4/32) = 1 u32 = 4 bytes.
+        // So per extent: 2 * 4 = 8 bytes of extent inner data.
+        // region_bytes includes the extents Vec capacity, the
+        // extent inner data, the dirty_extents HashSet, and the
+        // dir PathBuf.
+        assert!(report.region_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn memory_report_one_connection_no_work() {
+        let dir = tempdir().unwrap();
+        let mut ds = create_test_downstairs(512, 4, 3, &dir).unwrap();
+
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 10,
+        };
+        let conn_id = ConnectionId(0);
+        let (_cancel, _rx) =
+            ds.add_fake_connection(upstairs_connection, conn_id);
+        ds.promote_to_active(upstairs_connection, conn_id).unwrap();
+
+        let report = ds.memory_report();
+        assert_eq!(report.active_connections, 1);
+        assert_eq!(report.connections.len(), 1);
+        assert_eq!(report.connections[0].pending_jobs, 0);
+        assert_eq!(report.connections[0].pending_jobs_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn memory_report_one_connection_with_work() {
+        let dir = tempdir().unwrap();
+        let mut ds = create_test_downstairs(512, 4, 3, &dir).unwrap();
+
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 10,
+        };
+        let conn_id = ConnectionId(0);
+        let (_cancel, _rx) =
+            ds.add_fake_connection(upstairs_connection, conn_id);
+        ds.promote_to_active(upstairs_connection, conn_id).unwrap();
+
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(0),
+                offset: BlockOffset(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
+        };
+        ds.active_mut(conn_id).add_work(JobId(1000), rio);
+
+        let rio = IOop::Read {
+            dependencies: vec![JobId(1000)],
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(1),
+                offset: BlockOffset(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
+        };
+        ds.active_mut(conn_id).add_work(JobId(1001), rio);
+
+        let report = ds.memory_report();
+        assert_eq!(report.active_connections, 1);
+        assert_eq!(report.connections.len(), 1);
+        assert_eq!(report.connections[0].pending_jobs, 2);
+        assert!(report.connections[0].pending_jobs_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn memory_report_region_scales_with_extents() {
+        // Verify that more extents means more region memory.
+        let dir_small = tempdir().unwrap();
+        let ds_small = create_test_downstairs(512, 4, 3, &dir_small).unwrap();
+        let small = ds_small.memory_report();
+
+        let dir_large = tempdir().unwrap();
+        let ds_large = create_test_downstairs(512, 4, 30, &dir_large).unwrap();
+        let large = ds_large.memory_report();
+
+        assert_eq!(small.extent_count, 3);
+        assert_eq!(large.extent_count, 30);
+        assert!(
+            large.region_bytes > small.region_bytes,
+            "30 extents ({}) should use more memory than 3 ({})",
+            large.region_bytes,
+            small.region_bytes,
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_report_region_scales_with_extent_size() {
+        // Larger extents (more blocks) means bigger BlockBitArrays.
+        let dir_small = tempdir().unwrap();
+        let ds_small = create_test_downstairs(512, 4, 3, &dir_small).unwrap();
+        let small = ds_small.memory_report();
+
+        let dir_large = tempdir().unwrap();
+        let ds_large =
+            create_test_downstairs(512, 1024, 3, &dir_large).unwrap();
+        let large = ds_large.memory_report();
+
+        assert_eq!(small.extent_size, 4);
+        assert_eq!(large.extent_size, 1024);
+        assert!(
+            large.region_bytes > small.region_bytes,
+            "1024-block extents ({}) should use more memory \
+             than 4-block extents ({})",
+            large.region_bytes,
+            small.region_bytes,
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_report_multiple_connections() {
+        // Use a read-only downstairs so multiple active connections
+        // are allowed.
+        let dir = tempdir().unwrap();
+        let mut region_options: crucible_common::RegionOptions =
+            Default::default();
+        region_options.set_block_size(512);
+        region_options.set_extent_size(Block::new(4, 9));
+        region_options.set_uuid(Uuid::new_v4());
+        mkdir_for_file(dir.path()).unwrap();
+        let mut region = Region::create(&dir, region_options, csl()).unwrap();
+        region.extend(3, Backend::default()).unwrap();
+        let path_dir = dir.as_ref().to_path_buf();
+        let mut ds = Downstairs::new_builder(&path_dir, true)
+            .set_logger(csl())
+            .build()
+            .unwrap();
+
+        // First connection with 1 pending job
+        let uc1 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 10,
+        };
+        let conn1 = ConnectionId(0);
+        let (_cancel1, _rx1) = ds.add_fake_connection(uc1, conn1);
+        ds.promote_to_active(uc1, conn1).unwrap();
+
+        let rio = IOop::Read {
+            dependencies: Vec::new(),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(0),
+                offset: BlockOffset(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
+        };
+        ds.active_mut(conn1).add_work(JobId(1000), rio);
+
+        // Second connection with 3 pending jobs
+        let uc2 = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 10,
+        };
+        let conn2 = ConnectionId(1);
+        let (_cancel2, _rx2) = ds.add_fake_connection(uc2, conn2);
+        ds.promote_to_active(uc2, conn2).unwrap();
+
+        for i in 0..3 {
+            let rio = IOop::Read {
+                dependencies: Vec::new(),
+                requests: RegionReadRequest(vec![RegionReadReq {
+                    extent: ExtentId(0),
+                    offset: BlockOffset(1),
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
+            };
+            ds.active_mut(conn2).add_work(JobId(2000 + i), rio);
+        }
+
+        let report = ds.memory_report();
+        assert_eq!(report.active_connections, 2);
+        assert_eq!(report.connections.len(), 2);
+
+        let mut pending: Vec<usize> =
+            report.connections.iter().map(|c| c.pending_jobs).collect();
+        pending.sort();
+        assert_eq!(pending, vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn memory_report_per_extent_cost() {
+        // Verify that bytes_per_extent is consistent across regions
+        // with different extent counts but the same extent size.
+        let dir = tempdir().unwrap();
+        let ds = create_test_downstairs(512, 4, 10, &dir).unwrap();
+
+        let report = ds.memory_report();
+        assert!(report.bytes_per_extent > 0);
+        assert_eq!(
+            report.extent_meta_bytes,
+            report.bytes_per_extent * report.extent_count as usize,
+        );
+
+        let dir2 = tempdir().unwrap();
+        let ds2 = create_test_downstairs(512, 4, 20, &dir2).unwrap();
+        let report2 = ds2.memory_report();
+
+        assert_eq!(report.bytes_per_extent, report2.bytes_per_extent);
+    }
+
+    #[tokio::test]
+    async fn memory_report_hwm_tracking() {
+        let dir = tempdir().unwrap();
+        let mut ds = create_test_downstairs(4096, 4, 3, &dir).unwrap();
+
+        // Initially zero
+        let report = ds.memory_report();
+        assert_eq!(report.read_bytes_hwm, 0);
+        assert_eq!(report.write_bytes_hwm, 0);
+
+        // Simulate a write message
+        let write_msg = Message::Write {
+            header: crucible_protocol::WriteHeader {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                job_id: JobId(1),
+                dependencies: vec![],
+                start: BlockIndex(0),
+                contexts: vec![],
+            },
+            data: Bytes::from(vec![0u8; 4096 * 10]),
+        };
+        ds.update_hwm(&write_msg);
+
+        let report = ds.memory_report();
+        assert_eq!(report.write_bytes_hwm, 4096 * 10);
+        assert_eq!(report.read_bytes_hwm, 0);
+
+        // Smaller write doesn't change the HWM
+        let small_write = Message::Write {
+            header: crucible_protocol::WriteHeader {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                job_id: JobId(2),
+                dependencies: vec![],
+                start: BlockIndex(0),
+                contexts: vec![],
+            },
+            data: Bytes::from(vec![0u8; 4096]),
+        };
+        ds.update_hwm(&small_write);
+        assert_eq!(ds.memory_report().write_bytes_hwm, 4096 * 10);
+
+        // Simulate a read request
+        let read_msg = Message::ReadRequest {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            job_id: JobId(3),
+            dependencies: vec![],
+            start: BlockIndex(0),
+            count: 20,
+        };
+        ds.update_hwm(&read_msg);
+
+        let report = ds.memory_report();
+        assert_eq!(report.read_bytes_hwm, 4096 * 20);
+        assert_eq!(report.write_bytes_hwm, 4096 * 10);
+    }
+
+    #[tokio::test]
+    async fn memory_report_work_queue_hwm() {
+        let dir = tempdir().unwrap();
+        let mut ds = create_test_downstairs(512, 4, 3, &dir).unwrap();
+
+        let uc = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 10,
+        };
+        let conn_id = ConnectionId(0);
+        let (_cancel, _rx) = ds.add_fake_connection(uc, conn_id);
+        ds.promote_to_active(uc, conn_id).unwrap();
+
+        // HWMs start at zero
+        let report = ds.memory_report();
+        assert_eq!(report.connections[0].pending_jobs_capacity_hwm, 0);
+        assert_eq!(report.connections[0].completed_ranges_hwm, 0);
+
+        // Add several jobs to grow the VecDeque capacity
+        for i in 0..10 {
+            let rio = IOop::Read {
+                dependencies: Vec::new(),
+                requests: RegionReadRequest(vec![RegionReadReq {
+                    extent: ExtentId(0),
+                    offset: BlockOffset(0),
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
+            };
+            ds.active_mut(conn_id).add_work(JobId(1000 + i), rio);
+        }
+
+        let report = ds.memory_report();
+        assert!(report.connections[0].pending_jobs_capacity_hwm >= 10);
+
+        // Process all work to trigger completed range HWM
+        ds.do_work_for(conn_id).await.unwrap();
+
+        let report = ds.memory_report();
+        assert_eq!(report.connections[0].pending_jobs, 0);
+        // Capacity HWM remains from the peak
+        assert!(report.connections[0].pending_jobs_capacity_hwm >= 10);
+        // Completed ranges HWM should be at least 1
+        assert!(report.connections[0].completed_ranges_hwm >= 1);
     }
 }

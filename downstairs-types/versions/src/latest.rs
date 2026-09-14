@@ -7,9 +7,11 @@ pub mod admin {
 }
 
 pub mod repair {
+    pub use crate::v1::repair::ConnectionMemoryReport;
     pub use crate::v1::repair::ExtentFilePath;
     pub use crate::v1::repair::ExtentPath;
     pub use crate::v1::repair::FileSpec;
     pub use crate::v1::repair::FileType;
     pub use crate::v1::repair::JobPath;
+    pub use crate::v1::repair::MemoryReport;
 }

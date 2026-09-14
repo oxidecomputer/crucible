@@ -23,6 +23,7 @@ api_versions!([
     // |  example for the next person.
     // v
     // (next_int, IDENT),
+    (2, MEMORY),
     (1, INITIAL),
 ]);
 
@@ -122,4 +123,14 @@ pub trait CrucibleDownstairsRepairApi {
     async fn get_work(
         rqctx: RequestContext<Self::Context>,
     ) -> Result<HttpResponseOk<bool>, HttpError>;
+
+    /// Memory usage report
+    #[endpoint {
+        method = GET,
+        path = "/memory",
+        versions = VERSION_MEMORY..,
+    }]
+    async fn get_memory(
+        rqctx: RequestContext<Self::Context>,
+    ) -> Result<HttpResponseOk<latest::repair::MemoryReport>, HttpError>;
 }
