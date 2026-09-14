@@ -270,21 +270,21 @@ fn is_quit(key_event: KeyEvent) -> bool {
 
 /// Apply one key to the cursor.  Returns true if anything moved.
 fn handle_navigation(key_event: KeyEvent, state: &mut CtopState) -> bool {
-    let delta = match key_event {
+    let down = match key_event {
         KeyEvent {
             code: KeyCode::Up,
             modifiers: KeyModifiers::NONE,
             ..
-        } => -1,
+        } => false,
         KeyEvent {
             code: KeyCode::Down,
             modifiers: KeyModifiers::NONE,
             ..
-        } => 1,
+        } => true,
         _ => return false,
     };
 
-    move_selection(state, delta);
+    move_selection(state, down);
     true
 }
 
@@ -298,14 +298,9 @@ fn sorted_session_ids(state: &CtopState) -> Vec<String> {
         .collect()
 }
 
-/// Move the cursor "delta" rows, stopping at either end.
-fn move_selection(state: &mut CtopState, delta: isize) {
+/// Move the cursor one row, stopping at either end.
+fn move_selection(state: &mut CtopState, down: bool) {
     let ids = sorted_session_ids(state);
-    // Not just an early out: with no rows, `last` below is -1, and
-    // clamp panics when its range ends below where it starts.
-    if ids.is_empty() {
-        return;
-    }
 
     let current = state
         .selected_session
@@ -313,9 +308,17 @@ fn move_selection(state: &mut CtopState, delta: isize) {
         .and_then(|id| ids.iter().position(|s| s == id))
         .unwrap_or(0);
 
-    let last = ids.len() as isize - 1;
-    let next = (current as isize).saturating_add(delta).clamp(0, last);
-    state.selected_session = Some(ids[next as usize].clone());
+    let next = if down {
+        current + 1
+    } else {
+        current.saturating_sub(1)
+    };
+
+    // get() rather than indexing: past the last row, or with no rows
+    // at all, there is nowhere to go and the cursor stays put.
+    if let Some(id) = ids.get(next) {
+        state.selected_session = Some(id.clone());
+    }
 }
 
 /// Put the cursor on a session that exists, if it is not on one.
