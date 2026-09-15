@@ -27,8 +27,8 @@ use crucible::DtraceInfo;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
-    widgets::{Paragraph, Row, Table},
+    layout::{Constraint, Direction, Layout},
+    widgets::{Paragraph, Row, Table, TableState},
 };
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -113,6 +113,10 @@ struct CtopState {
     /// Keyed on session id.  A pid can hold more than one session, and
     /// a session outlives no pid, so the session is the identity here.
     sessions: HashMap<String, SessionData>,
+
+    /// The session name the cursor is on.  A row index would move the
+    /// cursor onto a different session if one above expire or arrives.
+    selected_session: Option<String>,
 
     /// Set when the dtrace command is no longer running, which tells
     /// the display to stop.  Otherwise a dtrace that never started
@@ -264,6 +268,76 @@ fn is_quit(key_event: KeyEvent) -> bool {
     )
 }
 
+/// Apply one key to the cursor.  Returns true if anything moved.
+fn handle_navigation(key_event: KeyEvent, state: &mut CtopState) -> bool {
+    let down = match key_event {
+        KeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => false,
+        KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => true,
+        _ => return false,
+    };
+
+    move_selection(state, down);
+    true
+}
+
+/// Session ids in the order their rows are drawn.
+fn sorted_session_ids(state: &CtopState) -> Vec<String> {
+    let mut sessions: Vec<&SessionData> = state.sessions.values().collect();
+    sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
+    sessions
+        .into_iter()
+        .map(|s| s.dtrace_info.session_id.clone())
+        .collect()
+}
+
+/// Move the cursor one row, stopping at either end.
+fn move_selection(state: &mut CtopState, down: bool) {
+    let ids = sorted_session_ids(state);
+
+    let current = state
+        .selected_session
+        .as_ref()
+        .and_then(|id| ids.iter().position(|s| s == id))
+        .unwrap_or(0);
+
+    let next = if down {
+        current + 1
+    } else {
+        current.saturating_sub(1)
+    };
+
+    // get() rather than indexing: past the last row, or with no rows
+    // at all, there is nowhere to go and the cursor stays put.
+    if let Some(id) = ids.get(next) {
+        state.selected_session = Some(id.clone());
+    }
+}
+
+/// Put the cursor on a session that exists, if it is not on one.
+///
+/// Because the cursor names a session rather than a row, it only has
+/// to move somewhere when that session goes away.  Going to the top
+/// is predictable which is worth more than writing a bunch of code
+/// to figure out what is the best place to go.
+fn reselect_if_gone(state: &mut CtopState) {
+    let still_here = state
+        .selected_session
+        .as_ref()
+        .is_some_and(|id| state.sessions.contains_key(id));
+
+    if !still_here {
+        state.selected_session = sorted_session_ids(state).first().cloned();
+    }
+}
+
 /// Has this session gone quiet long enough to mark its row?
 fn is_stale(session: &SessionData, now: Instant) -> bool {
     now.duration_since(session.last_updated)
@@ -284,6 +358,7 @@ fn render_table_view(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     sessions: &[&SessionData],
     display_fields: &[DtraceDisplay],
+    table_state: &mut TableState,
     now: Instant,
     timestamp: u64,
 ) -> io::Result<()> {
@@ -301,10 +376,20 @@ fn render_table_view(
             chunks[0],
         );
 
+        let selected = table_state.selected();
+
         let rows: Vec<Row> = sessions
             .iter()
-            .map(|s| {
-                let indicator = if is_stale(s, now) { '*' } else { ' ' };
+            .enumerate()
+            .map(|(idx, s)| {
+                // Cursor location will override the stale flag.
+                let indicator = if Some(idx) == selected {
+                    '>'
+                } else if is_stale(s, now) {
+                    '*'
+                } else {
+                    ' '
+                };
                 let row = format_row(
                     s.pid,
                     &s.dtrace_info,
@@ -326,14 +411,32 @@ fn render_table_view(
             .header(Row::new(vec![header]))
             .column_spacing(0);
 
-        f.render_widget(table, chunks[1]);
+        // Rendering with the state lets the table scroll itself to keep
+        // the cursor on screen when there are more sessions than rows.
+        f.render_stateful_widget(table, chunks[1], table_state);
+
+        // Keys on the left, where the cursor is on the right.
+        let position = match (selected, sessions.len()) {
+            (_, 0) => " no sessions".to_string(),
+            (Some(i), n) => format!(" [{}/{}]", i + 1, n),
+            (None, n) => format!(" [{n}]"),
+        };
+        let footer = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(position.chars().count() as u16),
+            ])
+            .split(chunks[2]);
 
         f.render_widget(
             Paragraph::new(format!(
-                "['q': Quit]  * = stale ({STALE_THRESHOLD_SECS}s)"
+                "[up/down: Move | 'q': Quit]  \
+                 > = cursor, * = stale ({STALE_THRESHOLD_SECS}s)"
             )),
-            chunks[2],
+            footer[0],
         );
+        f.render_widget(Paragraph::new(position), footer[1]);
     })?;
 
     Ok(())
@@ -346,6 +449,7 @@ async fn display_loop(
     display_fields: &[DtraceDisplay],
 ) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let mut table_state = TableState::default();
 
     loop {
         // One instant for the whole frame, so every row is judged
@@ -363,11 +467,22 @@ async fn display_loop(
                 .sessions
                 .retain(|_, session| !is_expired(session, now));
 
+            reselect_if_gone(&mut state);
+
             // HashMap order is arbitrary, so sort or the rows shuffle
             // themselves on every frame.
             let mut sessions: Vec<&SessionData> =
                 state.sessions.values().collect();
             sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
+
+            // The cursor names a session; the table wants a row.
+            table_state.select(state.selected_session.as_ref().and_then(
+                |id| {
+                    sessions
+                        .iter()
+                        .position(|s| &s.dtrace_info.session_id == id)
+                },
+            ));
 
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -378,6 +493,7 @@ async fn display_loop(
                 &mut terminal,
                 &sessions,
                 display_fields,
+                &mut table_state,
                 now,
                 timestamp,
             )?;
@@ -393,10 +509,11 @@ async fn display_loop(
         }
 
         while event::poll(Duration::ZERO)? {
-            if let Event::Key(key_event) = event::read()?
-                && is_quit(key_event)
-            {
-                return Ok(());
+            if let Event::Key(key_event) = event::read()? {
+                if is_quit(key_event) {
+                    return Ok(());
+                }
+                handle_navigation(key_event, &mut *state.write().await);
             }
         }
     }
