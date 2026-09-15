@@ -6,8 +6,8 @@
 //! running the dtrace script yourself and piping it in.  ctop runs the
 //! equivalent command itself and reads its output.
 //!
-//! This is the plumbing on its own: rows are printed as they arrive.
-//! The curses display is built on top of it.
+//! ctop keeps one row per session and updates it in place, so a screen
+//! of upstairs can be watched at once.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -15,11 +15,30 @@ use cmon_common::{
     DtraceDisplay, DtraceWrapper, default_display_fields, format_header,
     format_row,
 };
-use std::collections::HashMap;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    execute,
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode,
+    },
+};
+use crucible::DtraceInfo;
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Layout},
+    widgets::{Paragraph, Row, Table},
+};
+use std::collections::{HashMap, VecDeque};
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::{Notify, RwLock};
 
-/// The dtrace command we run when not given one.
+/// The dtrace command we run by default
 ///
 /// This is `tools/dtrace/upstairs_raw.d` as a one liner, so ctop does
 /// not have to find a script file on disk.  The differences from the
@@ -28,18 +47,22 @@ use tokio::process::Command;
 /// a header of its own.
 ///
 /// dtrace needs privileges, so ctop has to be started with them
-/// (`pfexec ctop`).  Without them dtrace exits immediately and says why
-/// on stderr.
+/// (`pfexec ctop`).  Without them dtrace exits immediately, and ctop
+/// reports why on the way out.
 const DEFAULT_DTRACE_CMD: &str = r#"dtrace -Z -q -x strsize=2k -n 'crucible_upstairs*:::up-status { printf("{\"pid\":%d,\"status\":%s}\n", pid, json(copyinstr(arg1), "ok")); }'"#;
 
-/// How many rows between repeats of the column header.
-const HEADER_INTERVAL: usize = 20;
+/// How often the display loop wakes to look for keyboard input.
+const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How many trailing lines of the dtrace command's stderr to keep.  We
+/// only need enough to say why it gave up.
+const MAX_STDERR_LINES: usize = 5;
 
 #[derive(Parser, Debug)]
 #[clap(name = "ctop", term_width = 80)]
 #[clap(
-    about = "Monitor crucible upstairs via dtrace",
-    long_about = "Monitor crucible upstairs via dtrace.\n\n\
+    about = "Curses based crucible monitor",
+    long_about = "Curses based crucible monitor.\n\n\
                   Runs a dtrace command and displays the up-status probe \
                   output from every crucible upstairs on the system.  \
                   dtrace requires privileges, so run this as `pfexec ctop`."
@@ -60,17 +83,48 @@ struct Args {
     output: Vec<DtraceDisplay>,
 }
 
-/// Run `dtrace_cmd` and print a row for each record it produces.
+/// The most recent record for one session and what we recorded from
+/// the record before it.
+#[derive(Debug)]
+struct SessionData {
+    pid: u32,
+    dtrace_info: DtraceInfo,
+    last_job_id: u64,
+    current_delta: Option<u64>,
+}
+
+/// What the reader has collected, for the display to draw.
+#[derive(Debug, Default)]
+struct CtopState {
+    /// Keyed on session id.  A pid can hold more than one session, and
+    /// a session outlives no pid, so the session is the identity here.
+    sessions: HashMap<String, SessionData>,
+
+    /// Set when the dtrace command is no longer running, which tells
+    /// the display to stop.  Otherwise a dtrace that never started
+    /// would leave an empty screen up with no explanation.
+    reader_done: bool,
+
+    /// Why the reader stopped, reported once the terminal is back.
+    reader_error: Option<String>,
+}
+
+/// Run `dtrace_cmd` and record what it produces.
 ///
 /// The command is run through a shell so the quoting in a dtrace one
 /// liner survives, and with kill_on_drop so the child does not outlive
-/// us.  Let the stderr from DTrace tell us the problem.
+/// us.  Its stderr is captured so that a dtrace which gives up can
+/// say why, since the display owns the screen by then.
 ///
 /// Records for different sessions arrive interleaved, because the probe
 /// matches every upstairs on the system.  A job ID only means anything
-/// within its own session, so the last one seen is tracked per session
-/// and a session's first record has no delta to report.
-async fn reader_loop(dtrace_cmd: &str, output: &[DtraceDisplay]) -> Result<()> {
+/// within its own session, which is why the last one is kept per
+/// session rather than globally.
+async fn reader_loop(
+    dtrace_cmd: &str,
+    state: &Arc<RwLock<CtopState>>,
+    notify: &Notify,
+) -> Result<()> {
     if dtrace_cmd.trim().is_empty() {
         bail!("empty dtrace command");
     }
@@ -79,6 +133,7 @@ async fn reader_loop(dtrace_cmd: &str, output: &[DtraceDisplay]) -> Result<()> {
         .arg("-c")
         .arg(dtrace_cmd)
         .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .context("failed to start the dtrace command")?;
@@ -87,10 +142,28 @@ async fn reader_loop(dtrace_cmd: &str, output: &[DtraceDisplay]) -> Result<()> {
         .stdout
         .take()
         .context("failed to capture the dtrace command's stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture the dtrace command's stderr")?;
+
+    // Keep the last few lines of stderr.  This has to be drained rather
+    // than ignored, or a chatty command would block once the pipe
+    // filled.  dtrace explains itself here, and the display owns the
+    // screen, so this text is the only way to say what went wrong.
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr_lines = BufReader::new(stderr).lines();
+        let mut tail: VecDeque<String> = VecDeque::new();
+        while let Ok(Some(line)) = stderr_lines.next_line().await {
+            tail.push_back(line);
+            if tail.len() > MAX_STDERR_LINES {
+                tail.pop_front();
+            }
+        }
+        tail
+    });
 
     let mut lines = BufReader::new(stdout).lines();
-    let mut last_job_id: HashMap<String, u64> = HashMap::new();
-    let mut count = 0;
 
     while let Some(line) = lines.next_line().await? {
         // dtrace can emit a blank line, and -Z means we may be running
@@ -101,43 +174,251 @@ async fn reader_loop(dtrace_cmd: &str, output: &[DtraceDisplay]) -> Result<()> {
 
         let wrapper: DtraceWrapper = match serde_json::from_str(&line) {
             Ok(w) => w,
-            Err(e) => {
-                eprintln!("skipping unparseable line: {e}");
-                continue;
-            }
+            // There is nowhere good to report this while the display
+            // owns the screen, and one bad line is not worth stopping over.
+            Err(_) => continue,
         };
 
-        if count % HEADER_INTERVAL == 0 {
-            println!("{}", format_header(output));
-        }
-        count += 1;
-
-        // insert() hands back this session's previous job ID, or None
-        // the first time we see the session, which is exactly when
-        // there is no delta to report.
         let job_id = wrapper.status.next_job_id.0;
-        let delta = last_job_id
-            .insert(wrapper.status.session_id.clone(), job_id)
-            .map(|last| job_id.saturating_sub(last));
 
-        println!(
-            "{}",
-            format_row(wrapper.pid, &wrapper.status, delta, output)
-        );
+        // This is scoped so the lock is dropped before the notify.
+        {
+            let mut state = state.write().await;
+            match state.sessions.get_mut(&wrapper.status.session_id) {
+                Some(session) => {
+                    session.current_delta =
+                        Some(job_id.saturating_sub(session.last_job_id));
+                    session.last_job_id = job_id;
+                    session.pid = wrapper.pid;
+                    session.dtrace_info = wrapper.status;
+                }
+                // First record for this session, so there is nothing to
+                // take a delta against yet.
+                None => {
+                    state.sessions.insert(
+                        wrapper.status.session_id.clone(),
+                        SessionData {
+                            pid: wrapper.pid,
+                            dtrace_info: wrapper.status,
+                            last_job_id: job_id,
+                            current_delta: None,
+                        },
+                    );
+                }
+            }
+        }
+
+        notify.notify_one();
     }
 
     // stdout closing means the command is finished one way or another.
     let status = child.wait().await.context("waiting for dtrace")?;
-    if !status.success() {
-        bail!("dtrace command exited ({status})");
+    if status.success() {
+        return Ok(());
     }
 
+    let reason = stderr_task
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    if reason.is_empty() {
+        bail!("dtrace command exited ({status})");
+    }
+    bail!("dtrace command exited ({status}): {reason}");
+}
+
+/// True if this key means "stop".
+fn is_quit(key_event: KeyEvent) -> bool {
+    matches!(
+        key_event,
+        KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } | KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        }
+    )
+}
+
+/// Draw one frame: a clock, a row per session, and the keys.
+fn render_table_view(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    sessions: &[&SessionData],
+    display_fields: &[DtraceDisplay],
+    timestamp: u64,
+) -> io::Result<()> {
+    terminal.draw(|f| {
+        let chunks = Layout::default()
+            .constraints([
+                Constraint::Length(1), // timestamp
+                Constraint::Min(0),    // session table
+                Constraint::Length(1), // key help
+            ])
+            .split(f.area());
+
+        f.render_widget(
+            Paragraph::new(format!("ctop - Unix timestamp: {timestamp}")),
+            chunks[0],
+        );
+
+        let rows: Vec<Row> = sessions
+            .iter()
+            .map(|s| {
+                Row::new(vec![format_row(
+                    s.pid,
+                    &s.dtrace_info,
+                    s.current_delta,
+                    display_fields,
+                )])
+            })
+            .collect();
+
+        // One full width column: format_row has already laid the row
+        // out, and the table clips it to the area instead of letting a
+        // row wider than the terminal wrap and push the layout apart.
+        let table = Table::new(rows, [Constraint::Min(0)])
+            .header(Row::new(vec![format_header(display_fields)]))
+            .column_spacing(0);
+
+        f.render_widget(table, chunks[1]);
+
+        f.render_widget(Paragraph::new("['q': Quit]"), chunks[2]);
+    })?;
+
     Ok(())
+}
+
+/// Redraw and handle input until the user quits or the reader stops.
+async fn display_loop(
+    state: &Arc<RwLock<CtopState>>,
+    notify: &Notify,
+    display_fields: &[DtraceDisplay],
+) -> Result<()> {
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+
+    loop {
+        // This is scoped so the lock is dropped before the wait below.
+        {
+            let state = state.read().await;
+
+            // HashMap order is arbitrary, so sort or the rows shuffle
+            // themselves on every frame.
+            let mut sessions: Vec<&SessionData> =
+                state.sessions.values().collect();
+            sessions.sort_by_key(|s| (s.pid, &s.dtrace_info.session_id));
+
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            render_table_view(
+                &mut terminal,
+                &sessions,
+                display_fields,
+                timestamp,
+            )?;
+
+            if state.reader_done {
+                return Ok(());
+            }
+        }
+
+        tokio::select! {
+            _ = notify.notified() => {}
+            _ = tokio::time::sleep(INPUT_POLL_INTERVAL) => {}
+        }
+
+        while event::poll(Duration::ZERO)? {
+            if let Event::Key(key_event) = event::read()?
+                && is_quit(key_event)
+            {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Take over the terminal, run the display, and give the terminal back.
+///
+/// The loop is a separate function so the terminal is restored whether
+/// it returns normally or with an error.
+async fn display_task(
+    state: &Arc<RwLock<CtopState>>,
+    notify: &Notify,
+    display_fields: &[DtraceDisplay],
+) -> Result<()> {
+    // Raw mode is the first thing that fails when there is no terminal
+    // to take over, and "Device not configured" on its own does not
+    // explain that ctop cannot be piped.
+    enable_raw_mode()
+        .context("ctop needs a terminal to draw on, it cannot be piped")?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+
+    // Restore the terminal on the way out of a panic as well, or the
+    // backtrace lands in the alternate screen and the shell is left in
+    // raw mode.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+        original_hook(panic_info);
+    }));
+
+    let result = display_loop(state, notify, display_fields).await;
+
+    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+
+    result
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    reader_loop(&args.dtrace_cmd, &args.output).await
+    let state = Arc::new(RwLock::new(CtopState::default()));
+    let notify = Arc::new(Notify::new());
+
+    // The display owns the screen, so a reader failure is recorded in
+    // shared state rather than printed, and reported once the terminal
+    // has been handed back.
+    let reader_state = Arc::clone(&state);
+    let reader_notify = Arc::clone(&notify);
+    let dtrace_cmd = args.dtrace_cmd.clone();
+    let reader = tokio::spawn(async move {
+        let error = reader_loop(&dtrace_cmd, &reader_state, &reader_notify)
+            .await
+            .err()
+            .map(|e| format!("{e:#}"));
+
+        let mut state = reader_state.write().await;
+        state.reader_error = error;
+        state.reader_done = true;
+        drop(state);
+
+        reader_notify.notify_one();
+    });
+
+    let display_result = display_task(&state, &notify, &args.output).await;
+
+    // The reader is either finished already or about to be dropped
+    // along with its child, so do not wait on it for long.
+    let _ = tokio::time::timeout(Duration::from_millis(100), reader).await;
+
+    display_result?;
+
+    if let Some(error) = state.write().await.reader_error.take() {
+        bail!("{error}");
+    }
+
+    Ok(())
 }
