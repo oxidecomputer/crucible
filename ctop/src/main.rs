@@ -382,27 +382,23 @@ fn render_table_view(
             .iter()
             .enumerate()
             .map(|(idx, s)| {
-                // Cursor location will override the stale flag.
-                let indicator = if Some(idx) == selected {
-                    '>'
-                } else if is_stale(s, now) {
-                    '*'
-                } else {
-                    ' '
-                };
+                // A column for selected row and a column for status
+                let cursor = if Some(idx) == selected { '>' } else { ' ' };
+                let stale = if is_stale(s, now) { '*' } else { ' ' };
+
                 let row = format_row(
                     s.pid,
                     &s.dtrace_info,
                     s.current_delta,
                     display_fields,
                 );
-                Row::new(vec![format!("{indicator}{row}")])
+                Row::new(vec![format!("{cursor}{stale}{row}")])
             })
             .collect();
 
-        // Rows carry a one character indicator, so the header is padded
+        // Rows carry two indicator characters, so the header is padded
         // by the same amount to keep the columns lined up.
-        let header = format!(" {}", format_header(display_fields));
+        let header = format!("  {}", format_header(display_fields));
 
         // One full width column: format_row has already laid the row
         // out, and the table clips it to the area instead of letting a
