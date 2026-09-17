@@ -98,6 +98,41 @@ struct Args {
     output: Vec<DtraceDisplay>,
 }
 
+/// What the sparklines are measured against.
+///
+/// Both settings start at zero; they differ in what counts as a full
+/// height bar.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SparkScale {
+    /// The busiest sample on screen, so the rows can be compared with
+    /// each other.  A quiet session next to a busy one reads as flat.
+    #[default]
+    Global,
+
+    /// Each session's own busiest sample, so every row fills its
+    /// height and shows its shape.  Nothing can be read across rows: a
+    /// session doing ten jobs a second looks like one doing ten
+    /// thousand.
+    PerSession,
+}
+
+impl SparkScale {
+    fn toggled(self) -> Self {
+        match self {
+            SparkScale::Global => SparkScale::PerSession,
+            SparkScale::PerSession => SparkScale::Global,
+        }
+    }
+
+    /// What to call it on the footer.
+    fn label(self) -> &'static str {
+        match self {
+            SparkScale::Global => "all",
+            SparkScale::PerSession => "self",
+        }
+    }
+}
+
 /// The most recent record for one session and what we recorded from
 /// the record before it.
 #[derive(Debug)]
@@ -126,6 +161,9 @@ struct CtopState {
     /// The session name the cursor is on.  A row index would move the
     /// cursor onto a different session if one above expire or arrives.
     selected_session: Option<String>,
+
+    /// What the sparklines are measured against.
+    spark_scale: SparkScale,
 
     /// Set when the dtrace command is no longer running, which tells
     /// the display to stop.  Otherwise a dtrace that never started
@@ -284,24 +322,35 @@ fn is_quit(key_event: KeyEvent) -> bool {
     )
 }
 
-/// Apply one key to the cursor.  Returns true if anything moved.
-fn handle_navigation(key_event: KeyEvent, state: &mut CtopState) -> bool {
-    let down = match key_event {
+/// Apply one key.  Returns true if anything changed.
+fn handle_key(key_event: KeyEvent, state: &mut CtopState) -> bool {
+    match key_event {
+        KeyEvent {
+            code: KeyCode::Char('s'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            state.spark_scale = state.spark_scale.toggled();
+            true
+        }
         KeyEvent {
             code: KeyCode::Up,
             modifiers: KeyModifiers::NONE,
             ..
-        } => false,
+        } => {
+            move_selection(state, false);
+            true
+        }
         KeyEvent {
             code: KeyCode::Down,
             modifiers: KeyModifiers::NONE,
             ..
-        } => true,
-        _ => return false,
-    };
-
-    move_selection(state, down);
-    true
+        } => {
+            move_selection(state, true);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Session ids in the order their rows are drawn.
@@ -416,9 +465,23 @@ fn render_table_view(
     display_fields: &[DtraceDisplay],
     table_state: &mut TableState,
     now: Instant,
-    timestamp: u64,
-    global_max: u64,
+    spark_scale: SparkScale,
 ) -> io::Result<()> {
+    // The busiest sample on screen, which is what the Global setting
+    // measures against.  Derived from the sessions being drawn rather
+    // than passed in, since nothing else needs it.
+    let global_max = sessions
+        .iter()
+        .flat_map(|s| s.delta_history.iter())
+        .copied()
+        .max()
+        .unwrap_or(1);
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     terminal.draw(|f| {
         let chunks = Layout::default()
             .constraints([
@@ -457,8 +520,16 @@ fn render_table_view(
                     s.current_delta,
                     display_fields,
                 );
+                // Both settings measure up from zero; they differ in
+                // what a full height bar means.
+                let max = match spark_scale {
+                    SparkScale::Global => global_max,
+                    SparkScale::PerSession => {
+                        s.delta_history.iter().copied().max().unwrap_or(1)
+                    }
+                };
                 let spark =
-                    render_sparkline(&s.delta_history, spark_width, global_max);
+                    render_sparkline(&s.delta_history, spark_width, max);
                 Row::new(vec![format!("{cursor}{stale}{row}{spark}")])
             })
             .collect();
@@ -490,8 +561,9 @@ fn render_table_view(
 
         f.render_widget(
             Paragraph::new(format!(
-                "[up/down: Move | 'q': Quit]  \
-                 > = cursor, * = stale ({STALE_THRESHOLD_SECS}s)"
+                "[up/down: Move | 's': Scale | 'q': Quit]  \
+                 scale: {}  * = stale ({STALE_THRESHOLD_SECS}s)",
+                spark_scale.label(),
             )),
             footer[0],
         );
@@ -543,28 +615,13 @@ async fn display_loop(
                 },
             ));
 
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-
-            // One scale for every sparkline on screen, so a busy row
-            // looks busier than a quiet one.
-            let global_max = sessions
-                .iter()
-                .flat_map(|s| s.delta_history.iter())
-                .copied()
-                .max()
-                .unwrap_or(1);
-
             render_table_view(
                 &mut terminal,
                 &sessions,
                 display_fields,
                 &mut table_state,
                 now,
-                timestamp,
-                global_max,
+                state.spark_scale,
             )?;
 
             if state.reader_done {
@@ -582,7 +639,7 @@ async fn display_loop(
                 if is_quit(key_event) {
                     return Ok(());
                 }
-                handle_navigation(key_event, &mut *state.write().await);
+                handle_key(key_event, &mut *state.write().await);
             }
         }
     }
