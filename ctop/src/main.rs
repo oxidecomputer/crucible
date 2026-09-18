@@ -28,7 +28,10 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    widgets::{Paragraph, Row, Table, TableState},
+    style::{Color, Style},
+    text::Span,
+    widgets::canvas::{Canvas, Line, Points},
+    widgets::{Block, Borders, Paragraph, Row, Table, TableState},
 };
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -164,6 +167,10 @@ struct CtopState {
 
     /// What the sparklines are measured against.
     spark_scale: SparkScale,
+
+    /// Whether the selected session's history has the screen to
+    /// itself, rather than the table of every session.
+    detail_mode: bool,
 
     /// Set when the dtrace command is no longer running, which tells
     /// the display to stop.  Otherwise a dtrace that never started
@@ -325,6 +332,26 @@ fn is_quit(key_event: KeyEvent) -> bool {
 /// Apply one key.  Returns true if anything changed.
 fn handle_key(key_event: KeyEvent, state: &mut CtopState) -> bool {
     match key_event {
+        // 'd' goes both ways, Esc only comes back, so Esc in the table
+        // is deliberately nothing rather than a way in.
+        KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            state.detail_mode = !state.detail_mode;
+            true
+        }
+        KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            ..
+        } if state.detail_mode => {
+            state.detail_mode = false;
+            true
+        }
+        // Only the table has sparklines, but setting the scale from
+        // the detail view is harmless and takes effect on the way back.
         KeyEvent {
             code: KeyCode::Char('s'),
             modifiers: KeyModifiers::NONE,
@@ -333,11 +360,13 @@ fn handle_key(key_event: KeyEvent, state: &mut CtopState) -> bool {
             state.spark_scale = state.spark_scale.toggled();
             true
         }
+        // The cursor only means anything next to the table it moves
+        // through, so the arrows do nothing in the detail view.
         KeyEvent {
             code: KeyCode::Up,
             modifiers: KeyModifiers::NONE,
             ..
-        } => {
+        } if !state.detail_mode => {
             move_selection(state, false);
             true
         }
@@ -345,7 +374,7 @@ fn handle_key(key_event: KeyEvent, state: &mut CtopState) -> bool {
             code: KeyCode::Down,
             modifiers: KeyModifiers::NONE,
             ..
-        } => {
+        } if !state.detail_mode => {
             move_selection(state, true);
             true
         }
@@ -453,6 +482,166 @@ fn is_stale(session: &SessionData, now: Instant) -> bool {
 fn is_expired(session: &SessionData, now: Instant) -> bool {
     now.duration_since(session.last_updated)
         > Duration::from_secs(REMOVE_THRESHOLD_SECS)
+}
+
+/// Give one session's delta history the whole screen.
+///
+/// The sparkline in the table is a handful of columns; this is the
+/// same numbers with room to see them, scaled to this session's own
+/// range because there is only one session on screen to compare.
+fn render_detail_view(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    session: &SessionData,
+    display_fields: &[DtraceDisplay],
+) -> io::Result<()> {
+    let history: Vec<u64> = session.delta_history.iter().copied().collect();
+
+    let low = history.iter().copied().min().unwrap_or(0);
+    let high = history.iter().copied().max().unwrap_or(1);
+    let average = if history.is_empty() {
+        0
+    } else {
+        history.iter().sum::<u64>() / history.len() as u64
+    };
+
+    // A session sitting at one value has no range to plot in, and a
+    // zero height axis draws nothing at all.
+    let (y_low, y_high) = if low == high {
+        (low, high + 1)
+    } else {
+        (low, high)
+    };
+
+    // Labels down the y axis, high to low, taken from the data rather
+    // than from the axis above.  A flat session's axis was widened to
+    // give its line somewhere to sit, and labelling that widened bound
+    // would put a number on the axis the session never reached.
+    //
+    // Deduplicated because a narrow range collapses them onto each
+    // other, and a flat one collapses them all onto its single value.
+    let span = (high - low) as f64;
+    let mut y_labels: Vec<u64> = vec![
+        high,
+        low + (span * 0.75) as u64,
+        low + (span * 0.5) as u64,
+        low + (span * 0.25) as u64,
+        low,
+    ];
+    y_labels.dedup();
+
+    let label_width = y_labels
+        .iter()
+        .map(|v| v.to_string().chars().count())
+        .max()
+        .unwrap_or(1) as f64
+        + 1.0;
+
+    terminal.draw(|f| {
+        // The session's own row on top, the graph in the middle, and
+        // the keys on the bottom line where the table view puts them.
+        let chunks = Layout::default()
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
+
+        // Neither line is padded here.  The table pads both by the
+        // width of its indicator columns.  As this view has no
+        // indicators we don't need padding.
+        f.render_widget(
+            Paragraph::new(format!(
+                "{}\n{}",
+                format_header(display_fields),
+                format_row(
+                    session.pid,
+                    &session.dtrace_info,
+                    session.current_delta,
+                    display_fields,
+                )
+            )),
+            chunks[0],
+        );
+
+        let session_short: String =
+            session.dtrace_info.session_id.chars().take(8).collect();
+        let title = format!(
+            " Job rate - PID {} - Session {} ",
+            session.pid, session_short
+        );
+        let stats = format!(
+            " Samples: {} | Min: {} | Max: {} | Avg: {} | Current: {} ",
+            history.len(),
+            low,
+            high,
+            average,
+            session.current_delta.unwrap_or(0),
+        );
+
+        // The y axis labels are printed inside the canvas, so at x=0
+        // they would land on top of the oldest samples.  Start the x
+        // range left of sample zero to give them a gutter: solving
+        //   -x_min / (samples - x_min) = label_width / plot_width
+        // for x_min makes that gutter label_width columns wide.
+        let samples = history.len().max(1) as f64;
+        let plot_width = chunks[1].width.saturating_sub(2) as f64;
+        let x_min = if plot_width > label_width + 1.0 {
+            -label_width * samples / (plot_width - label_width)
+        } else {
+            0.0
+        };
+
+        let canvas = Canvas::default()
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .title_bottom(stats),
+            )
+            .x_bounds([x_min, samples])
+            .y_bounds([y_low as f64, y_high as f64])
+            .paint(|ctx| {
+                for label in &y_labels {
+                    ctx.print(
+                        x_min,
+                        *label as f64,
+                        Span::styled(
+                            format!("{label}"),
+                            Style::default().fg(Color::Gray),
+                        ),
+                    );
+                }
+
+                // windows(2) yields nothing for a single sample, which
+                // is the right amount of line to draw for one point.
+                for (i, pair) in history.windows(2).enumerate() {
+                    ctx.draw(&Line {
+                        x1: i as f64,
+                        y1: pair[0] as f64,
+                        x2: (i + 1) as f64,
+                        y2: pair[1] as f64,
+                        color: Color::Cyan,
+                    });
+                }
+
+                for (i, &value) in history.iter().enumerate() {
+                    ctx.draw(&Points {
+                        coords: &[(i as f64, value as f64)],
+                        color: Color::Yellow,
+                    });
+                }
+            });
+
+        f.render_widget(canvas, chunks[1]);
+
+        f.render_widget(
+            Paragraph::new("['d'/Esc: Back | 'q': Quit]"),
+            chunks[2],
+        );
+    })?;
+
+    Ok(())
 }
 
 /// Draw one frame: a clock, a row per session, and the keys.
@@ -615,14 +804,28 @@ async fn display_loop(
                 },
             ));
 
-            render_table_view(
-                &mut terminal,
-                &sessions,
-                display_fields,
-                &mut table_state,
-                now,
-                state.spark_scale,
-            )?;
+            // The detail view needs a session to show.  With no rows
+            // there is nothing to detail, so fall back to the table
+            // rather than an empty graph.
+            let detail = state
+                .detail_mode
+                .then(|| table_state.selected())
+                .flatten()
+                .and_then(|i| sessions.get(i));
+
+            match detail {
+                Some(session) => {
+                    render_detail_view(&mut terminal, session, display_fields)?
+                }
+                None => render_table_view(
+                    &mut terminal,
+                    &sessions,
+                    display_fields,
+                    &mut table_state,
+                    now,
+                    state.spark_scale,
+                )?,
+            }
 
             if state.reader_done {
                 return Ok(());
