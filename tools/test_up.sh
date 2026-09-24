@@ -289,6 +289,13 @@ if ! "$dsc" cmd start -c 2; then
     echo "Failed repair test part 1, starting downstairs 2" >> "$fail_log"
     echo
 fi
+state=$("$dsc" cmd state -c 2)
+while [[ "$state" != "Running" ]]; do
+    echo "downstairs 2 not restarted yet, waiting"
+    sleep 5
+    state=$("$dsc" cmd state -c 2)
+done
+echo "Downstairs 2 restarted"
 
 # Put a dump test in the middle of the repair test, so we
 # can see both a mismatch and that dump works.
@@ -384,11 +391,9 @@ while : ; do
     sleep 5
 done
 
-echo "Begin replace reconcile test" >> "${log_prefix}_out.txt"
+echo "Begin 2/3 activation reconcile test" >> "${log_prefix}_out.txt"
 
-# Create a larger region size for these tests, and add an additional
-# region so we have one to use for replacement.
-((region_count+=1))
+# Create a larger region size for these tests.
 echo "Creating $region_count larger downstairs regions"
 echo "${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 400 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
 "${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 400 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output" 2>&1
@@ -419,37 +424,17 @@ while [[ "$cid" -lt "$region_count" ]]; do
     ((cid += 1))
 done
 
-echo "Now do the replace-reconcile test"
-
-# Get the port number for the last client, that is our replacement.
-((last_client = region_count - 1))
-last_port=$("$dsc" cmd port -c "$last_client")
-echo "Using $last_port for the replacement port"
-
-echo "$ct" replace-reconcile --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ct" replace-reconcile --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+echo "Now do the two_of_three test"
+echo "$ct" two-of-three -c 5 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ct" two-of-three -c 5 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     (( res += 1 ))
     echo ""
-    echo "Failed crutest replace-reconcile test"
-    echo "Failed crutest replace-reconcile test" >> "${log_prefix}_out.txt"
-    echo "Failed crutest replace-reconcile test" >> "$fail_log"
+    echo "Failed crutest two-of-three test"
+    echo "Failed crutest two-of-three test" >> "${log_prefix}_out.txt"
+    echo "Failed crutest two-of-three test" >> "$fail_log"
     echo ""
 else
-    echo "Completed test: replace-reconcile"
-fi
-
-((gen += 20))
-echo "Now do the replace-before-active test"
-echo "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
-    (( res += 1 ))
-    echo ""
-    echo "Failed crutest replace-before-active"
-    echo "Failed crutest replace-before-active" >> "${log_prefix}_out.txt"
-    echo "Failed crutest replace-before-active" >> "$fail_log"
-    echo ""
-else
-    echo "Completed test: replace-before-active"
+    echo "Completed test: two-of-three"
 fi
 
 # Tests done, shut down the downstairs.
