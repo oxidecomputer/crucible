@@ -68,6 +68,11 @@ const STALE_THRESHOLD_SECS: u64 = 5;
 /// row would otherwise sit there forever.
 const REMOVE_THRESHOLD_SECS: u64 = 30;
 
+/// How many job deltas to remember per session.  More than fits across
+/// a wide terminal, so the sparkline has samples in hand for whatever
+/// width it is given.
+const MAX_DELTA_HISTORY: usize = 100;
+
 #[derive(Parser, Debug)]
 #[clap(name = "ctop", term_width = 80)]
 #[clap(
@@ -93,6 +98,41 @@ struct Args {
     output: Vec<DtraceDisplay>,
 }
 
+/// What the sparklines are measured against.
+///
+/// Both settings start at zero; they differ in what counts as a full
+/// height bar.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SparkScale {
+    /// The busiest sample on screen, so the rows can be compared with
+    /// each other.  A quiet session next to a busy one reads as flat.
+    #[default]
+    Global,
+
+    /// Each session's own busiest sample, so every row fills its
+    /// height and shows its shape.  Nothing can be read across rows: a
+    /// session doing ten jobs a second looks like one doing ten
+    /// thousand.
+    PerSession,
+}
+
+impl SparkScale {
+    fn toggled(self) -> Self {
+        match self {
+            SparkScale::Global => SparkScale::PerSession,
+            SparkScale::PerSession => SparkScale::Global,
+        }
+    }
+
+    /// What to call it on the footer.
+    fn label(self) -> &'static str {
+        match self {
+            SparkScale::Global => "all",
+            SparkScale::PerSession => "self",
+        }
+    }
+}
+
 /// The most recent record for one session and what we recorded from
 /// the record before it.
 #[derive(Debug)]
@@ -105,6 +145,10 @@ struct SessionData {
     /// When the last record for this session arrived, which is what
     /// makes a row stale and eventually removes it.
     last_updated: Instant,
+
+    /// The last `MAX_DELTA_HISTORY` job deltas, oldest first, for the
+    /// sparkline to draw.
+    delta_history: VecDeque<u64>,
 }
 
 /// What the reader has collected, for the display to draw.
@@ -117,6 +161,9 @@ struct CtopState {
     /// The session name the cursor is on.  A row index would move the
     /// cursor onto a different session if one above expire or arrives.
     selected_session: Option<String>,
+
+    /// What the sparklines are measured against.
+    spark_scale: SparkScale,
 
     /// Set when the dtrace command is no longer running, which tells
     /// the display to stop.  Otherwise a dtrace that never started
@@ -204,15 +251,21 @@ async fn reader_loop(
             let mut state = state.write().await;
             match state.sessions.get_mut(&wrapper.status.session_id) {
                 Some(session) => {
-                    session.current_delta =
-                        Some(job_id.saturating_sub(session.last_job_id));
+                    let delta = job_id.saturating_sub(session.last_job_id);
+
+                    session.delta_history.push_back(delta);
+                    if session.delta_history.len() > MAX_DELTA_HISTORY {
+                        session.delta_history.pop_front();
+                    }
+
+                    session.current_delta = Some(delta);
                     session.last_job_id = job_id;
                     session.pid = wrapper.pid;
                     session.dtrace_info = wrapper.status;
                     session.last_updated = Instant::now();
                 }
                 // First record for this session, so there is nothing to
-                // take a delta against yet.
+                // take a delta against yet, and nothing to plot.
                 None => {
                     state.sessions.insert(
                         wrapper.status.session_id.clone(),
@@ -222,6 +275,7 @@ async fn reader_loop(
                             last_job_id: job_id,
                             current_delta: None,
                             last_updated: Instant::now(),
+                            delta_history: VecDeque::new(),
                         },
                     );
                 }
@@ -268,24 +322,35 @@ fn is_quit(key_event: KeyEvent) -> bool {
     )
 }
 
-/// Apply one key to the cursor.  Returns true if anything moved.
-fn handle_navigation(key_event: KeyEvent, state: &mut CtopState) -> bool {
-    let down = match key_event {
+/// Apply one key.  Returns true if anything changed.
+fn handle_key(key_event: KeyEvent, state: &mut CtopState) -> bool {
+    match key_event {
+        KeyEvent {
+            code: KeyCode::Char('s'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            state.spark_scale = state.spark_scale.toggled();
+            true
+        }
         KeyEvent {
             code: KeyCode::Up,
             modifiers: KeyModifiers::NONE,
             ..
-        } => false,
+        } => {
+            move_selection(state, false);
+            true
+        }
         KeyEvent {
             code: KeyCode::Down,
             modifiers: KeyModifiers::NONE,
             ..
-        } => true,
-        _ => return false,
-    };
-
-    move_selection(state, down);
-    true
+        } => {
+            move_selection(state, true);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Session ids in the order their rows are drawn.
@@ -338,6 +403,46 @@ fn reselect_if_gone(state: &mut CtopState) {
     }
 }
 
+/// Draw a session's delta history as one block character per sample.
+///
+/// Newest sample at the right, older ones trailing off to the left,
+/// and the left padded with spaces when there are fewer samples than
+/// columns.  The axis counts samples rather than time: a session that
+/// stops reporting adds nothing, so its sparkline holds its shape
+/// rather than showing a gap.  This is something to make better in
+/// future updates.  It's also.. complicated.. as we would have to decide
+/// at what timeout have we given up on a session reporting, 3 seconds? 5?
+/// So, for now, I'm punting that decision to later.
+///
+/// Heights are scaled against `global_max` taken across every session
+/// on screen.  A busy row looks busier than a quiet one rather than
+/// every row filling its own range.
+fn render_sparkline(
+    history: &VecDeque<u64>,
+    width: usize,
+    global_max: u64,
+) -> String {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    // A max of zero means every sample is zero, and dividing by it
+    // would not go well.
+    let max = global_max.max(1);
+
+    // The newest `width` samples, oldest first.
+    let bars: String = history
+        .iter()
+        .skip(history.len().saturating_sub(width))
+        .map(|&value| {
+            let step = (value as f64 / max as f64 * 7.0) as usize;
+            BLOCKS[step.min(BLOCKS.len() - 1)]
+        })
+        .collect();
+
+    // Right align, so the newest sample sits in the same column on
+    // every row however much history each one has.
+    format!("{bars:>width$}")
+}
+
 /// Has this session gone quiet long enough to mark its row?
 fn is_stale(session: &SessionData, now: Instant) -> bool {
     now.duration_since(session.last_updated)
@@ -360,8 +465,23 @@ fn render_table_view(
     display_fields: &[DtraceDisplay],
     table_state: &mut TableState,
     now: Instant,
-    timestamp: u64,
+    spark_scale: SparkScale,
 ) -> io::Result<()> {
+    // The busiest sample on screen, which is what the Global setting
+    // measures against.  Derived from the sessions being drawn rather
+    // than passed in, since nothing else needs it.
+    let global_max = sessions
+        .iter()
+        .flat_map(|s| s.delta_history.iter())
+        .copied()
+        .max()
+        .unwrap_or(1);
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     terminal.draw(|f| {
         let chunks = Layout::default()
             .constraints([
@@ -378,6 +498,14 @@ fn render_table_view(
 
         let selected = table_state.selected();
 
+        // Rows carry two indicator characters, so the header is padded
+        // by the same amount to keep the columns lined up.
+        let header = format!("  {}", format_header(display_fields));
+
+        // Whatever width the columns do not use goes to the sparkline.
+        let spark_width =
+            (chunks[1].width as usize).saturating_sub(header.chars().count());
+
         let rows: Vec<Row> = sessions
             .iter()
             .enumerate()
@@ -392,13 +520,19 @@ fn render_table_view(
                     s.current_delta,
                     display_fields,
                 );
-                Row::new(vec![format!("{cursor}{stale}{row}")])
+                // Both settings measure up from zero; they differ in
+                // what a full height bar means.
+                let max = match spark_scale {
+                    SparkScale::Global => global_max,
+                    SparkScale::PerSession => {
+                        s.delta_history.iter().copied().max().unwrap_or(1)
+                    }
+                };
+                let spark =
+                    render_sparkline(&s.delta_history, spark_width, max);
+                Row::new(vec![format!("{cursor}{stale}{row}{spark}")])
             })
             .collect();
-
-        // Rows carry two indicator characters, so the header is padded
-        // by the same amount to keep the columns lined up.
-        let header = format!("  {}", format_header(display_fields));
 
         // One full width column: format_row has already laid the row
         // out, and the table clips it to the area instead of letting a
@@ -427,8 +561,9 @@ fn render_table_view(
 
         f.render_widget(
             Paragraph::new(format!(
-                "[up/down: Move | 'q': Quit]  \
-                 > = cursor, * = stale ({STALE_THRESHOLD_SECS}s)"
+                "[up/down: Move | 's': Scale | 'q': Quit]  \
+                 scale: {}  * = stale ({STALE_THRESHOLD_SECS}s)",
+                spark_scale.label(),
             )),
             footer[0],
         );
@@ -480,18 +615,13 @@ async fn display_loop(
                 },
             ));
 
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-
             render_table_view(
                 &mut terminal,
                 &sessions,
                 display_fields,
                 &mut table_state,
                 now,
-                timestamp,
+                state.spark_scale,
             )?;
 
             if state.reader_done {
@@ -509,7 +639,7 @@ async fn display_loop(
                 if is_quit(key_event) {
                     return Ok(());
                 }
-                handle_navigation(key_event, &mut *state.write().await);
+                handle_key(key_event, &mut *state.write().await);
             }
         }
     }
