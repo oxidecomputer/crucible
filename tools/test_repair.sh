@@ -54,7 +54,7 @@ fi
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
-TEST_ROOT="${WORK_ROOT}/test_live_repair"
+TEST_ROOT="${WORK_ROOT}/test_repair"
 if [[ -d "$TEST_ROOT" ]]; then
     # Delete previous test data
     rm -r "$TEST_ROOT"

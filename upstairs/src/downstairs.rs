@@ -1376,8 +1376,6 @@ impl Downstairs {
                     self.repair.as_mut().unwrap().state =
                         LiveRepairState::FinalFlush { flush_job }
                 } else {
-                    let repair_id = repair.id;
-                    self.notify_live_repair_progress(repair_id, next_extent);
                     self.send_next_live_repair(up_state);
                 };
             }
@@ -1916,20 +1914,6 @@ impl Downstairs {
 
         reconcile.current_work = Some(next);
 
-        let reconcile_id = reconcile.id;
-
-        // `on_reconciliation_job_done` increments one of these and
-        // decrements the other, so add them together to get total task
-        // count to send to Nexus.
-        let task_count =
-            self.reconcile_repaired + reconcile.reconcile_repair_needed;
-
-        self.notify_reconcile_progress(
-            reconcile_id,
-            self.reconcile_repaired,
-            task_count,
-        );
-
         false
     }
 
@@ -2065,6 +2049,13 @@ impl Downstairs {
                 }
             ) {
                 c.set_active();
+            } else if matches!(c.state(), DsState::Active) {
+                info!(
+                    self.log,
+                    "client {} is in state {:?}, Already active",
+                    i,
+                    c.state(),
+                );
             } else {
                 warn!(
                     self.log,
@@ -3938,24 +3929,6 @@ impl Downstairs {
         }
     }
 
-    fn notify_live_repair_progress(
-        &self,
-        repair_id: Uuid,
-        current_extent: ExtentId,
-    ) {
-        if let Some(notify) = &self.notify {
-            let extent_count = self.ddef.unwrap().extent_count();
-            notify.send(NotifyRequest::LiveRepairProgress {
-                upstairs_id: self.cfg.upstairs_id,
-                repair_id,
-                // surely we won't have u64::MAX extents
-                current_item: current_extent.0 as i64,
-                // i am serious, and don't call me shirley
-                total_items: extent_count as i64,
-            });
-        }
-    }
-
     fn notify_reconcile_start(&self, reconcile: &ReconcileData) {
         if let Some(notify) = &self.notify {
             let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
@@ -4023,24 +3996,6 @@ impl Downstairs {
                 repair_id: reconcile.id,
                 aborted,
                 repairs,
-            });
-        }
-    }
-
-    fn notify_reconcile_progress(
-        &self,
-        reconcile_id: Uuid,
-        current_task: usize,
-        task_count: usize,
-    ) {
-        if let Some(notify) = &self.notify {
-            notify.send(NotifyRequest::ReconcileProgress {
-                upstairs_id: self.cfg.upstairs_id,
-                repair_id: reconcile_id,
-                // surely we won't have usize::MAX extents
-                current_item: current_task as i64,
-                // i am serious, and don't call me shirley
-                total_items: task_count as i64,
             });
         }
     }

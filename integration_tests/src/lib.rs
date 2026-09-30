@@ -506,6 +506,17 @@ mod integration_tests {
             downstairs.clone_region(source).await
         }
 
+        // Stop this downstairs, freeing the port it was listening on.  Used
+        // to simulate a downstairs that is not running.  The address that was
+        // assigned during spawn is still recorded in any CrucibleOpts we
+        // handed out, so the upstairs will try (and fail) to connect to it.
+        pub async fn stop(&mut self) -> Result<()> {
+            if let Some(downstairs) = self.downstairs.take() {
+                downstairs.stop().await?;
+            }
+            Ok(())
+        }
+
         pub fn address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
             self.downstairs.as_ref().unwrap().address()
@@ -1171,6 +1182,61 @@ mod integration_tests {
         volume.activate().await?;
 
         // Read one block: should be all 0x00
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
+        volume.read(BlockIndex(0), &mut buffer).await?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_just_read_one_downstairs() -> Result<()> {
+        // Create three read-only downstairs, but only leave one of them
+        // running.  A single read-only downstairs is enough to activate a
+        // read-only upstairs, so both activation and a read should succeed.
+        const BLOCK_SIZE: usize = 512;
+
+        // small(true) creates and starts all three downstairs read only.  We
+        // capture the opts (which record all three addresses) before stopping
+        // two of them, leaving only downstairs1 running.
+        let mut tds = DefaultTestDownstairsSet::small(true).await?;
+        let opts = tds.opts();
+
+        tds.downstairs2.stop().await?;
+        tds.downstairs3.stop().await?;
+
+        // Put the region under sub_volumes (not as a read_only_parent) so that
+        // flushes are actually sent to it.
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                generation: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Volume::construct(vcr, None, csl()).await?;
+        volume.activate().await?;
+
+        // Read one block: should be all 0x00
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
+        volume.read(BlockIndex(0), &mut buffer).await?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
+
+        // Manually send a flush.  With only one downstairs running, the flush
+        // still completes: the two stopped downstairs have their jobs moved to
+        // Skipped, so the flush is complete on all clients and acks back to us.
+        // This should not hang.
+        volume.flush(None).await?;
+
+        // A second read after the flush should also complete successfully.
         let mut buffer = Buffer::new(1, BLOCK_SIZE);
         volume.read(BlockIndex(0), &mut buffer).await?;
 
@@ -5931,6 +5997,56 @@ mod integration_tests {
         client.detach(&volume_id.to_string()).await.unwrap();
     }
 
+    // Test attaching and detaching the same volume multiple times
+    #[tokio::test]
+    async fn test_pantry_attach_detach_multiple() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Start a pantry, get the client for it
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        client.detach(&volume_id.to_string()).await.unwrap();
+
+        // Attach it again
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: tds.opts(),
+                generation: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr).unwrap(),
+                    )
+                    .unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_volume_replace_vcr() {
         // Test of a replacement of a downstairs given two
@@ -6159,7 +6275,7 @@ mod integration_tests {
             crucible_pantry_client::types::VolumeStatus {
                 active: true,
                 seen_active: true,
-                num_job_handles: 0,
+                num_job_handles: 1,
                 info: _,
             }
         ));
@@ -6193,7 +6309,7 @@ mod integration_tests {
             crucible_pantry_client::types::VolumeStatus {
                 active: false,
                 seen_active: true,
-                num_job_handles: 0,
+                num_job_handles: 1,
                 info: _,
             }
         ));

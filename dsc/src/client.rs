@@ -50,6 +50,8 @@ pub enum ClientCommand {
         #[clap(long, short, action)]
         cid: u32,
     },
+    /// Show whether downstairs are running read-only
+    ReadOnly,
     /// Get count of regions.
     RegionCount,
     /// Get region info.
@@ -127,6 +129,10 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
         }
         ClientCommand::Port { cid } => {
             let res = dsc.dsc_get_port(cid).await.unwrap();
+            println!("{:?}", res);
+        }
+        ClientCommand::ReadOnly => {
+            let res = dsc.dsc_get_read_only().await.unwrap();
             println!("{:?}", res);
         }
         ClientCommand::RegionCount => {
