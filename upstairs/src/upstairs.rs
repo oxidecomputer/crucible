@@ -5180,7 +5180,10 @@ pub(crate) mod test {
             }
         }
         let (_rx, done) = BlockOpWaiter::pair();
-        up.state = UpstairsState::GoActive(done);
+        up.state = UpstairsState::GoActive {
+            res: done,
+            min_quorum_deadline: None,
+        };
 
         up.connect_ro_region_set();
         assert!(matches!(&up.state, &UpstairsState::Active));

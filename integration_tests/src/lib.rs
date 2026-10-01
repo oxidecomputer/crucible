@@ -506,17 +506,6 @@ mod integration_tests {
             downstairs.clone_region(source).await
         }
 
-        // Stop this downstairs, freeing the port it was listening on.  Used
-        // to simulate a downstairs that is not running.  The address that was
-        // assigned during spawn is still recorded in any CrucibleOpts we
-        // handed out, so the upstairs will try (and fail) to connect to it.
-        pub async fn stop(&mut self) -> Result<()> {
-            if let Some(downstairs) = self.downstairs.take() {
-                downstairs.stop().await?;
-            }
-            Ok(())
-        }
-
         pub fn address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
             self.downstairs.as_ref().unwrap().address()
