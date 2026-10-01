@@ -3,7 +3,10 @@ use super::*;
 
 use anyhow::anyhow;
 use crucible_downstairs_api::*;
-use crucible_downstairs_types::RunDownstairsForRegionParams;
+use crucible_downstairs_types::admin::{
+    DownstairsRunningResponse, RunDownstairsForRegionParams,
+    RunDownstairsForRegionPath,
+};
 use dropshot::{
     ClientSpecifiesVersionInHeader, ConfigDropshot, HttpError,
     HttpResponseCreated, Path, RequestContext, TypedBody, VersionPolicy,

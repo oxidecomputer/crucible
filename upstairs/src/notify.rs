@@ -12,11 +12,12 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::client::ClientRunResult;
-use nexus_client::types::{
-    DownstairsClientStopped, DownstairsClientStoppedReason,
-    DownstairsUnderRepair, RepairFinishInfo, RepairProgress, RepairStartInfo,
-    UpstairsRepairType,
-};
+use nexus_client::types::DownstairsClientStopped;
+use nexus_client::types::DownstairsClientStoppedReason;
+use nexus_client::types::DownstairsUnderRepair;
+use nexus_client::types::RepairFinishInfo;
+use nexus_client::types::RepairStartInfo;
+use nexus_client::types::UpstairsRepairType;
 use omicron_uuid_kinds::{GenericUuid, TypedUuid};
 
 #[derive(Debug)]
@@ -38,12 +39,6 @@ pub(crate) enum NotifyRequest {
         session_id: Uuid,
         repairs: Vec<(Uuid, SocketAddr)>,
     },
-    LiveRepairProgress {
-        upstairs_id: Uuid,
-        repair_id: Uuid,
-        current_item: i64,
-        total_items: i64,
-    },
     LiveRepairFinish {
         upstairs_id: Uuid,
         repair_id: Uuid,
@@ -56,12 +51,6 @@ pub(crate) enum NotifyRequest {
         repair_id: Uuid,
         session_id: Uuid,
         repairs: Vec<(Uuid, SocketAddr)>,
-    },
-    ReconcileProgress {
-        upstairs_id: Uuid,
-        repair_id: Uuid,
-        current_item: i64,
-        total_items: i64,
     },
     ReconcileFinish {
         upstairs_id: Uuid,
@@ -80,9 +69,7 @@ impl NotifyRequest {
             | NotifyRequest::ReconcileStart { .. }
             | NotifyRequest::ReconcileFinish { .. } => NotifyQos::High,
 
-            NotifyRequest::ClientTaskStopped { .. }
-            | NotifyRequest::LiveRepairProgress { .. }
-            | NotifyRequest::ReconcileProgress { .. } => NotifyQos::Low,
+            NotifyRequest::ClientTaskStopped { .. } => NotifyQos::Low,
         }
     }
 }
@@ -142,9 +129,7 @@ async fn notify_task_nexus(
     // Store high QoS messages if they can't be sent
     let mut stored_notification: Option<Notification> = None;
 
-    // Use reqwest 0.12 for the client passed to nexus_client, which is
-    // consumed via git dep from omicron and still expects reqwest 0.12 types.
-    let reqwest_client = reqwest012::ClientBuilder::new()
+    let reqwest_client = reqwest::ClientBuilder::new()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -293,42 +278,6 @@ async fn notify_task_nexus(
                     description,
                 )
             }
-            NotifyRequest::LiveRepairProgress {
-                upstairs_id,
-                repair_id,
-                current_item,
-                total_items,
-            }
-            | NotifyRequest::ReconcileProgress {
-                upstairs_id,
-                repair_id,
-                current_item,
-                total_items,
-            } => {
-                let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
-                let repair_id = TypedUuid::from_untyped_uuid(*repair_id);
-                let description =
-                    if matches!(m, NotifyRequest::LiveRepairProgress { .. }) {
-                        "live repair progress"
-                    } else {
-                        "reconcile progress"
-                    };
-
-                (
-                    nexus_client
-                        .cpapi_upstairs_repair_progress(
-                            &upstairs_id,
-                            &repair_id,
-                            &RepairProgress {
-                                current_item: *current_item,
-                                total_items: *total_items,
-                                time,
-                            },
-                        )
-                        .await,
-                    description,
-                )
-            }
             NotifyRequest::LiveRepairFinish {
                 upstairs_id,
                 repair_id,
@@ -415,7 +364,7 @@ async fn notify_task_nexus(
 /// Gets a Nexus client based on any rack-internal IPv6 address
 pub(crate) async fn get_nexus_client(
     log: &Logger,
-    client: reqwest012::Client,
+    client: reqwest::Client,
     addr: Ipv6Addr,
 ) -> Option<nexus_client::Client> {
     use internal_dns_resolver::Resolver;

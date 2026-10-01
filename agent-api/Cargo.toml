@@ -5,9 +5,7 @@ license = "MPL-2.0"
 edition = "2024"
 
 [dependencies]
-crucible-agent-types.workspace = true
+crucible-agent-types-versions.workspace = true
 crucible-workspace-hack.workspace = true
 dropshot.workspace = true
 dropshot-api-manager-types.workspace = true
-schemars.workspace = true
-serde.workspace = true

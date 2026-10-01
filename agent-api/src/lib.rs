@@ -1,18 +1,11 @@
-// Copyright 2025 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
-use std::collections::BTreeMap;
-
-use crucible_agent_types::{
-    region::{CreateRegion, Region, RegionId},
-    snapshot::{RunningSnapshot, Snapshot},
-};
+use crucible_agent_types_versions::latest;
 use dropshot::{
     HttpError, HttpResponseDeleted, HttpResponseOk, Path, RequestContext,
     TypedBody,
 };
 use dropshot_api_manager_types::api_versions;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
 api_versions!([
     // WHEN CHANGING THE API (part 1 of 2):
@@ -51,7 +44,7 @@ pub trait CrucibleAgentApi {
     }]
     async fn region_list(
         rqctx: RequestContext<Self::Context>,
-    ) -> Result<HttpResponseOk<Vec<Region>>, HttpError>;
+    ) -> Result<HttpResponseOk<Vec<latest::region::Region>>, HttpError>;
 
     #[endpoint {
         method = POST,
@@ -59,8 +52,8 @@ pub trait CrucibleAgentApi {
     }]
     async fn region_create(
         rqctx: RequestContext<Self::Context>,
-        body: TypedBody<CreateRegion>,
-    ) -> Result<HttpResponseOk<Region>, HttpError>;
+        body: TypedBody<latest::region::CreateRegion>,
+    ) -> Result<HttpResponseOk<latest::region::Region>, HttpError>;
 
     #[endpoint {
         method = GET,
@@ -68,8 +61,8 @@ pub trait CrucibleAgentApi {
     }]
     async fn region_get(
         rqctx: RequestContext<Self::Context>,
-        path: Path<RegionPath>,
-    ) -> Result<HttpResponseOk<Region>, HttpError>;
+        path: Path<latest::region::RegionPath>,
+    ) -> Result<HttpResponseOk<latest::region::Region>, HttpError>;
 
     #[endpoint {
         method = DELETE,
@@ -77,7 +70,7 @@ pub trait CrucibleAgentApi {
     }]
     async fn region_delete(
         rqctx: RequestContext<Self::Context>,
-        path: Path<RegionPath>,
+        path: Path<latest::region::RegionPath>,
     ) -> Result<HttpResponseDeleted, HttpError>;
 
     #[endpoint {
@@ -86,8 +79,8 @@ pub trait CrucibleAgentApi {
     }]
     async fn region_get_snapshots(
         rqctx: RequestContext<Self::Context>,
-        path: Path<RegionPath>,
-    ) -> Result<HttpResponseOk<GetSnapshotResponse>, HttpError>;
+        path: Path<latest::region::RegionPath>,
+    ) -> Result<HttpResponseOk<latest::snapshot::GetSnapshotResponse>, HttpError>;
 
     #[endpoint {
         method = GET,
@@ -95,8 +88,8 @@ pub trait CrucibleAgentApi {
     }]
     async fn region_get_snapshot(
         rqctx: RequestContext<Self::Context>,
-        path: Path<GetSnapshotPath>,
-    ) -> Result<HttpResponseOk<Snapshot>, HttpError>;
+        path: Path<latest::snapshot::GetSnapshotPath>,
+    ) -> Result<HttpResponseOk<latest::snapshot::Snapshot>, HttpError>;
 
     #[endpoint {
         method = DELETE,
@@ -104,7 +97,7 @@ pub trait CrucibleAgentApi {
     }]
     async fn region_delete_snapshot(
         rqctx: RequestContext<Self::Context>,
-        path: Path<DeleteSnapshotPath>,
+        path: Path<latest::snapshot::DeleteSnapshotPath>,
     ) -> Result<HttpResponseDeleted, HttpError>;
 
     #[endpoint {
@@ -113,8 +106,8 @@ pub trait CrucibleAgentApi {
     }]
     async fn region_run_snapshot(
         rqctx: RequestContext<Self::Context>,
-        path: Path<RunSnapshotPath>,
-    ) -> Result<HttpResponseOk<RunningSnapshot>, HttpError>;
+        path: Path<latest::snapshot::RunSnapshotPath>,
+    ) -> Result<HttpResponseOk<latest::snapshot::RunningSnapshot>, HttpError>;
 
     #[endpoint {
         method = DELETE,
@@ -122,35 +115,6 @@ pub trait CrucibleAgentApi {
     }]
     async fn region_delete_running_snapshot(
         rc: RequestContext<Self::Context>,
-        path: Path<RunSnapshotPath>,
+        path: Path<latest::snapshot::RunSnapshotPath>,
     ) -> Result<HttpResponseDeleted, HttpError>;
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct RegionPath {
-    pub id: RegionId,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub struct GetSnapshotResponse {
-    pub snapshots: Vec<Snapshot>,
-    pub running_snapshots: BTreeMap<String, RunningSnapshot>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct GetSnapshotPath {
-    pub id: RegionId,
-    pub name: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct DeleteSnapshotPath {
-    pub id: RegionId,
-    pub name: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct RunSnapshotPath {
-    pub id: RegionId,
-    pub name: String,
 }

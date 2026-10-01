@@ -397,11 +397,13 @@ impl DownstairsClient {
                         !self.skipped_jobs.contains(x)
                             && repair_min_id.map(|r| *x >= r).unwrap_or(true)
                     });
-                    info!(
-                        self.log,
-                        " {ds_id} final dependency list {}",
-                        format_job_list(dependencies),
-                    );
+                    if !dependencies.is_empty() {
+                        info!(
+                            self.log,
+                            " {ds_id} final dependency list {}",
+                            format_job_list(dependencies),
+                        );
+                    }
                 }
             }
         }
@@ -416,7 +418,10 @@ impl DownstairsClient {
         // If it's Done, then by definition it has been acked; test that here
         // to double-check.
         if IOState::Done == job.state[self.client_id] && !job.acked {
-            panic!("[{}] This job was not acked: {:?}", self.client_id, job);
+            panic!(
+                "{} [{}] This job was not acked: {:?}",
+                self.cfg.session_id, self.client_id, job
+            );
         }
 
         self.set_job_state(job, IOState::InProgress);
@@ -441,7 +446,8 @@ impl DownstairsClient {
         info!(self.log, "Transition from {:?} to Reconcile", self.state());
         let DsStateData::Connecting { state, mode } = &mut self.state else {
             panic!(
-                "invalid state {:?} for client {}",
+                "{} invalid state {:?} for client {}",
+                self.cfg.session_id,
                 self.state(),
                 self.client_id
             );
@@ -458,7 +464,10 @@ impl DownstairsClient {
                 // because we're no longer doing live-repair.
                 *mode = ConnectionMode::New;
             }
-            s => panic!("invalid (state, mode) tuple: ({s:?}"),
+            s => panic!(
+                "{} [{}] invalid (state, mode) tuple: ({s:?}",
+                self.cfg.session_id, self.client_id
+            ),
         }
         *state = NegotiationStateData::Reconcile;
     }
@@ -769,7 +778,10 @@ impl DownstairsClient {
     /// .. }`
     pub(crate) fn set_connection_mode_faulted(&mut self) {
         let DsStateData::Connecting { mode, .. } = &mut self.state else {
-            panic!("not connecting");
+            panic!(
+                "{} [{}] not connecting",
+                self.cfg.session_id, self.client_id
+            );
         };
         assert_eq!(*mode, ConnectionMode::Offline);
         *mode = ConnectionMode::Faulted
@@ -839,7 +851,9 @@ impl DownstairsClient {
                 mode: ConnectionMode::New, // RO client checked above
                 ..
             } => panic!(
-                "enqueue should not be called from state {:?}",
+                "{} [{}] enqueue should not be called from state {:?}",
+                self.cfg.session_id,
+                self.client_id,
                 self.state()
             ),
         }
@@ -877,8 +891,9 @@ impl DownstairsClient {
     ) {
         if !Self::is_state_transition_valid(up_state, &self.state, &new_state) {
             panic!(
-                "invalid state transition for client {} from {:?} -> {:?} \
+                "{} invalid state transition for client {} from {:?} -> {:?} \
                  (with up_state: {:?})",
+                self.cfg.session_id,
                 self.client_id,
                 DsState::from(&self.state),
                 DsState::from(&new_state),
@@ -1113,10 +1128,11 @@ impl DownstairsClient {
                                 // downstairs to stop and refuse to restart"
                                 // mode.
                                 let msg = format!(
-                                    "[{}] read hash mismatch on {} \n\
+                                    "{} [{}] {} read hash mismatch\n\
                                         Expected {:x?}\n\
                                         Computed {:x?}\n\
                                         job: {:?}",
+                                    self.cfg.session_id,
                                     self.client_id,
                                     ds_id,
                                     job_blocks,
@@ -1152,8 +1168,8 @@ impl DownstairsClient {
                         let ci = self.repair_info.replace(extent_info.unwrap());
                         if ci.is_some() {
                             panic!(
-                                "[{}] Unexpected repair found on insertion: {:?}",
-                                self.client_id, ci
+                                "{} [{}] Unexpected repair found on insertion: {:?}",
+                                self.cfg.session_id, self.client_id, ci
                             );
                         }
                     }
@@ -1183,8 +1199,8 @@ impl DownstairsClient {
                     }
                     (IOop::Read { .. }, CrucibleError::DecryptionError) => {
                         panic!(
-                            "[{}] {} read decrypt error {:?} {:?}",
-                            self.client_id, ds_id, e, job
+                            "{} [{}] {} read decrypt error {:?} {:?}",
+                            self.cfg.session_id, self.client_id, ds_id, e, job
                         );
                     }
 
@@ -1207,7 +1223,8 @@ impl DownstairsClient {
         assert_eq!(
             old_state,
             IOState::InProgress,
-            "[{}] Job {ds_id} completed while not InProgress: {job:?}",
+            "{} [{}] Job {ds_id} completed while not InProgress: {job:?}",
+            self.cfg.session_id,
             self.client_id,
         );
     }
@@ -1516,9 +1533,12 @@ impl DownstairsClient {
                         // TODO(#558) Figure out if we can handle this error.
                         // Possibly not.
                         panic!(
-                            "[{}] New downstairs region info mismatch: \
+                            "{} [{}] New downstairs region info mismatch: \
                                  {:?} vs. {:?}",
-                            self.client_id, ddef, region_def
+                            self.cfg.session_id,
+                            self.client_id,
+                            ddef,
+                            region_def
                         );
                     }
                 }
@@ -1612,7 +1632,10 @@ impl DownstairsClient {
                 };
                 Ok(out)
             }
-            m => panic!("invalid message in continue_negotiation: {m:?}"),
+            m => panic!(
+                "{} [{}] invalid message in continue_negotiation: {m:?}",
+                self.cfg.session_id, self.client_id
+            ),
         }
     }
 
@@ -1633,7 +1656,8 @@ impl DownstairsClient {
             }
         ) {
             panic!(
-                "[{}] should still be in reconcile, not {:?}",
+                "{} [{}] should still be in reconcile, not {:?}",
+                self.cfg.session_id,
                 self.client_id,
                 self.state()
             );
@@ -1688,7 +1712,10 @@ impl DownstairsClient {
                 // All other reconcile ops are sent as-is
                 self.send(job.op.clone());
             }
-            m => panic!("invalid reconciliation request {m:?}"),
+            m => panic!(
+                "{} [{}] invalid reconciliation request {m:?}",
+                self.cfg.session_id, self.client_id,
+            ),
         }
     }
 
@@ -1754,6 +1781,14 @@ impl DownstairsClient {
 
     pub(crate) fn id(&self) -> Option<Uuid> {
         self.region_uuid
+    }
+
+    pub(crate) fn target_addr(&self) -> Option<SocketAddr> {
+        self.target_addr
+    }
+
+    pub(crate) fn repair_addr(&self) -> Option<SocketAddr> {
+        self.repair_addr
     }
 }
 
@@ -2387,10 +2422,12 @@ impl ClientIoTask {
 
             let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-            let server_name = tokio_rustls::rustls::ServerName::try_from(
-                format!("downstairs{}", self.client_id).as_str(),
-            )
-            .unwrap();
+            let server_name =
+                tokio_rustls::rustls::pki_types::ServerName::try_from(format!(
+                    "downstairs{}",
+                    self.client_id
+                ))
+                .unwrap();
 
             let sock = connector.connect(server_name, tcp).await.unwrap();
             let (read, write) = tokio::io::split(sock);

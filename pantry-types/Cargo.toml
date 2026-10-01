@@ -5,6 +5,5 @@ edition = "2024"
 license = "MPL-2.0"
 
 [dependencies]
+crucible-pantry-types-versions.workspace = true
 crucible-workspace-hack.workspace = true
-schemars.workspace = true
-serde.workspace = true

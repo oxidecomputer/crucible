@@ -1,5 +1,6 @@
 // Copyright 2022 Oxide Computer Company
 use dropshot::ApiDescription;
+use dropshot::CompressionConfig;
 use dropshot::ConfigDropshot;
 use dropshot::ConfigLogging;
 use dropshot::ConfigLoggingLevel;
@@ -23,6 +24,7 @@ pub(crate) fn build_api() -> ApiDescription<Arc<DownstairsControl>> {
     api.register(dsc_get_ds_state).unwrap();
     api.register(dsc_get_pid).unwrap();
     api.register(dsc_get_port).unwrap();
+    api.register(dsc_get_read_only).unwrap();
     api.register(dsc_get_region_count).unwrap();
     api.register(dsc_get_region_info).unwrap();
     api.register(dsc_get_uuid).unwrap();
@@ -55,6 +57,7 @@ pub async fn begin(dsci: Arc<DscInfo>, addr: SocketAddr) -> Result<(), String> {
         default_request_body_max_bytes: 1024,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
+        compression: CompressionConfig::None,
     };
     println!("start access at:{:?}", addr);
 
@@ -509,6 +512,20 @@ async fn dsc_get_region_info(
         })?;
 
     Ok(HttpResponseOk(region_info))
+}
+
+/**
+ * Return true if downstairs were started read-only
+ */
+#[endpoint {
+    method = GET,
+    path = "/readonly",
+}]
+async fn dsc_get_read_only(
+    rqctx: RequestContext<Arc<DownstairsControl>>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let api_context = rqctx.context();
+    Ok(HttpResponseOk(api_context.dsci.read_only))
 }
 
 /**

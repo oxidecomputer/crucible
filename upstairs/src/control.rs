@@ -1,5 +1,6 @@
 // Copyright 2022 Oxide Computer Company
 use dropshot::ApiDescription;
+use dropshot::CompressionConfig;
 use dropshot::ConfigDropshot;
 use dropshot::HandlerTaskMode;
 use dropshot::HttpError;
@@ -38,6 +39,7 @@ pub async fn start(
         default_request_body_max_bytes: 1024,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
+        compression: CompressionConfig::None,
     };
 
     /*

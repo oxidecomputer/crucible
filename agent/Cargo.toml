@@ -6,6 +6,7 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+async-channel.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crucible-agent-api.workspace = true
