@@ -591,6 +591,11 @@ cmon takes and the columns each one produces.
 If the upstairs is not yet running, add the -Z flag to dtrace so it will
 wait to find the matching probe.
 
+`ctop` shows the same fields in a curses display, one row per session
+updated in place, with a sparkline of each session's job rate.  It runs
+an equivalent dtrace command itself, so it needs neither this script nor
+a pipeline: `pfexec ctop`.  See `ctop/README.md`.
+
 ## tracegw.d
 This is a dtrace example script for counting IOs into and out of
 crucible from the guest.
