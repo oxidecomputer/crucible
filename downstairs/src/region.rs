@@ -249,7 +249,8 @@ impl Region {
     }
 
     /// Read region config and validate versions, returning a `Region` with
-    /// an empty extents Vec.  Callers must open extents separately.
+    /// every extent in the [`ExtentState::Closed`] state.  Callers must open
+    /// extents separately.
     fn setup<P: AsRef<Path>>(
         dir: P,
         verbose: bool,
@@ -306,10 +307,14 @@ impl Region {
             .num_threads(WORKER_POOL_SIZE)
             .build()?;
 
+        let extents = (0..def.extent_count())
+            .map(|_| ExtentState::Closed)
+            .collect();
+
         Ok(Region {
             dir: dir.as_ref().to_path_buf(),
             def,
-            extents: Vec::new(),
+            extents,
             dirty_extents: HashSet::new(),
             read_only,
             log: log.clone(),
@@ -372,32 +377,51 @@ impl Region {
         }
     }
 
-    /// If our `extent_count` is higher than the number of populated entries
-    /// we have in our extents Vec, then open all the new extent files and
-    /// load their content into the extent Vec.
+    /// Open every extent file, replacing each [`ExtentState::Closed`] entry
+    /// in the extents Vec with the opened extent.
     ///
     /// Returns an error if extent files are missing.
     fn open_extents(&mut self) -> Result<()> {
-        let errs = self.try_open_extents()?;
-        if let Some((_id, err)) = errs.first() {
-            Err(err.clone().into())
-        } else {
-            Ok(())
+        assert_eq!(self.def.extent_count() as usize, self.extents.len());
+
+        for eid in (0..self.def.extent_count()).map(ExtentId) {
+            assert!(matches!(
+                self.extents[eid.0 as usize],
+                ExtentState::Closed
+            ));
+            let extent = Extent::open(
+                &self.dir,
+                &self.def,
+                eid,
+                self.read_only,
+                &self.log,
+            )?;
+
+            if extent.dirty() {
+                self.dirty_extents.insert(eid);
+            }
+            self.extents[eid.0 as usize] = ExtentState::Opened(extent);
         }
+        self.check_extents();
+
+        Ok(())
     }
 
     /// Like [`open_extents`], but tolerates
     /// [`CrucibleError::MissingContextSlot`] on individual extents.
     ///
-    /// Extents that fail with that error are stored as
-    /// [`ExtentState::Closed`] (preserving Vec indices) and the error is
-    /// collected into the returned Vec.  Any other error causes an
-    /// immediate failure.
+    /// Extents that fail with that error are left as [`ExtentState::Closed`]
+    /// and the error is collected into the returned Vec.  Any other error
+    /// causes an immediate failure.
     fn try_open_extents(&mut self) -> Result<Vec<(ExtentId, CrucibleError)>> {
-        let next_eid = self.extents.len() as u32;
+        assert_eq!(self.def.extent_count() as usize, self.extents.len());
         let mut errors: Vec<(ExtentId, CrucibleError)> = Vec::new();
 
-        for eid in (next_eid..self.def.extent_count()).map(ExtentId) {
+        for eid in (0..self.def.extent_count()).map(ExtentId) {
+            assert!(matches!(
+                self.extents[eid.0 as usize],
+                ExtentState::Closed
+            ));
             match Extent::open(
                 &self.dir,
                 &self.def,
@@ -409,22 +433,17 @@ impl Region {
                     if extent.dirty() {
                         self.dirty_extents.insert(eid);
                     }
-                    self.extents.push(ExtentState::Opened(extent));
+                    self.extents[eid.0 as usize] = ExtentState::Opened(extent);
                 }
                 Err(e) => match e.downcast::<CrucibleError>() {
                     Ok(ce @ CrucibleError::MissingContextSlot { .. }) => {
                         errors.push((eid, ce));
-                        self.extents.push(ExtentState::Closed);
                     }
                     Ok(other) => return Err(other.into()),
                     Err(e) => return Err(e),
                 },
             }
         }
-        // We intentionally leave failed extents as Closed, so we cannot
-        // use check_extents() here.  Verify only the count.
-        assert_eq!(self.def.extent_count() as usize, self.extents.len());
-
         Ok(errors)
     }
 
