@@ -4980,7 +4980,7 @@ pub(crate) mod test {
         // active, put all three into live-repair so that we fall back to
         // reconciliation while the upstairs is active, then abort that
         // reconciliation.  The downstairs should restart and come back
-        // through live-repair, instead of panicking on an invalid state
+        // through reconciliation, instead of panicking on an invalid state
         // transition.
 
         let mut ddef = RegionDefinition::default();
@@ -5045,6 +5045,32 @@ pub(crate) mod test {
                 DsState::Connecting {
                     mode: ConnectionMode::Faulted,
                     state: NegotiationState::Start,
+                }
+            );
+        }
+
+        // Bring all three clients back to live-repair ready.  Since all three
+        // still need repair, we should fall back to reconciliation again.
+        for id in ClientId::iter() {
+            faulted_to_live_repair_ready_with(
+                &mut up,
+                id,
+                RegionMetadata::new(
+                    &[1; 12],                      // generation
+                    &[1; 12],                      // flush
+                    &[id == ClientId::new(0); 12], // dirty
+                ),
+            );
+            up.downstairs.clients[id].repair_addr =
+                Some("0.0.0.0:1".parse().unwrap());
+        }
+        up.apply(UpstairsAction::NoOp);
+        for id in ClientId::iter() {
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    state: NegotiationState::Reconcile,
                 }
             );
         }
