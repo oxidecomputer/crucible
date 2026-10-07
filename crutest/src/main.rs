@@ -90,6 +90,15 @@ enum Workload {
     GenericRead,
     Nothing,
     One,
+    /// Attempt to reproduce the ZFS record-capture bug from
+    /// crucible#1906.  For every ZFS record of block data in every
+    /// extent, write W1 at the start of the record, then W2 right
+    /// after it, with a flush after each full pass.  IO is paused
+    /// quickly if a downstairs stops responding on its repair port.
+    One906 {
+        #[clap(flatten)]
+        cfg: One906Workload,
+    },
     /// Measure performance with a random read workload
     RandRead {
         #[clap(flatten)]
@@ -376,6 +385,38 @@ impl RandReadWriteConfig {
             mode,
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, clap::Args)]
+struct One906Workload {
+    /// ZFS recordsize (in bytes) of the dataset holding the downstairs
+    /// extent files.
+    #[clap(long, default_value_t = 131072, action)]
+    recordsize: u64,
+
+    /// Size in bytes of the first write (W1) to each record.  This
+    /// should be at least zfs_immediate_write_sz (32 KiB) so the
+    /// downstairs data write is logged as WR_INDIRECT.
+    #[clap(long, default_value_t = 65536, action)]
+    write1_size: u64,
+
+    /// Size in bytes of the second write (W2) to each record, issued
+    /// directly after W1 with no flush in between.
+    #[clap(long, default_value_t = 32768, action)]
+    write2_size: u64,
+
+    /// Number of concurrent worker tasks issuing W1/W2 pairs.
+    #[clap(long, default_value_t = 8, action)]
+    workers: usize,
+
+    /// Port to probe on each downstairs for fast fault detection.
+    /// The default is each target port + 4000 (the repair port).
+    #[clap(long, action)]
+    probe_port: Option<u16>,
+
+    /// How often (in ms) to probe each downstairs repair server.
+    #[clap(long, default_value_t = 250, action)]
+    probe_interval_ms: u64,
 }
 
 /// For tests that need to pick an operation to do.
@@ -1201,6 +1242,28 @@ async fn main() -> Result<()> {
         Workload::One => {
             info!(test_log, "One test");
             one_workload(&volume, &mut disk_info).await?;
+        }
+        Workload::One906 { cfg } => {
+            info!(test_log, "One906 test");
+            // Either we have a count (of passes), or we run until we
+            // get a signal.
+            let mut wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else {
+                    let count = opt.count.unwrap_or(10);
+                    WhenToQuit::Count { count }
+                }
+            };
+            one906_workload(
+                &volume,
+                &mut wtq,
+                &mut disk_info,
+                &targets,
+                cfg,
+                opt.quiet,
+            )
+            .await?;
         }
         Workload::RandRead { cfg } => {
             rand_read_write_workload(
@@ -3450,6 +3513,349 @@ async fn one_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
     volume.flush(None).await?;
 
     Ok(())
+}
+
+// Seconds (with ms) since the epoch, for correlating crutest output
+// with events recorded elsewhere (VM panic times, harness logs).
+fn epoch_ts() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    format!("{:.3}", now.as_secs_f64())
+}
+
+// Wait here while the one906 prober has IO paused.
+async fn one906_pause_gate(paused: &AtomicBool) {
+    while paused.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// Issue a single one906 write of `blocks` blocks starting at
+// `block_index`, updating the shared write log first so the data
+// pattern can be verified later.
+async fn one906_write(
+    volume: &Volume,
+    write_log: &std::sync::Mutex<WriteLog>,
+    block_index: u64,
+    blocks: u64,
+    bs: u64,
+) -> Result<(), CrucibleError> {
+    let data = {
+        let mut wl = write_log.lock().unwrap();
+        for i in 0..blocks {
+            wl.update_wc((block_index + i) as usize);
+        }
+        fill_vec(block_index as usize, blocks as usize, &wl, bs)
+    };
+    volume.write(BlockIndex(block_index), data).await
+}
+
+/*
+ * Attempt to reproduce the ZFS "record capture" bug from crucible#1906.
+ *
+ * For every ZFS record (recordsize bytes, default 128 KiB) of block data
+ * in every extent file, issue two back to back writes with no flush
+ * between them:
+ *   W1: write1_size bytes at the start of the record.
+ *   W2: write2_size bytes immediately following W1.
+ * Both writes default to >= zfs_immediate_write_sz (32 KiB), so the
+ * downstairs data writes are logged as WR_INDIRECT in the ZIL.  After
+ * every record has been written (one pass), send a flush.  If the
+ * downstairs crashes during the resulting zil_commit with the ZIL chain
+ * cut between W1's log record and the log record holding W2's context
+ * slot write, ZIL replay will restore W2's data without its context
+ * slot and the downstairs will fail to open the extent.
+ *
+ * This expects regions created so each extent's data is a whole number
+ * of ZFS records, ideally exactly one record per extent, e.g.:
+ *   crucible-downstairs create --block-size 4096 --extent-size 32 ...
+ * which also keeps the context slots and metadata out of the data
+ * record (they start in the following record).
+ *
+ * A prober task watches the repair server of every downstairs target.
+ * If a downstairs stops answering (killed or panicked), all workers
+ * pause new IO within about a second, limiting how far the surviving
+ * downstairs drift from the dead one.  IO resumes automatically when
+ * the downstairs answers again.
+ */
+async fn one906_workload(
+    volume: &Volume,
+    wtq: &mut WhenToQuit,
+    di: &mut DiskInfo,
+    targets: &[SocketAddr],
+    cfg: One906Workload,
+    quiet: bool,
+) -> Result<()> {
+    let bs = di.volume_info.block_size;
+    if di.volume_info.volumes.len() != 1 {
+        bail!(
+            "one906 requires a volume with exactly one sub_volume, found {}",
+            di.volume_info.volumes.len()
+        );
+    }
+    let sv = &di.volume_info.volumes[0];
+    let blocks_per_extent = sv.blocks_per_extent;
+    let extent_count = sv.extent_count as u64;
+
+    if cfg.recordsize == 0 || !cfg.recordsize.is_multiple_of(bs) {
+        bail!(
+            "recordsize {} is not a multiple of block size {bs}",
+            cfg.recordsize
+        );
+    }
+    for (name, size) in [
+        ("write1_size", cfg.write1_size),
+        ("write2_size", cfg.write2_size),
+    ] {
+        if size == 0 || !size.is_multiple_of(bs) {
+            bail!("{name} {size} is not a multiple of block size {bs}");
+        }
+    }
+    if cfg.workers == 0 {
+        bail!("workers must be at least 1");
+    }
+
+    let blocks_per_record = cfg.recordsize / bs;
+    let w1_blocks = cfg.write1_size / bs;
+    let w2_blocks = cfg.write2_size / bs;
+    if w1_blocks + w2_blocks > blocks_per_record {
+        bail!(
+            "write1_size + write2_size ({} bytes) does not fit in one \
+             record of {} bytes",
+            cfg.write1_size + cfg.write2_size,
+            cfg.recordsize
+        );
+    }
+
+    let extent_bytes = blocks_per_extent * bs;
+    let records_per_extent = extent_bytes / cfg.recordsize;
+    if records_per_extent == 0 {
+        bail!(
+            "extent data size {extent_bytes} is smaller than the \
+             recordsize {}",
+            cfg.recordsize
+        );
+    }
+    let total_records = extent_count * records_per_extent;
+
+    println!(
+        "one906: bs:{bs} extents:{extent_count} \
+         blocks_per_extent:{blocks_per_extent}"
+    );
+    println!(
+        "one906: recordsize:{} blocks_per_record:{blocks_per_record} \
+         records_per_extent:{records_per_extent} \
+         total_records:{total_records}",
+        cfg.recordsize
+    );
+    println!(
+        "one906: W1:{w1_blocks} blocks + W2:{w2_blocks} blocks per \
+         record, workers:{}",
+        cfg.workers
+    );
+    if !extent_bytes.is_multiple_of(cfg.recordsize) {
+        println!(
+            "one906: NOTE: extent data size {extent_bytes} is not a \
+             multiple of recordsize {}; the trailing partial record of \
+             each extent is not exercised",
+            cfg.recordsize
+        );
+    }
+
+    // Spawn the prober that will pause IO quickly when any downstairs
+    // stops answering on its repair port.
+    let paused = Arc::new(AtomicBool::new(false));
+    let probe_stop = Arc::new(AtomicBool::new(false));
+    let mut probe_clients = Vec::new();
+    for tgt in targets {
+        let port = cfg
+            .probe_port
+            .unwrap_or(tgt.port() + crucible_common::REPAIR_PORT_OFFSET);
+        let addr = SocketAddr::new(tgt.ip(), port);
+        let client = reqwest::ClientBuilder::new()
+            .connect_timeout(Duration::from_millis(300))
+            .timeout(Duration::from_millis(500))
+            .build()?;
+        probe_clients.push(repair_client::new_with_client(
+            &format!("http://{addr}"),
+            client,
+        ));
+        println!("one906: probe downstairs {tgt} at http://{addr}");
+    }
+    let prober = {
+        let paused = paused.clone();
+        let probe_stop = probe_stop.clone();
+        let volume = volume.clone();
+        let num_targets = targets.len();
+        let interval = Duration::from_millis(cfg.probe_interval_ms);
+        tokio::spawn(async move {
+            let mut fails = vec![0u32; probe_clients.len()];
+            let mut waiting = 0u64;
+            while !probe_stop.load(Ordering::Relaxed) {
+                let results = futures::future::join_all(
+                    probe_clients.iter().map(|c| c.get_work()),
+                )
+                .await;
+                for (fail, result) in fails.iter_mut().zip(results.iter()) {
+                    if result.is_ok() {
+                        *fail = 0;
+                    } else {
+                        *fail += 1;
+                    }
+                }
+                // Two consecutive failures marks a downstairs as down,
+                // to avoid tripping on one slow response.
+                let down = fails.iter().any(|&f| f >= 2);
+                if down {
+                    waiting = 0;
+                    if !paused.swap(true, Ordering::SeqCst) {
+                        let bad: Vec<_> = fails
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &f)| f >= 2)
+                            .map(|(i, _)| i)
+                            .collect();
+                        println!(
+                            "[{}] one906: pausing IO, downstairs {bad:?} \
+                             not responding",
+                            epoch_ts()
+                        );
+                    }
+                } else if paused.load(Ordering::SeqCst) {
+                    // Every downstairs is answering probes again, but
+                    // don't resume IO until the upstairs reports all
+                    // the downstairs clients are back to Active (any
+                    // replay or LiveRepair has finished).
+                    let active = match volume.query_work_queue().await {
+                        Ok(wc) => wc.active_count,
+                        Err(_) => 0,
+                    };
+                    if active == num_targets {
+                        waiting = 0;
+                        paused.store(false, Ordering::SeqCst);
+                        println!(
+                            "[{}] one906: all {num_targets} downstairs \
+                             ACTIVE, resuming IO",
+                            epoch_ts()
+                        );
+                    } else {
+                        // Report progress roughly every 20 probes.
+                        if waiting % 20 == 0 {
+                            println!(
+                                "[{}] one906: waiting to resume IO, \
+                                 {active}/{num_targets} downstairs ACTIVE",
+                                epoch_ts()
+                            );
+                        }
+                        waiting += 1;
+                    }
+                }
+                tokio::time::sleep(interval).await;
+            }
+        })
+    };
+
+    // The write log is shared with the workers; put it back in
+    // DiskInfo when the test is done so verify works.
+    let write_log = Arc::new(std::sync::Mutex::new(std::mem::replace(
+        &mut di.write_log,
+        WriteLog::new(0),
+    )));
+
+    let mut pass = 1;
+    let result: Result<()> = loop {
+        one906_pause_gate(&paused).await;
+        let pass_start = Instant::now();
+
+        // Each worker takes a strided slice of the records; a record
+        // gets its W1 write, then its W2 write, with no flush between.
+        let mut handles = Vec::new();
+        for w in 0..cfg.workers {
+            let volume = volume.clone();
+            let write_log = write_log.clone();
+            let paused = paused.clone();
+            let workers = cfg.workers as u64;
+            handles.push(tokio::spawn(async move {
+                let mut rec = w as u64;
+                while rec < total_records {
+                    one906_pause_gate(&paused).await;
+                    let extent = rec / records_per_extent;
+                    let record = rec % records_per_extent;
+                    let block =
+                        extent * blocks_per_extent + record * blocks_per_record;
+                    one906_write(&volume, &write_log, block, w1_blocks, bs)
+                        .await?;
+                    one906_write(
+                        &volume,
+                        &write_log,
+                        block + w1_blocks,
+                        w2_blocks,
+                        bs,
+                    )
+                    .await?;
+                    rec += workers;
+                }
+                Ok::<(), CrucibleError>(())
+            }));
+        }
+        let mut failed = None;
+        for handle in handles {
+            if let Err(e) = handle.await? {
+                failed = Some(e);
+            }
+        }
+        if let Some(e) = failed {
+            break Err(e.into());
+        }
+
+        // Don't send a flush while we believe a downstairs is dead.
+        one906_pause_gate(&paused).await;
+        if let Err(e) = volume.flush(None).await {
+            break Err(e.into());
+        }
+
+        if !quiet {
+            println!(
+                "[{}] one906: pass {pass:>5} done, {total_records} \
+                 records written, flush sent, {:.2}s",
+                epoch_ts(),
+                pass_start.elapsed().as_secs_f64()
+            );
+        }
+
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if pass >= *count {
+                    break Ok(());
+                }
+            }
+            WhenToQuit::Signal { shutdown_rx } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break Ok(());
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        di.write_log = write_log.lock().unwrap().clone();
+                        if let Err(e) = verify_volume(volume, di, false).await {
+                            break Err(anyhow!(
+                                "Requested volume verify failed: {e:?}"
+                            ));
+                        }
+                    }
+                    _ => {} // Ignore everything else
+                }
+            }
+        }
+        pass += 1;
+    };
+
+    probe_stop.store(true, Ordering::Relaxed);
+    prober.await?;
+    di.write_log = write_log.lock().unwrap().clone();
+    result
 }
 
 /*

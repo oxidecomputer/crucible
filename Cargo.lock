@@ -2021,6 +2021,7 @@ dependencies = [
  "rand_chacha 0.9.0",
  "reedline",
  "repair-client",
+ "reqwest 0.13.2",
  "ringbuffer",
  "schemars 0.8.22",
  "serde",
