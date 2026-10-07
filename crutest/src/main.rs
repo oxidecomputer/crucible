@@ -3516,10 +3516,30 @@ async fn one_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
     Ok(())
 }
 
-// Wait here while the one906 prober has IO paused.
-async fn one906_pause_gate(paused: &AtomicBool) {
-    while paused.load(Ordering::SeqCst) {
+// Wait here while the one906 prober has IO paused, unless we have
+// been told to stop.
+async fn one906_pause_gate(paused: &AtomicBool, stop: &AtomicBool) {
+    while paused.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// Poll for a signal having arrived, so one906 can react to a shutdown
+// request even when IO is paused or a pass is stuck mid-flight.  A
+// shutdown request sets the stop flag that the workers and the pause
+// gates check.
+fn one906_check_signals(wtq: &mut WhenToQuit, stop: &AtomicBool, log: &Logger) {
+    if let WhenToQuit::Signal { shutdown_rx } = wtq {
+        match shutdown_rx.try_recv() {
+            Ok(SignalAction::Shutdown) => {
+                info!(log, "one906: shutting down on SIGUSR1");
+                stop.store(true, Ordering::SeqCst);
+            }
+            Ok(SignalAction::Verify) => {
+                warn!(log, "one906: ignoring verify request mid-pass");
+            }
+            _ => {} // Ignore everything else
+        }
     }
 }
 
@@ -3761,9 +3781,19 @@ async fn one906_workload(
         WriteLog::new(0),
     )));
 
+    // Set when a shutdown has been requested; the workers and pause
+    // gates all check it so a SIGUSR1 works even while IO is paused.
+    let stop = Arc::new(AtomicBool::new(false));
+
     let mut pass = 1;
     let result: Result<()> = loop {
-        one906_pause_gate(&paused).await;
+        while paused.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
+            one906_check_signals(wtq, &stop, log);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if stop.load(Ordering::SeqCst) {
+            break Ok(());
+        }
         let pass_start = Instant::now();
 
         // Each worker takes a strided slice of the records; a record
@@ -3773,11 +3803,15 @@ async fn one906_workload(
             let volume = volume.clone();
             let write_log = write_log.clone();
             let paused = paused.clone();
+            let stop = stop.clone();
             let workers = cfg.workers as u64;
             handles.push(tokio::spawn(async move {
                 let mut rec = w as u64;
                 while rec < total_records {
-                    one906_pause_gate(&paused).await;
+                    one906_pause_gate(&paused, &stop).await;
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
                     let extent = rec / records_per_extent;
                     let record = rec % records_per_extent;
                     let block =
@@ -3797,18 +3831,43 @@ async fn one906_workload(
                 Ok::<(), CrucibleError>(())
             }));
         }
+
+        // Wait for the workers, while still noticing a shutdown
+        // request: the workers can be parked at a pause gate for a
+        // long time when a downstairs is dead.
+        let all = futures::future::join_all(handles);
+        tokio::pin!(all);
+        let results = loop {
+            match tokio::time::timeout(Duration::from_millis(250), &mut all)
+                .await
+            {
+                Ok(results) => break results,
+                Err(_) => one906_check_signals(wtq, &stop, log),
+            }
+        };
         let mut failed = None;
-        for handle in handles {
-            if let Err(e) = handle.await? {
-                failed = Some(e);
+        for result in results {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => failed = Some(anyhow!(e)),
+                Err(e) => failed = Some(anyhow!(e)),
             }
         }
         if let Some(e) = failed {
-            break Err(e.into());
+            break Err(e);
+        }
+        if stop.load(Ordering::SeqCst) {
+            break Ok(());
         }
 
         // Don't send a flush while we believe a downstairs is dead.
-        one906_pause_gate(&paused).await;
+        while paused.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
+            one906_check_signals(wtq, &stop, log);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if stop.load(Ordering::SeqCst) {
+            break Ok(());
+        }
         if let Err(e) = volume.flush(None).await {
             break Err(e.into());
         }
