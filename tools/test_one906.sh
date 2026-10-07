@@ -195,6 +195,10 @@ while :; do
         exit 1
     fi
 
+    # Count crutest's resume lines now, so after the fault we can tell
+    # when it has resumed IO for this loop (true recovery signal).
+    resume_before=$(grep -c "resuming" "$CRUTEST_LOG" 2>/dev/null)
+
     # Arm the panic trigger in the VM, first thing.
     panic_at=$((2 + RANDOM % 8))
     msg "arming panic trigger in VM, panic at lwb write $panic_at"
@@ -215,11 +219,20 @@ while :; do
         exit 1
     fi
 
-    # Wait for the VM to die.
+    # Wait for the VM to die, while also watching crutest: if crutest
+    # exits here (for example because it lost quorum) we must stop
+    # rather than block for the whole ARM_TIMEOUT.
     armed=$SECONDS
     dead=0
     fail=0
     while :; do
+        if ! kill -0 "$crutest_pid" 2>/dev/null; then
+            msg "crutest exited while waiting for the trigger, see" \
+                "$CRUTEST_LOG"
+            disarm_trigger
+            crutest_pid=""
+            exit 1
+        fi
         if ds_online "$DS0"; then
             fail=0
         else
@@ -323,17 +336,36 @@ while :; do
     fi
     msg "downstairs back online in $((SECONDS - boot_start)) seconds"
 
-    # Wait for all downstairs to be ACTIVE.  crutest resumes its IO on
-    # its own once this is true.
-    while :; do
-        states=$(dtrace -s "$DSSTATE" 2> /dev/null)
-        if [[ "$states" == "ACT ACT ACT" ]]; then
+    # Wait for the cluster to truly recover before starting the next
+    # loop.  crutest is the authority here: its prober does a positive
+    # read+flush liveness probe and only resumes IO once all three
+    # downstairs are actually serving again (not merely answering the
+    # repair port, and not a stale pre-timeout Active).  So wait until
+    # crutest logs a new "resuming" line for the fault we just caused.
+    recovered=0
+    recover_start=$SECONDS
+    while [[ $((SECONDS - recover_start)) -lt $DS_WAIT ]]; do
+        if ! kill -0 "$crutest_pid" 2>/dev/null; then
+            msg "crutest exited during recovery, see $CRUTEST_LOG"
+            crutest_pid=""
+            msg "snapshot left in place at $SNAP"
+            exit 1
+        fi
+        resume_now=$(grep -c "resuming" "$CRUTEST_LOG" 2>/dev/null)
+        if [[ "$resume_now" -gt "$resume_before" ]]; then
+            recovered=1
             break
         fi
-        msg "current states: $states, waiting for all ACT"
-        sleep 10
+        sleep 5
     done
-    msg "all downstairs are active again"
+
+    if [[ $recovered -eq 0 ]]; then
+        msg "crutest did not resume IO in $DS_WAIT seconds"
+        stop_crutest
+        msg "snapshot left in place at $SNAP"
+        exit 1
+    fi
+    msg "crutest resumed IO, all downstairs serving again"
 
     # Region verified and repaired, this loop found nothing.
     msg "destroying snapshot $SNAP"
