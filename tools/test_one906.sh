@@ -45,9 +45,9 @@ CRUTEST_LOG=${CRUTEST_LOG:-/tmp/crutest-one906.out}
 
 # Propolis server for the downstairs 0 VM
 VM_DIR=${VM_DIR:-/save/vm}
-PROPOLIS_CLI=${PROPOLIS_CLI:-./propolis-cli-boot-order}
+PROPOLIS_CLI=${PROPOLIS_CLI:-/save/vm/propolis-cli-boot-order}
 PROPOLIS_PORT=${PROPOLIS_PORT:-12400}
-VM_TOML=${VM_TOML:-illumos-cds0.toml}
+VM_TOML=${VM_TOML:-/save/vm/illumos-cds0.toml}
 VM_NAME=${VM_NAME:-cds0}
 VM_CORES=${VM_CORES:-32}
 VM_MEM=${VM_MEM:-32768}
