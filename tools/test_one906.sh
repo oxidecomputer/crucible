@@ -74,7 +74,14 @@ ARM_TIMEOUT=${ARM_TIMEOUT:-300}
 # Seconds to wait for the downstairs to return after VM boot.
 DS_WAIT=${DS_WAIT:-600}
 
-SSH="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@$DS0"
+# Private key for ssh/scp to the downstairs 0 VM, empty for default.
+SSH_KEY=${SSH_KEY:-}
+
+SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=5"
+if [[ -n "$SSH_KEY" ]]; then
+    SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
+fi
+SSH="ssh $SSH_OPTS root@$DS0"
 gen=${GEN:-$(date +%s)}
 count=0
 crutest_pid=""
@@ -135,7 +142,7 @@ if ! $SSH true; then
     msg "cannot ssh to root@$DS0"
     exit 1
 fi
-if ! scp -o StrictHostKeyChecking=no "$PANIC_D" "root@$DS0:/var/tmp/"; then
+if ! scp $SSH_OPTS "$PANIC_D" "root@$DS0:/var/tmp/"; then
     msg "failed to copy $PANIC_D to the VM"
     exit 1
 fi
