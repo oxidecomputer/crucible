@@ -100,8 +100,11 @@ function stop_crutest() {
     crutest_pid=""
 }
 
+# The bracket in the pkill pattern keeps pkill -f from matching the
+# remote shell running the pkill command itself (its argv contains the
+# pattern, and illumos pkill does not exclude ancestor processes).
 function disarm_trigger() {
-    $SSH "pkill -f one906-panic" > /dev/null 2>&1
+    $SSH "pkill -f '[o]ne906-panic'" > /dev/null 2>&1
 }
 
 trap ctrl_c INT
@@ -177,7 +180,7 @@ while :; do
     # Arm the panic trigger in the VM, first thing.
     panic_at=$((2 + RANDOM % 8))
     msg "arming panic trigger in VM, panic at lwb write $panic_at"
-    if ! $SSH "pkill -f one906-panic > /dev/null 2>&1; \
+    if ! $SSH "pkill -f '[o]ne906-panic' > /dev/null 2>&1; \
         nohup dtrace -w -s $panic_d_vm $panic_at \
         >> /var/tmp/one906-panic.log 2>&1 &"; then
         msg "failed to arm the panic trigger"
