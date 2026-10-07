@@ -11,10 +11,10 @@
 #     pauses its own IO within about a second of a downstairs dying and
 #     resumes only when all three downstairs are ACTIVE again.
 #  2. In a loop:
-#     a. Let IO run for a random delay, then arm one906-panic.d in the
-#        downstairs 0 VM over ssh.  The script panics the guest on the
-#        Nth ZIL log block write after a dmu_sync (N randomized),
-#        cutting the ZIL chain inside the vulnerable window.
+#     a. Arm one906-panic.d in the downstairs 0 VM over ssh.  The
+#        script panics the guest on the Nth ZIL log block write after
+#        a dmu_sync (N randomized), cutting the ZIL chain inside the
+#        vulnerable window.
 #     b. When the VM dies, destroy the VMM and snapshot the dataset
 #        backing its disk, preserving the pre-ZIL-replay state.
 #     c. Boot the VM again.  If the downstairs comes online it has
@@ -66,9 +66,6 @@ REPAIR_PORT=${REPAIR_PORT:-13000}
 # SMF service of the downstairs inside the VM.
 DS_SMF=${DS_SMF:-downstairs}
 
-# Seconds of IO (min plus random range) before arming the trigger.
-ARM_DELAY_MIN=${ARM_DELAY_MIN:-10}
-ARM_DELAY_RANGE=${ARM_DELAY_RANGE:-30}
 # Seconds to wait for the armed trigger to fire before disarming.
 ARM_TIMEOUT=${ARM_TIMEOUT:-300}
 # Seconds to wait for the downstairs to return after VM boot.
@@ -177,28 +174,22 @@ while :; do
         exit 1
     fi
 
-    # Let IO run for a bit so the fault lands at varied points in the
-    # write/flush cycle.
-    delay=$((ARM_DELAY_MIN + RANDOM % ARM_DELAY_RANGE))
-    msg "running IO for $delay seconds before arming the trigger"
-    sleep "$delay"
-
-    # Record the VMM ID while the VM is still healthy.
-    vmm_id=$($PROPOLIS_CLI --server 0.0.0.0 --port "$PROPOLIS_PORT" get |
-        grep " id: " | awk '{print $2}' | tr -d ',')
-    if [[ -z "$vmm_id" ]]; then
-        msg "failed to get VMM ID from propolis"
-        stop_crutest
-        exit 1
-    fi
-
-    # Arm the panic trigger in the VM.
+    # Arm the panic trigger in the VM, first thing.
     panic_at=$((2 + RANDOM % 8))
     msg "arming panic trigger in VM, panic at lwb write $panic_at"
     if ! $SSH "pkill -f one906-panic > /dev/null 2>&1; \
         nohup dtrace -w -s $panic_d_vm $panic_at \
         >> /var/tmp/one906-panic.log 2>&1 &"; then
         msg "failed to arm the panic trigger"
+        stop_crutest
+        exit 1
+    fi
+
+    # Record the VMM ID; propolis still answers after a guest panic.
+    vmm_id=$($PROPOLIS_CLI --server 0.0.0.0 --port "$PROPOLIS_PORT" get |
+        grep " id: " | awk '{print $2}' | tr -d ',')
+    if [[ -z "$vmm_id" ]]; then
+        msg "failed to get VMM ID from propolis"
         stop_crutest
         exit 1
     fi
