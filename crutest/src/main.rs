@@ -3516,6 +3516,22 @@ async fn one_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
     Ok(())
 }
 
+// Send one one906 recovery probe: a small read followed by a flush.
+// Both ack at quorum (a read at one client Done, a flush at two), so
+// these return promptly even while a downstairs is still absent.  The
+// jobs stay on the work queue until a flush retires them, which only
+// happens once they are terminal on all three clients, so the prober
+// then watches ds_count drain to zero to confirm all three have
+// actually processed the probe.  Returns false if the probe could not
+// be issued.
+async fn one906_send_probe(volume: &Volume, bs: u64) -> bool {
+    let mut buf = crucible::Buffer::new(1, bs as usize);
+    if volume.read(BlockIndex(0), &mut buf).await.is_err() {
+        return false;
+    }
+    volume.flush(None).await.is_ok()
+}
+
 // Wait here while the one906 prober has IO paused, unless we have
 // been told to stop.
 async fn one906_pause_gate(paused: &AtomicBool, stop: &AtomicBool) {
@@ -3707,8 +3723,13 @@ async fn one906_workload(
         let log = log.clone();
         let num_targets = targets.len();
         let interval = Duration::from_millis(cfg.probe_interval_ms);
+        let bs = di.volume_info.block_size;
         tokio::spawn(async move {
             let mut fails = vec![0u32; probe_clients.len()];
+            // One recovery probe (a read + flush) is sent per fault
+            // episode, not every cycle.  `probe_sent` tracks whether
+            // that probe is already in flight for the current pause.
+            let mut probe_sent = false;
             let mut waiting = 0u64;
             while !probe_stop.load(Ordering::Relaxed) {
                 let results = futures::future::join_all(
@@ -3727,6 +3748,7 @@ async fn one906_workload(
                 let down = fails.iter().any(|&f| f >= 2);
                 if down {
                     waiting = 0;
+                    probe_sent = false;
                     if !paused.swap(true, Ordering::SeqCst) {
                         let bad: Vec<_> = fails
                             .iter()
@@ -3741,29 +3763,63 @@ async fn one906_workload(
                         );
                     }
                 } else if paused.load(Ordering::SeqCst) {
-                    // Every downstairs is answering probes again, but
-                    // don't resume IO until the upstairs reports all
-                    // the downstairs clients are back to Active (any
-                    // replay or LiveRepair has finished).
-                    let active = match volume.query_work_queue().await {
-                        Ok(wc) => wc.active_count,
-                        Err(_) => 0,
-                    };
-                    if active == num_targets {
-                        waiting = 0;
-                        paused.store(false, Ordering::SeqCst);
-                        info!(
-                            log,
-                            "one906: all {num_targets} downstairs \
-                             ACTIVE, resuming IO"
-                        );
-                    } else {
-                        // Report progress roughly every 20 probes.
-                        if waiting.is_multiple_of(20) {
+                    // Every downstairs answers probes again, but the
+                    // repair port answering does not prove a downstairs
+                    // is back in service: after a silent death the
+                    // upstairs keeps the old connection Active (and
+                    // buffers IO to it) until its ~45s inactivity
+                    // timeout, so active_count is a stale read then.
+                    //
+                    // Use a positive liveness check instead.  If a
+                    // downstairs is not Active the upstairs is still
+                    // faulting or live-repairing, so just wait (and
+                    // re-probe once it returns).  Otherwise send one
+                    // read+flush probe and wait for the work queue to
+                    // drain: a flush only retires once it is terminal
+                    // on all three clients, so ds_count returning to
+                    // zero means every downstairs really processed it,
+                    // not merely that the repair port answers or that a
+                    // stale Active lingers.  The probe is sent once per
+                    // episode; we do not re-send while it is in flight.
+                    let wc = volume.query_work_queue().await.ok();
+                    let active =
+                        wc.as_ref().map(|w| w.active_count).unwrap_or(0);
+                    let ds_count =
+                        wc.as_ref().map(|w| w.ds_count).unwrap_or(usize::MAX);
+                    if active != num_targets {
+                        // Still faulting / live-repairing.  Abandon any
+                        // probe so we send a fresh one once all clients
+                        // are Active again.
+                        probe_sent = false;
+                        if waiting.is_multiple_of(8) {
                             info!(
                                 log,
-                                "one906: waiting to resume IO, \
+                                "one906: waiting for recovery, \
                                  {active}/{num_targets} downstairs ACTIVE"
+                            );
+                        }
+                        waiting += 1;
+                    } else if !probe_sent {
+                        if one906_send_probe(&volume, bs).await {
+                            probe_sent = true;
+                        }
+                    } else if ds_count == 0 {
+                        paused.store(false, Ordering::SeqCst);
+                        probe_sent = false;
+                        waiting = 0;
+                        info!(
+                            log,
+                            "one906: all {num_targets} downstairs serving \
+                             IO again, resuming"
+                        );
+                    } else {
+                        // Probe in flight; a downstairs has not yet
+                        // completed it.  Keep waiting, do not re-send.
+                        if waiting.is_multiple_of(8) {
+                            info!(
+                                log,
+                                "one906: probe outstanding, waiting \
+                                 for all downstairs to complete it"
                             );
                         }
                         waiting += 1;
