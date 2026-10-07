@@ -94,10 +94,25 @@ function ds_online() {
     curl -s --max-time 2 "http://$1:$REPAIR_PORT/work" > /dev/null 2>&1
 }
 
+# Ask crutest to stop, escalating if it does not exit: SIGUSR1 for a
+# clean shutdown, then SIGTERM, then SIGKILL.
 function stop_crutest() {
     if [[ -n "$crutest_pid" ]] && kill -0 "$crutest_pid" 2>/dev/null; then
         msg "stopping crutest at pid $crutest_pid"
         kill -SIGUSR1 "$crutest_pid"
+        for _ in $(seq 1 15); do
+            kill -0 "$crutest_pid" 2>/dev/null || break
+            sleep 1
+        done
+        if kill -0 "$crutest_pid" 2>/dev/null; then
+            msg "crutest did not exit from SIGUSR1, sending SIGTERM"
+            kill "$crutest_pid"
+            sleep 2
+        fi
+        if kill -0 "$crutest_pid" 2>/dev/null; then
+            msg "crutest did not exit from SIGTERM, sending SIGKILL"
+            kill -9 "$crutest_pid" 2>/dev/null
+        fi
         wait "$crutest_pid" 2>/dev/null
     fi
     crutest_pid=""
@@ -153,7 +168,7 @@ panic_d_vm="/var/tmp/$(basename "$PANIC_D")"
 
 # Start crutest and leave it running for the whole test.
 msg "starting crutest one906 with gen $gen, log at $CRUTEST_LOG"
-"$CRUTEST" one906 --continuous -g "$gen" \
+"$CRUTEST" one906 --continuous --quit -g "$gen" \
     -t "$DS0:$DS_PORT" -t "$DS1:$DS_PORT" -t "$DS2:$DS_PORT" \
     > "$CRUTEST_LOG" 2>&1 &
 crutest_pid=$!
