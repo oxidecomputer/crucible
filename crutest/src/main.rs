@@ -3696,6 +3696,14 @@ async fn one906_workload(
         );
     }
 
+    // Fill every block first, so all three downstairs have known data
+    // everywhere before the test pattern begins.  This also verifies
+    // the fill, giving us a good baseline to compare against after a
+    // downstairs rejoins.
+    info!(log, "one906: filling all blocks before starting the test");
+    fill_workload(volume, di, false).await?;
+    info!(log, "one906: fill complete");
+
     // Spawn the prober that will pause IO quickly when any downstairs
     // stops answering on its repair port.
     let paused = Arc::new(AtomicBool::new(false));
@@ -3843,13 +3851,29 @@ async fn one906_workload(
 
     let mut pass = 1;
     let result: Result<()> = loop {
+        // Wait out any pause.  If we were paused, a downstairs faulted
+        // and has since rejoined, so verify every block before the next
+        // write pass to confirm the repaired downstairs is consistent.
+        let mut was_paused = false;
         while paused.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
+            was_paused = true;
             one906_check_signals(wtq, &stop, log);
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         if stop.load(Ordering::SeqCst) {
             break Ok(());
         }
+
+        if was_paused {
+            info!(log, "one906: downstairs rejoined, verifying all blocks");
+            di.write_log = write_log.lock().unwrap().clone();
+            if let Err(e) = verify_volume(volume, di, false).await {
+                break Err(anyhow!("post-recovery verify failed: {e:?}"));
+            }
+            *write_log.lock().unwrap() = di.write_log.clone();
+            info!(log, "one906: post-recovery verify passed");
+        }
+
         let pass_start = Instant::now();
 
         // Each worker takes a strided slice of the records; a record
