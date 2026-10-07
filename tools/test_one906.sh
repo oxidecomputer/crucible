@@ -174,15 +174,23 @@ msg "starting crutest one906 with gen $gen, log at $CRUTEST_LOG"
 crutest_pid=$!
 
 msg "waiting for all downstairs to be active"
-sleep_time=5
+last_states=""
 while :; do
+    if ! kill -0 "$crutest_pid" 2>/dev/null; then
+        msg "crutest exited before going active, see $CRUTEST_LOG"
+        exit 1
+    fi
     states=$(dtrace -s "$DSSTATE" 2> /dev/null)
-    msg "current states: $states"
+    # Only print when the state changes, so the timeline reflects when
+    # transitions actually happen rather than a fixed poll cadence.
+    if [[ "$states" != "$last_states" ]]; then
+        msg "current states: $states"
+        last_states="$states"
+    fi
     if [[ "$states" == "ACT ACT ACT" ]]; then
         break
     fi
-    sleep $sleep_time
-    sleep_time=30
+    sleep 2
 done
 msg "all downstairs are active, begin the main loop"
 
@@ -356,7 +364,7 @@ while :; do
             recovered=1
             break
         fi
-        sleep 5
+        sleep 2
     done
 
     if [[ $recovered -eq 0 ]]; then
