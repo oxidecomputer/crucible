@@ -66,6 +66,9 @@ REPAIR_PORT=${REPAIR_PORT:-13000}
 # SMF service of the downstairs inside the VM.
 DS_SMF=${DS_SMF:-downstairs}
 
+# How many times to retry creating the VM instance after a crash.
+VM_START_RETRIES=${VM_START_RETRIES:-5}
+
 # Seconds to wait for the armed trigger to fire before disarming.
 ARM_TIMEOUT=${ARM_TIMEOUT:-300}
 # Seconds to wait for the downstairs to return after VM boot.
@@ -241,15 +244,36 @@ while :; do
         exit 1
     fi
 
-    # Give the propolis-server restart loop time to come back.
+    # Give the propolis-server restart loop time to come back.  Retry
+    # the instance create a few times in case it needs longer.
     sleep 5
     msg "starting the VM back up"
-    (cd "$VM_DIR" && $PROPOLIS_CLI --server 0.0.0.0 \
-        --port "$PROPOLIS_PORT" new -c "$VM_CORES" -m "$VM_MEM" \
-        --config-toml "$VM_TOML" "$VM_NAME")
+    started=0
+    for retry in $(seq 1 "$VM_START_RETRIES"); do
+        if (cd "$VM_DIR" && $PROPOLIS_CLI --server 0.0.0.0 \
+            --port "$PROPOLIS_PORT" new -c "$VM_CORES" -m "$VM_MEM" \
+            --config-toml "$VM_TOML" "$VM_NAME"); then
+            started=1
+            break
+        fi
+        msg "failed to create instance (try $retry of" \
+            "$VM_START_RETRIES), retry in 5 seconds"
+        sleep 5
+    done
+    if [[ $started -eq 0 ]]; then
+        msg "could not create the VM, is propolis-server running?"
+        stop_crutest
+        msg "snapshot left in place at $SNAP"
+        exit 1
+    fi
     sleep 2
-    (cd "$VM_DIR" && $PROPOLIS_CLI --server 0.0.0.0 \
-        --port "$PROPOLIS_PORT" state run)
+    if ! (cd "$VM_DIR" && $PROPOLIS_CLI --server 0.0.0.0 \
+        --port "$PROPOLIS_PORT" state run); then
+        msg "could not run the VM"
+        stop_crutest
+        msg "snapshot left in place at $SNAP"
+        exit 1
+    fi
 
     # Wait for the downstairs to come back online.  Coming online
     # means the downstairs opened the region and self-verified it.
