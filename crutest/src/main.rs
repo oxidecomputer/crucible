@@ -1262,6 +1262,7 @@ async fn main() -> Result<()> {
                 &targets,
                 cfg,
                 opt.quiet,
+                &test_log,
             )
             .await?;
         }
@@ -3515,15 +3516,6 @@ async fn one_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
     Ok(())
 }
 
-// Seconds (with ms) since the epoch, for correlating crutest output
-// with events recorded elsewhere (VM panic times, harness logs).
-fn epoch_ts() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-    format!("{:.3}", now.as_secs_f64())
-}
-
 // Wait here while the one906 prober has IO paused.
 async fn one906_pause_gate(paused: &AtomicBool) {
     while paused.load(Ordering::SeqCst) {
@@ -3586,6 +3578,7 @@ async fn one906_workload(
     targets: &[SocketAddr],
     cfg: One906Workload,
     quiet: bool,
+    log: &Logger,
 ) -> Result<()> {
     let bs = di.volume_info.block_size;
     if di.volume_info.volumes.len() != 1 {
@@ -3639,24 +3632,28 @@ async fn one906_workload(
     }
     let total_records = extent_count * records_per_extent;
 
-    println!(
+    info!(
+        log,
         "one906: bs:{bs} extents:{extent_count} \
          blocks_per_extent:{blocks_per_extent}"
     );
-    println!(
+    info!(
+        log,
         "one906: recordsize:{} blocks_per_record:{blocks_per_record} \
          records_per_extent:{records_per_extent} \
          total_records:{total_records}",
         cfg.recordsize
     );
-    println!(
+    info!(
+        log,
         "one906: W1:{w1_blocks} blocks + W2:{w2_blocks} blocks per \
          record, workers:{}",
         cfg.workers
     );
     if !extent_bytes.is_multiple_of(cfg.recordsize) {
-        println!(
-            "one906: NOTE: extent data size {extent_bytes} is not a \
+        warn!(
+            log,
+            "one906: extent data size {extent_bytes} is not a \
              multiple of recordsize {}; the trailing partial record of \
              each extent is not exercised",
             cfg.recordsize
@@ -3681,12 +3678,13 @@ async fn one906_workload(
             &format!("http://{addr}"),
             client,
         ));
-        println!("one906: probe downstairs {tgt} at http://{addr}");
+        info!(log, "one906: probe downstairs {tgt} at http://{addr}");
     }
     let prober = {
         let paused = paused.clone();
         let probe_stop = probe_stop.clone();
         let volume = volume.clone();
+        let log = log.clone();
         let num_targets = targets.len();
         let interval = Duration::from_millis(cfg.probe_interval_ms);
         tokio::spawn(async move {
@@ -3716,10 +3714,10 @@ async fn one906_workload(
                             .filter(|&(_, &f)| f >= 2)
                             .map(|(i, _)| i)
                             .collect();
-                        println!(
-                            "[{}] one906: pausing IO, downstairs {bad:?} \
-                             not responding",
-                            epoch_ts()
+                        warn!(
+                            log,
+                            "one906: pausing IO, downstairs {bad:?} \
+                             not responding"
                         );
                     }
                 } else if paused.load(Ordering::SeqCst) {
@@ -3734,18 +3732,18 @@ async fn one906_workload(
                     if active == num_targets {
                         waiting = 0;
                         paused.store(false, Ordering::SeqCst);
-                        println!(
-                            "[{}] one906: all {num_targets} downstairs \
-                             ACTIVE, resuming IO",
-                            epoch_ts()
+                        info!(
+                            log,
+                            "one906: all {num_targets} downstairs \
+                             ACTIVE, resuming IO"
                         );
                     } else {
                         // Report progress roughly every 20 probes.
-                        if waiting % 20 == 0 {
-                            println!(
-                                "[{}] one906: waiting to resume IO, \
-                                 {active}/{num_targets} downstairs ACTIVE",
-                                epoch_ts()
+                        if waiting.is_multiple_of(20) {
+                            info!(
+                                log,
+                                "one906: waiting to resume IO, \
+                                 {active}/{num_targets} downstairs ACTIVE"
                             );
                         }
                         waiting += 1;
@@ -3816,10 +3814,10 @@ async fn one906_workload(
         }
 
         if !quiet {
-            println!(
-                "[{}] one906: pass {pass:>5} done, {total_records} \
+            info!(
+                log,
+                "one906: pass {pass:>5} done, {total_records} \
                  records written, flush sent, {:.2}s",
-                epoch_ts(),
                 pass_start.elapsed().as_secs_f64()
             );
         }
@@ -3833,11 +3831,11 @@ async fn one906_workload(
             WhenToQuit::Signal { shutdown_rx } => {
                 match shutdown_rx.try_recv() {
                     Ok(SignalAction::Shutdown) => {
-                        println!("shutting down in response to SIGUSR1");
+                        info!(log, "shutting down in response to SIGUSR1");
                         break Ok(());
                     }
                     Ok(SignalAction::Verify) => {
-                        println!("Verify Volume");
+                        info!(log, "Verify Volume");
                         di.write_log = write_log.lock().unwrap().clone();
                         if let Err(e) = verify_volume(volume, di, false).await {
                             break Err(anyhow!(
