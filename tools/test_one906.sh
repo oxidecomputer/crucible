@@ -100,7 +100,7 @@ function stop_crutest() {
     if [[ -n "$crutest_pid" ]] && kill -0 "$crutest_pid" 2>/dev/null; then
         msg "stopping crutest at pid $crutest_pid"
         kill -SIGUSR1 "$crutest_pid"
-        for _ in $(seq 1 15); do
+        for ((i = 0; i < 15; i++)); do
             kill -0 "$crutest_pid" 2>/dev/null || break
             sleep 1
         done
@@ -264,7 +264,7 @@ while :; do
     sleep 5
     msg "starting the VM back up"
     started=0
-    for retry in $(seq 1 "$VM_START_RETRIES"); do
+    for ((retry = 1; retry <= VM_START_RETRIES; retry++)); do
         if (cd "$VM_DIR" && $PROPOLIS_CLI --server 0.0.0.0 \
             --port "$PROPOLIS_PORT" new -c "$VM_CORES" -m "$VM_MEM" \
             --config-toml "$VM_TOML" "$VM_NAME"); then
