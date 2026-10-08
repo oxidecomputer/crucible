@@ -90,11 +90,11 @@ enum Workload {
     GenericRead,
     Nothing,
     One,
-    /// Attempt to reproduce the ZFS record-capture bug from
-    /// crucible#1906.  For every ZFS record of block data in every
-    /// extent, write W1 at the start of the record, then W2 right
-    /// after it, with a flush after each full pass.  IO is paused
-    /// quickly if a downstairs stops responding on its repair port.
+    /// For every ZFS record of block data in every extent, write W1 at
+    /// the start of the record, then W2 right after it, with a flush after
+    /// each full pass.  IO is paused quickly if a downstairs stops
+    /// responding on its repair port.
+    /// This test was created to try to reproduce Crucible 1906.
     One906 {
         #[clap(flatten)]
         cfg: One906Workload,
@@ -3579,34 +3579,32 @@ async fn one906_write(
     volume.write(BlockIndex(block_index), data).await
 }
 
-/*
- * Attempt to reproduce the ZFS "record capture" bug from crucible#1906.
- *
- * For every ZFS record (recordsize bytes, default 128 KiB) of block data
- * in every extent file, issue two back to back writes with no flush
- * between them:
- *   W1: write1_size bytes at the start of the record.
- *   W2: write2_size bytes immediately following W1.
- * Both writes default to >= zfs_immediate_write_sz (32 KiB), so the
- * downstairs data writes are logged as WR_INDIRECT in the ZIL.  After
- * every record has been written (one pass), send a flush.  If the
- * downstairs crashes during the resulting zil_commit with the ZIL chain
- * cut between W1's log record and the log record holding W2's context
- * slot write, ZIL replay will restore W2's data without its context
- * slot and the downstairs will fail to open the extent.
- *
- * This expects regions created so each extent's data is a whole number
- * of ZFS records, ideally exactly one record per extent, e.g.:
- *   crucible-downstairs create --block-size 4096 --extent-size 32 ...
- * which also keeps the context slots and metadata out of the data
- * record (they start in the following record).
- *
- * A prober task watches the repair server of every downstairs target.
- * If a downstairs stops answering (killed or panicked), all workers
- * pause new IO within about a second, limiting how far the surviving
- * downstairs drift from the dead one.  IO resumes automatically when
- * the downstairs answers again.
- */
+// Attempt to reproduce the ZFS "record capture" bug from crucible#1906.
+//
+// For every ZFS record (recordsize bytes, default 128 KiB) of block data
+// in every extent file, issue two back to back writes with no flush
+// between them:
+//   W1: write1_size bytes at the start of the record.
+//   W2: write2_size bytes immediately following W1.
+// Both writes default to >= zfs_immediate_write_sz (32 KiB), so the
+// downstairs data writes are logged as WR_INDIRECT in the ZIL.  After
+// every record has been written (one pass), send a flush.  If the
+// downstairs crashes during the resulting zil_commit with the ZIL chain
+// cut between W1's log record and the log record holding W2's context
+// slot write, ZIL replay will restore W2's data without its context
+// slot and the downstairs will fail to open the extent.
+//
+// This expects regions created so each extent's data is a whole number
+// of ZFS records, ideally exactly one record per extent, e.g.:
+//   crucible-downstairs create --block-size 4096 --extent-size 32 ...
+// which also keeps the context slots and metadata out of the data
+// record (they start in the following record).
+//
+// A prober task watches the repair server of every downstairs target.
+// If a downstairs stops answering (killed or panicked), all workers
+// pause new IO within about a second, limiting how far the surviving
+// downstairs drift from the dead one.  IO resumes automatically when
+// the downstairs answers again.
 async fn one906_workload(
     volume: &Volume,
     wtq: &mut WhenToQuit,
@@ -3633,13 +3631,17 @@ async fn one906_workload(
             cfg.recordsize
         );
     }
-    for (name, size) in [
-        ("write1_size", cfg.write1_size),
-        ("write2_size", cfg.write2_size),
-    ] {
-        if size == 0 || !size.is_multiple_of(bs) {
-            bail!("{name} {size} is not a multiple of block size {bs}");
-        }
+    if cfg.write1_size == 0 || !cfg.write1_size.is_multiple_of(bs) {
+        bail!(
+            "write1_size {} is not a multiple of block size {bs}",
+            cfg.write1_size
+        );
+    }
+    if cfg.write2_size == 0 || !cfg.write2_size.is_multiple_of(bs) {
+        bail!(
+            "write2_size {} is not a multiple of block size {bs}",
+            cfg.write2_size
+        );
     }
     if cfg.workers == 0 {
         bail!("workers must be at least 1");
@@ -3704,8 +3706,31 @@ async fn one906_workload(
     fill_workload(volume, di, false).await?;
     info!(log, "one906: fill complete");
 
-    // Spawn the prober that will pause IO quickly when any downstairs
-    // stops answering on its repair port.
+    // The prober is a background task that keeps the test from running
+    // IO against a cluster that is not healthy.  The worker tasks below
+    // do not watch downstairs health themselves; instead they consult
+    // the shared `paused` flag at each step and idle while it is set.
+    // The prober owns that flag:
+    //
+    //   - It watches every downstairs by polling its repair server
+    //     (a cheap HTTP endpoint on the data port + 4000).  When a
+    //     downstairs stops answering (killed, panicked, or rebooting),
+    //     the prober sets `paused` within about a second, so the
+    //     workers stop issuing IO almost as soon as the downstairs is
+    //     gone.  This keeps the two surviving downstairs from drifting
+    //     far ahead of the one that was lost, which matters for
+    //     comparing their extents after a hit.
+    //
+    //   - Once every downstairs answers again, the prober decides when
+    //     it is actually safe to resume (see the recovery logic in the
+    //     task body) and clears `paused`.
+    //
+    // `paused` and `probe_stop` are plain atomic flags rather than
+    // mutex-guarded state: each is a single boolean that many tasks
+    // read and the prober writes, so a lock-free load/store is all we
+    // need.  `probe_stop` tells the prober task to exit when the test
+    // ends.  We build one repair client per target up front and hand
+    // the whole set to the task.
     let paused = Arc::new(AtomicBool::new(false));
     let probe_stop = Arc::new(AtomicBool::new(false));
     let mut probe_clients = Vec::new();
@@ -3724,6 +3749,7 @@ async fn one906_workload(
         ));
         info!(log, "one906: probe downstairs {tgt} at http://{addr}");
     }
+
     let prober = {
         let paused = paused.clone();
         let probe_stop = probe_stop.clone();
