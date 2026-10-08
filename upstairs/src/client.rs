@@ -1042,6 +1042,22 @@ impl DownstairsClient {
                         NegotiationStateData::Start
                             | NegotiationStateData::WaitConnect(..)
                     )
+                ) || (
+                    // If all three downstairs needed live-repair while the
+                    // upstairs was active, we fall back to reconciliation.
+                    // If that reconciliation fails, the client must come back
+                    // and try reconciliation again.
+                    matches!(up_state, UpstairsState::Active)
+                        && matches!(
+                            (r, mode, state),
+                            (
+                                R::NegotiationFailed(
+                                    ClientNegotiationFailed::FailedReconcile
+                                ),
+                                ConnectionMode::Faulted,
+                                NegotiationStateData::Start
+                            )
+                        )
                 )
             }
 
