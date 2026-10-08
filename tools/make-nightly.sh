@@ -15,6 +15,7 @@ git status >> nightly-info.txt
 
 tar cavf out/crucible-nightly.tar.gz \
   target/release/cmon \
+  target/release/ctop \
   target/release/crudd \
   target/release/crutest \
   target/release/crucible-agent \
