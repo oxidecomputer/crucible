@@ -3712,8 +3712,8 @@ async fn one906_workload(
     // the shared `paused` flag at each step and idle while it is set.
     // The prober owns that flag:
     //
-    //   - It watches every downstairs by polling its repair server
-    //     (a cheap HTTP endpoint on the data port + 4000).  When a
+    //   - It watches every downstairs by polling an endpoint on the
+    //     downstairs  repair server (the data port + 4000).  When a
     //     downstairs stops answering (killed, panicked, or rebooting),
     //     the prober sets `paused` within about a second, so the
     //     workers stop issuing IO almost as soon as the downstairs is
@@ -3767,7 +3767,7 @@ async fn one906_workload(
             let mut waiting = 0u64;
             while !probe_stop.load(Ordering::Relaxed) {
                 let results = futures::future::join_all(
-                    probe_clients.iter().map(|c| c.get_work()),
+                    probe_clients.iter().map(|c| c.get_region_mode()),
                 )
                 .await;
                 for (fail, result) in fails.iter_mut().zip(results.iter()) {
