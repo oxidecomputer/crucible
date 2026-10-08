@@ -2,9 +2,12 @@
 #
 # Harness to reproduce crucible#1906 using the crutest "one906" workload
 # and a DTrace triggered guest panic (see tools/test-for-1906-notes.md).
+# Some setup for the VMs and the host (mb-1 in this case) can be found
+# at: https://github.com/oxidecomputer/chimchim/blob/main/setup/mb-1.md
+# Specifically, how to create the proper network config.
 #
-# Run this on the host where the three downstairs VMs live (mb-1 style
-# setup, see tools/test-for-1906.sh).  This script:
+# Run this on the host where the three downstairs VMs live.
+# This script:
 #
 #  1. Starts crutest with the one906 workload against all three
 #     downstairs and leaves it running for the whole test.  crutest
@@ -16,7 +19,7 @@
 #        a dmu_sync (N randomized), cutting the ZIL chain inside the
 #        vulnerable window.
 #     b. When the VM dies, destroy the VMM and snapshot the dataset
-#        backing its disk, preserving the pre-ZIL-replay state.
+#        containing the Crucible region, preserving the pre-ZIL-replay state.
 #     c. Boot the VM again.  If the downstairs comes online it has
 #        self-verified its region: wait for all three downstairs to be
 #        ACTIVE (LiveRepair done, crutest resumes IO on its own),
@@ -26,11 +29,10 @@
 #        preserve the snapshot, and exit.
 #
 # Requirements:
-#  - passwordless ssh as root to the downstairs 0 VM.
+#  - ssh allowed as root from the host to the downstairs 0 VM.
 #  - dtrace available inside that VM.
 #  - a propolis-server for the downstairs 0 VM controlled through
-#    propolis-cli, restarted automatically if killed.
-#  - the crutest binary built with the one906 workload.
+#    propolis-cli is restarted automatically if killed.
 #
 # Touch /tmp/stop to end the test cleanly after the current loop.
 # Most settings below can be overridden from the environment.
@@ -52,7 +54,8 @@ VM_NAME=${VM_NAME:-cds0}
 VM_CORES=${VM_CORES:-32}
 VM_MEM=${VM_MEM:-32768}
 
-# The dataset on this host backing the downstairs 0 VM data disk.
+# From the dataset on this host that is backing the downstairs 0
+# VM data disk, we build the snapshot name
 SNAP_DS=${SNAP_DS:-oxp_00/nocrypt/dump}
 SNAP="$SNAP_DS@one906"
 
@@ -60,10 +63,11 @@ SNAP="$SNAP_DS@one906"
 DS0=${DS0:-192.168.100.2}
 DS1=${DS1:-192.168.100.3}
 DS2=${DS2:-192.168.100.4}
+# All three downstairs use the same port.
 DS_PORT=${DS_PORT:-9000}
 REPAIR_PORT=${REPAIR_PORT:-13000}
 
-# SMF service of the downstairs inside the VM.
+# Name of the SMF service for the downstairs inside the VM.
 DS_SMF=${DS_SMF:-downstairs}
 
 # How many times to retry creating the VM instance after a crash.
@@ -72,10 +76,11 @@ VM_START_RETRIES=${VM_START_RETRIES:-5}
 # Seconds to wait for the armed trigger to fire before disarming.
 ARM_TIMEOUT=${ARM_TIMEOUT:-300}
 # Seconds to wait for the downstairs to return after VM boot.
+# We have to allow VM restart time, and then any repair time.
 DS_WAIT=${DS_WAIT:-600}
 
 # Private key for ssh/scp to the downstairs 0 VM, empty for default.
-SSH_KEY=${SSH_KEY:-}
+SSH_KEY=${SSH_KEY:-/save/vm/demo.priv}
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=5"
 if [[ -n "$SSH_KEY" ]]; then
@@ -127,7 +132,7 @@ function disarm_trigger() {
 
 trap ctrl_c INT
 function ctrl_c() {
-    msg "stopping at your request"
+    msg "Stopping at your request"
     disarm_trigger
     stop_crutest
     exit 1
@@ -146,22 +151,22 @@ if [[ ! -d "$VM_DIR" ]]; then
 fi
 for ds in $DS0 $DS1 $DS2; do
     if ds_online "$ds"; then
-        msg "downstairs $ds online"
+        msg "Downstairs $ds online"
     else
-        msg "failed to find downstairs $ds online"
+        msg "Failed to find downstairs $ds online"
         exit 1
     fi
 done
 if zfs list -t snapshot "$SNAP" > /dev/null 2>&1; then
-    msg "snapshot $SNAP exists on test start, please destroy it first"
+    msg "Snapshot $SNAP exists on test start, please destroy it first"
     exit 1
 fi
 if ! $SSH true; then
-    msg "cannot ssh to root@$DS0"
+    msg "Cannot ssh to root@$DS0"
     exit 1
 fi
 if ! scp $SSH_OPTS "$PANIC_D" "root@$DS0:/var/tmp/"; then
-    msg "failed to copy $PANIC_D to the VM"
+    msg "Failed to copy $PANIC_D to the VM"
     exit 1
 fi
 panic_d_vm="/var/tmp/$(basename "$PANIC_D")"
@@ -173,7 +178,7 @@ msg "starting crutest one906 with gen $gen, log at $CRUTEST_LOG"
     > "$CRUTEST_LOG" 2>&1 &
 crutest_pid=$!
 
-msg "waiting for all downstairs to be active"
+msg "Waiting for all downstairs to be active"
 last_states=""
 while :; do
     if ! kill -0 "$crutest_pid" 2>/dev/null; then
@@ -209,11 +214,11 @@ while :; do
 
     # Arm the panic trigger in the VM, first thing.
     panic_at=$((2 + RANDOM % 8))
-    msg "arming panic trigger in VM, panic at lwb write $panic_at"
+    msg "Arming panic trigger in VM, panic at lwb write $panic_at"
     if ! $SSH "pkill -f '[o]ne906-panic' > /dev/null 2>&1; \
         nohup dtrace -w -s $panic_d_vm $panic_at \
         >> /var/tmp/one906-panic.log 2>&1 &"; then
-        msg "failed to arm the panic trigger"
+        msg "Failed to arm the panic trigger"
         stop_crutest
         exit 1
     fi
@@ -222,7 +227,7 @@ while :; do
     vmm_id=$($PROPOLIS_CLI --server 0.0.0.0 --port "$PROPOLIS_PORT" get |
         grep " id: " | awk '{print $2}' | tr -d ',')
     if [[ -z "$vmm_id" ]]; then
-        msg "failed to get VMM ID from propolis"
+        msg "Failed to get VMM ID from propolis"
         stop_crutest
         exit 1
     fi
@@ -273,7 +278,7 @@ while :; do
         kill "$ps_pid"
     fi
     bhyvectl --vm "$vmm_id" --destroy
-    msg "taking snapshot $SNAP"
+    msg "Taking snapshot $SNAP"
     if ! zfs snapshot "$SNAP"; then
         msg "failed to take snapshot"
         stop_crutest
@@ -342,13 +347,13 @@ while :; do
         msg "snapshot preserved at $SNAP"
         exit 1
     fi
-    msg "downstairs back online in $((SECONDS - boot_start)) seconds"
+    msg "Downstairs back online in $((SECONDS - boot_start)) seconds"
 
-    # Wait for the cluster to truly recover before starting the next
+    # Wait for the upstairs to truly recover before starting the next
     # loop.  crutest is the authority here: its prober does a positive
     # read+flush liveness probe and only resumes IO once all three
     # downstairs are actually serving again (not merely answering the
-    # repair port, and not a stale pre-timeout Active).  So wait until
+    # repair port, and not a stale pre-timeout Active).  Wait until
     # crutest logs a new "resuming" line for the fault we just caused.
     recovered=0
     recover_start=$SECONDS
@@ -376,14 +381,14 @@ while :; do
     msg "crutest resumed IO, all downstairs serving again"
 
     # Region verified and repaired, this loop found nothing.
-    msg "destroying snapshot $SNAP"
+    msg "Destroying snapshot $SNAP"
     if ! zfs destroy "$SNAP"; then
         msg "failed to destroy snapshot $SNAP"
         stop_crutest
         exit 1
     fi
 
-    msg "loop done in $((SECONDS - loop_start)) seconds"
+    msg "Loop done in $((SECONDS - loop_start)) seconds"
     if [[ -f /tmp/stop ]]; then
         msg "exiting because /tmp/stop is present"
         rm /tmp/stop
@@ -393,4 +398,4 @@ while :; do
 done
 
 stop_crutest
-msg "test ends after $count loops"
+msg "Test ends after $count loops"
