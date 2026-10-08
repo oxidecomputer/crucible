@@ -18,7 +18,7 @@ ctop - Unix timestamp: 1790785550
     2101 bbbb2222 ACT ACT ACT      11600    40    0    0    0▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
     2102 cccc3333 ACT ACT ACT      11095     5    0    0    0▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
 
-[up/down: Move | 's': Scale | 'q': Quit]  scale: all  * = stale (5s)     [1/3]
+[up/down: Move | 's': Scale | 'c': Color | 'q': Quit]  scale: all  *=stale [1/3]
 ```
 
 We show one row per upstairs session, sorted by pid.
@@ -35,12 +35,25 @@ The sparkline on the right is that session's recent job rate, one
 column per sample, newest on the right.  It takes whatever width after
 we have printed all our columns.
 
+The downstairs states in `DS0`, `DS1` and `DS2` are colored by their
+state.  `c` toggles color.
+
+| color | states |
+|---|---|
+| green | `ACT` |
+| yellow | `WQ`, `REC`, `LRR`, `LR`, `RPC`, `RPL`, `OFL` |
+| red | `FLT`, `NF`, `DIS` |
+| dark gray | `NEW`, `DAV` |
+
+Any state ctop does not know is drawn without color.
+
 ## Control Keys
 
 | key | |
 |---|---|
 | up, down | move the cursor |
 | `s` | switch what the sparklines are measured against |
+| `c` | turn the downstairs state colors off and on |
 | `d` | show the selected session's history full screen, and back |
 | Esc | back from the detail view |
 | `q`, Ctrl-C | quit |
