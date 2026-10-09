@@ -152,9 +152,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "api_identity"
@@ -360,6 +360,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -578,9 +584,9 @@ checksum = "7f30e7476521f6f8af1a1c4c0b8cc94f0bee37d91763d0ca2665f299b6cd8aec"
 
 [[package]]
 name = "byte-unit"
-version = "5.2.0"
+version = "5.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c6d47a4e2961fb8721bcfc54feae6455f2f64e7054f9bc67e875f0e77f4c58d"
+checksum = "c719d56f7e96194cfc53460976d3ba51c85719747c9c62ed99981847b551152b"
 dependencies = [
  "rust_decimal",
  "schemars 1.2.1",
@@ -594,7 +600,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86b041d2328ab2041b4e9d8f21e3b0b5b8bb61e9a23bb9171387771c314ea340"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "hex",
  "schemars 0.8.22",
  "serde_core",
@@ -646,9 +652,9 @@ dependencies = [
 
 [[package]]
 name = "camino"
-version = "1.2.2"
+version = "1.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
+checksum = "bbbad30e4b4c14a39e3cc8aed085a12a327257c316619c93581e017bc52be591"
 dependencies = [
  "serde_core",
 ]
@@ -735,9 +741,9 @@ checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 
 [[package]]
 name = "cfg-if"
-version = "1.0.4"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "cfg_aliases"
@@ -788,9 +794,9 @@ dependencies = [
 
 [[package]]
 name = "chrono"
-version = "0.4.44"
+version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "js-sys",
@@ -892,9 +898,9 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
 name = "clearscreen"
-version = "4.0.5"
+version = "4.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5def4343d62f01f67ff1a49147e4a15112e936c6a6a3f8ff7a29394e76468244"
+checksum = "d669bb552908e336ad5681789752033b45566b7e591aeaac7a614e58e5d6d8f2"
 dependencies = [
  "nix",
  "terminfo",
@@ -1106,13 +1112,12 @@ dependencies = [
 
 [[package]]
 name = "console"
-version = "0.16.1"
+version = "0.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b430743a6eb14e9764d4260d4c0d8123087d504eeb9c48f2b2a5e810dd369df4"
+checksum = "e96a4956774c13c126a8b5af4daa79384f4d826534c95a02d76afb39e2ab64e3"
 dependencies = [
  "encode_unicode 1.0.0",
  "libc",
- "once_cell",
  "unicode-width 0.2.0",
  "windows-sys 0.61.1",
 ]
@@ -1324,7 +1329,7 @@ dependencies = [
  "anyhow",
  "async-recursion",
  "async-trait",
- "base64",
+ "base64 0.23.1",
  "bincode",
  "bytes",
  "cfg-if",
@@ -1460,7 +1465,7 @@ dependencies = [
 name = "crucible-client-types"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "crucible-workspace-hack",
  "schemars 0.8.22",
  "serde",
@@ -1473,7 +1478,7 @@ name = "crucible-client-types"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/crucible?rev=bd9a0e2abe6b6b89aec8c85f4ee57474144ed150#bd9a0e2abe6b6b89aec8c85f4ee57474144ed150"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "crucible-workspace-hack",
  "schemars 0.8.22",
  "serde",
@@ -1662,7 +1667,7 @@ name = "crucible-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.23.1",
  "bytes",
  "crucible",
  "crucible-client-types 0.1.0",
@@ -1728,7 +1733,7 @@ name = "crucible-pantry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "clap",
@@ -2526,7 +2531,7 @@ dependencies = [
  "async-compression",
  "async-stream",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "camino",
  "chrono",
@@ -2857,9 +2862,9 @@ dependencies = [
 
 [[package]]
 name = "fakedata_generator"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b42ec18312c068f0d6008ad66ad2fa289ab40a16d07a06406c200baa09eb1e7c"
+checksum = "510bf1fc5a6d8b13cf9cbcb682991702ba896f91345179a2b931ae6760825d3a"
 dependencies = [
  "passt",
  "rand 0.9.2",
@@ -3081,9 +3086,9 @@ dependencies = [
 
 [[package]]
 name = "futures-core"
-version = "0.3.32"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
 name = "futures-executor"
@@ -3147,7 +3152,7 @@ name = "gateway-client"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?rev=5fd53a9c9ff2b0e47bfef3fe842b7516877b0162#5fd53a9c9ff2b0e47bfef3fe842b7516877b0162"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "chrono",
  "daft",
  "ereport-types",
@@ -3839,7 +3844,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -4127,11 +4132,11 @@ dependencies = [
 
 [[package]]
 name = "indicatif"
-version = "0.18.4"
+version = "0.18.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb"
+checksum = "9433806cd6b4ec1aba79c021c7e4c58fb4c3b9977c085062e611ac929998fb0c"
 dependencies = [
- "console 0.16.1",
+ "console 0.16.6",
  "portable-atomic",
  "rayon",
  "unicode-width 0.2.0",
@@ -4933,7 +4938,7 @@ dependencies = [
  "anyhow",
  "api_identity",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bootstrap-agent-lockstep-types",
  "chrono",
  "clap",
@@ -5006,7 +5011,7 @@ source = "git+https://github.com/oxidecomputer/omicron?rev=5fd53a9c9ff2b0e47bfef
 dependencies = [
  "anyhow",
  "api_identity",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "daft",
  "dropshot",
@@ -6002,7 +6007,7 @@ version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38af38e8470ac9dee3ce1bae1af9c1671fffc44ddfd8bd1d0a3445bf349a8ef3"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde",
 ]
 
@@ -7052,7 +7057,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-core",
  "futures-util",
@@ -7093,7 +7098,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab3f43e3283ab1488b624b44b0e988d0acea0b3214e694730a055cb6b2efa801"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "encoding_rs",
  "futures-channel",
@@ -7631,7 +7636,7 @@ name = "serde_human_bytes"
 version = "0.1.0"
 source = "git+http://github.com/oxidecomputer/serde_human_bytes?branch=main#8f60acdfe7c6d9e2a01f59be920c1c2b19129322"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "hex",
  "serde_core",
 ]
@@ -7728,7 +7733,7 @@ version = "3.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c522100790450cf78eeac1507263d0a350d4d5b30df0c8e1fe051a10c22b376e"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "chrono",
  "hex",
  "indexmap 1.9.3",

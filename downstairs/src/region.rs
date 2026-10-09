@@ -248,10 +248,10 @@ impl Region {
         Ok(region)
     }
 
-    /**
-     * Open an existing region file
-     */
-    pub fn open<P: AsRef<Path>>(
+    /// Read region config and validate versions, returning a `Region` with
+    /// every extent in the [`ExtentState::Closed`] state.  Callers must open
+    /// extents separately.
+    fn setup<P: AsRef<Path>>(
         dir: P,
         verbose: bool,
         read_only: bool,
@@ -307,22 +307,52 @@ impl Region {
             .num_threads(WORKER_POOL_SIZE)
             .build()?;
 
-        /*
-         * Open every extent that presently exists.
-         */
-        let mut region = Region {
+        let extents = (0..def.extent_count())
+            .map(|_| ExtentState::Closed)
+            .collect();
+
+        Ok(Region {
             dir: dir.as_ref().to_path_buf(),
             def,
-            extents: Vec::new(),
+            extents,
             dirty_extents: HashSet::new(),
             read_only,
             log: log.clone(),
             pool,
-        };
+        })
+    }
 
+    /**
+     * Open an existing region file
+     */
+    pub fn open<P: AsRef<Path>>(
+        dir: P,
+        verbose: bool,
+        read_only: bool,
+        log: &Logger,
+    ) -> Result<Region> {
+        let mut region = Self::setup(dir, verbose, read_only, log)?;
         region.open_extents()?;
-
         Ok(region)
+    }
+
+    /// Open an existing region read-only, tolerating
+    /// [`CrucibleError::MissingContextSlot`] errors on individual extents.
+    ///
+    /// Returns the opened region along with a Vec of `(ExtentId, error)` for
+    /// any extents that could not be opened.  Those extents are left as
+    /// [`ExtentState::Closed`] in the region; callers must check the error
+    /// Vec before accessing them.
+    ///
+    /// Any error other than `MissingContextSlot` (e.g. missing files, I/O
+    /// errors, version mismatches) is still fatal.
+    pub(crate) fn open_for_dump<P: AsRef<Path>>(
+        dir: P,
+        log: &Logger,
+    ) -> Result<(Region, Vec<(ExtentId, CrucibleError)>)> {
+        let mut region = Self::setup(dir, false, true, log)?;
+        let errors = region.try_open_extents()?;
+        Ok((region, errors))
     }
 
     pub fn encrypted(&self) -> bool {
@@ -347,16 +377,18 @@ impl Region {
         }
     }
 
-    /// If our `extent_count` is higher than the number of populated entries
-    /// we have in our extents Vec, then open all the new extent files and
-    /// load their content into the extent Vec.
+    /// Open every extent file, replacing each [`ExtentState::Closed`] entry
+    /// in the extents Vec with the opened extent.
     ///
     /// Returns an error if extent files are missing.
     fn open_extents(&mut self) -> Result<()> {
-        let next_eid = self.extents.len() as u32;
+        assert_eq!(self.def.extent_count() as usize, self.extents.len());
 
-        let eid_range = next_eid..self.def.extent_count();
-        for eid in eid_range.map(ExtentId) {
+        for eid in (0..self.def.extent_count()).map(ExtentId) {
+            assert!(matches!(
+                self.extents[eid.0 as usize],
+                ExtentState::Closed
+            ));
             let extent = Extent::open(
                 &self.dir,
                 &self.def,
@@ -368,11 +400,51 @@ impl Region {
             if extent.dirty() {
                 self.dirty_extents.insert(eid);
             }
-            self.extents.push(ExtentState::Opened(extent));
+            self.extents[eid.0 as usize] = ExtentState::Opened(extent);
         }
         self.check_extents();
 
         Ok(())
+    }
+
+    /// Like [`open_extents`], but tolerates
+    /// [`CrucibleError::MissingContextSlot`] on individual extents.
+    ///
+    /// Extents that fail with that error are left as [`ExtentState::Closed`]
+    /// and the error is collected into the returned Vec.  Any other error
+    /// causes an immediate failure.
+    fn try_open_extents(&mut self) -> Result<Vec<(ExtentId, CrucibleError)>> {
+        assert_eq!(self.def.extent_count() as usize, self.extents.len());
+        let mut errors: Vec<(ExtentId, CrucibleError)> = Vec::new();
+
+        for eid in (0..self.def.extent_count()).map(ExtentId) {
+            assert!(matches!(
+                self.extents[eid.0 as usize],
+                ExtentState::Closed
+            ));
+            match Extent::open(
+                &self.dir,
+                &self.def,
+                eid,
+                self.read_only,
+                &self.log,
+            ) {
+                Ok(extent) => {
+                    if extent.dirty() {
+                        self.dirty_extents.insert(eid);
+                    }
+                    self.extents[eid.0 as usize] = ExtentState::Opened(extent);
+                }
+                Err(e) => match e.downcast::<CrucibleError>() {
+                    Ok(ce @ CrucibleError::MissingContextSlot { .. }) => {
+                        errors.push((eid, ce));
+                    }
+                    Ok(other) => return Err(other.into()),
+                    Err(e) => return Err(e),
+                },
+            }
+        }
+        Ok(errors)
     }
 
     /// Creates `self.extent_count` extent files and opens them
@@ -1263,7 +1335,8 @@ pub async fn save_stream_to_file(
 pub(crate) mod test {
     use bytes::Bytes;
     use itertools::Itertools;
-    use std::fs::rename;
+    use std::fs::{OpenOptions, rename};
+    use std::io::{Seek, SeekFrom};
     use std::path::PathBuf;
 
     use rand::RngCore;
@@ -2162,6 +2235,145 @@ pub(crate) mod test {
          */
         dump_region(dvec, Some(ExtentId(2)), None, false, false, csl())
             .unwrap();
+    }
+
+    /// Write block 0 of `eid` twice with different data so that both
+    /// context slots (A and B) are populated.  The extent is left dirty
+    /// (no flush), which is required to trigger the recomputation path on
+    /// the next open.
+    fn fill_both_context_slots(region: &mut Region, eid: ExtentId) {
+        for byte in [0x00u8, 0x01u8] {
+            let data = Bytes::from(vec![byte; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let write = RegionWriteReq {
+                extent: eid,
+                write: ExtentWrite {
+                    offset: BlockOffset(0),
+                    data,
+                    block_contexts: vec![BlockContext {
+                        encryption_context: None,
+                        hash,
+                    }],
+                },
+            };
+            region
+                .region_write(&RegionWrite(vec![write]), JobId(0), false)
+                .unwrap();
+        }
+    }
+
+    /// Overwrite block 0 of `eid` on disk with 0xFF bytes so that neither
+    /// stored context slot hash can match the actual block data.
+    fn corrupt_block_zero(dir: &Path, eid: ExtentId) {
+        let path = extent_path(dir, eid);
+        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0xFFu8; 512]).unwrap();
+    }
+
+    /// Create a 3-extent raw region (10 blocks each) where extent 1 has a
+    /// corrupted block 0: both context slots are populated but neither
+    /// matches the on-disk data.  Returns the persisted directory path.
+    fn make_region_with_corrupt_extent() -> PathBuf {
+        let dir = tempdir().unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, Backend::RawFile).unwrap();
+
+        fill_both_context_slots(&mut region, ExtentId(1));
+
+        let dir_path = dir.path().to_path_buf();
+        // Drop without flushing so the dirty flag stays set on disk.
+        drop(region);
+
+        corrupt_block_zero(&dir_path, ExtentId(1));
+
+        // keep() persists the directory past the end of the test.
+        dir.keep()
+    }
+
+    /// open_for_dump succeeds on a region with a corrupted extent, returning
+    /// the extent in the error list and leaving it Closed in the region.
+    #[test]
+    fn open_for_dump_skips_missing_context_slot() {
+        let dir_path = make_region_with_corrupt_extent();
+        let (region, errors) =
+            Region::open_for_dump(&dir_path, &csl()).unwrap();
+
+        assert_eq!(errors.len(), 1);
+        let (eid, err) = &errors[0];
+        assert_eq!(*eid, ExtentId(1));
+        assert!(
+            matches!(err, CrucibleError::MissingContextSlot { .. }),
+            "unexpected error: {err}"
+        );
+
+        assert!(matches!(region.extents[0], ExtentState::Opened(_)));
+        assert!(matches!(region.extents[1], ExtentState::Closed));
+        assert!(matches!(region.extents[2], ExtentState::Opened(_)));
+    }
+
+    /// dump_region with no specific extent succeeds even when one extent is
+    /// corrupted; it prints a warning and skips the bad extent.
+    #[test]
+    fn dump_region_skips_corrupt_extent() {
+        let dir_path = make_region_with_corrupt_extent();
+        dump_region(vec![dir_path], None, None, false, false, csl()).unwrap();
+    }
+
+    /// dump_region fails when the user explicitly requests the corrupted
+    /// extent with -e.
+    #[test]
+    fn dump_region_errors_on_requested_corrupt_extent() {
+        let dir_path = make_region_with_corrupt_extent();
+        let result = dump_region(
+            vec![dir_path],
+            Some(ExtentId(1)),
+            None,
+            false,
+            false,
+            csl(),
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("extent 1 could not be opened"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// dump_region fails when the user requests a block (-b) that falls
+    /// inside the corrupted extent.
+    #[test]
+    fn dump_region_errors_on_block_in_corrupt_extent() {
+        let dir_path = make_region_with_corrupt_extent();
+        // extent_size = 10, so blocks 10-19 belong to extent 1; use block 15.
+        let result =
+            dump_region(vec![dir_path], None, Some(15), false, false, csl());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("extent 1 could not be opened"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// dump_region succeeds when requesting a good extent even though a
+    /// different extent in both regions has a corrupted block.
+    #[test]
+    fn dump_good_extent_with_corrupt_extent_in_region() {
+        let dir1 = make_region_with_corrupt_extent();
+        let dir2 = make_region_with_corrupt_extent();
+
+        // Request extent 2, which is intact in both regions.  The bad
+        // block in extent 1 should produce only a warning.
+        dump_region(
+            vec![dir1, dir2],
+            Some(ExtentId(2)),
+            None,
+            false,
+            false,
+            csl(),
+        )
+        .unwrap();
     }
 
     /// Read block data from raw files on disk
