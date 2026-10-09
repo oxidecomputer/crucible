@@ -46,7 +46,7 @@ resolver = "2"
 [workspace.dependencies]
 
 # crates.io
-aes-gcm-siv = "0.11.1"
+aes-gcm-siv = "0.12.1"
 anyhow = "1"
 async-channel = "2.5.0"
 async-recursion = "1.1.1"
