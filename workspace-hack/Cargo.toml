@@ -26,6 +26,7 @@ clap = { version = "4", features = ["cargo", "derive", "env", "wrap_help"] }
 clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "env", "std", "suggestions", "usage", "wrap_help"] }
 crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
+crossterm = { version = "0.29", features = ["serde"] }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
 digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1", features = ["use_std"] }
@@ -37,7 +38,7 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 generic-array = { version = "0.14", default-features = false, features = ["more_lengths", "zeroize"] }
-hashbrown = { version = "0.15" }
+hashbrown = { version = "0.17" }
 hex = { version = "0.4" }
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
@@ -107,6 +108,7 @@ futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
+hashbrown = { version = "0.17" }
 hex = { version = "0.4" }
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
