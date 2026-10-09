@@ -1928,6 +1928,7 @@ dependencies = [
  "clap_builder",
  "crossbeam-epoch",
  "crossbeam-utils",
+ "crossterm 0.29.0",
  "crypto-common 0.1.6",
  "digest 0.10.7",
  "dof 0.3.0",
@@ -1943,7 +1944,7 @@ dependencies = [
  "generic-array",
  "getrandom 0.2.11",
  "getrandom 0.4.1",
- "hashbrown 0.15.2",
+ "hashbrown 0.17.0",
  "hex",
  "hyper",
  "hyper-rustls",
@@ -3542,8 +3543,6 @@ version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash 0.1.4",
 ]
 
