@@ -75,7 +75,7 @@ hex = "0.4"
 http = "1.4.0"
 httptest = "0.16.4"
 human_bytes = "0.4.3"
-humantime = "2.3.0"
+humantime = "2.4.0"
 hyper = { version = "1", features = [ "full" ] }
 hyper-staticfile = "0.10.1"
 indicatif = { version = "0.18.4", features = ["rayon"] }
