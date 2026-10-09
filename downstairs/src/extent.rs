@@ -505,6 +505,10 @@ impl Extent {
         self.inner.dirty().unwrap()
     }
 
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Close an extent, returning a tuple of `(gen, flush, dirty)`
     pub fn close(self) -> Result<(u64, u64, bool), CrucibleError> {
         let generation = self.inner.gen_number().unwrap();
