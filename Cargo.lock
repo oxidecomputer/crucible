@@ -531,6 +531,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bon"
+version = "3.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "214f5df094ce551a10a30ffb9c70243d61f121a3d985a6495933e181dee6a7d2"
+dependencies = [
+ "bon-macros",
+]
+
+[[package]]
+name = "bon-macros"
+version = "3.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2706da6c749998cc555d04184909608956a69ad3f8ab1a076fbc867b4a3c3ce5"
+dependencies = [
+ "darling 0.24.1",
+ "ident_case",
+ "prettyplease 0.3.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.5",
+]
+
+[[package]]
 name = "bootstore"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?rev=5fd53a9c9ff2b0e47bfef3fe842b7516877b0162#5fd53a9c9ff2b0e47bfef3fe842b7516877b0162"
@@ -727,30 +750,6 @@ dependencies = [
  "futures-util",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "cargo-platform"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87a0c0e6148f11f01f32650a2ea02d532b2ad4e81d8bd41e6e565b5adc5e6082"
-dependencies = [
- "serde",
- "serde_core",
-]
-
-[[package]]
-name = "cargo_metadata"
-version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef987d17b0a113becdd19d3d0022d04d7ef41f9efe4f3fb63ac44ba61df3ade9"
-dependencies = [
- "camino",
- "cargo-platform",
- "semver 1.0.28",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1554,7 +1553,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "twox-hash",
  "uuid",
- "vergen",
+ "vergen 10.0.3",
  "vergen-git2",
 ]
 
@@ -5854,7 +5853,7 @@ dependencies = [
  "oximeter-schema",
  "oximeter-timeseries-macro",
  "oximeter-types",
- "prettyplease",
+ "prettyplease 0.2.37",
  "syn 2.0.117",
  "toml 0.8.23",
  "uuid",
@@ -5972,7 +5971,7 @@ dependencies = [
  "heck 0.5.0",
  "omicron-workspace-hack",
  "oximeter-types",
- "prettyplease",
+ "prettyplease 0.2.37",
  "proc-macro2",
  "quote",
  "schemars 0.8.22",
@@ -6482,6 +6481,16 @@ checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "prettyplease"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
+dependencies = [
+ "proc-macro2",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -7738,9 +7747,9 @@ dependencies = [
 
 [[package]]
 name = "rustversion"
-version = "1.0.22"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty-doors"
@@ -8543,7 +8552,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10130,12 +10139,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b849a1f6d8639e8de261e81ee0fc881e3e3620db1af9f2e0da015d4382ceaf75"
 dependencies = [
  "anyhow",
- "cargo_metadata",
  "derive_builder",
- "regex",
+ "rustversion",
+ "vergen-lib 9.1.0",
+]
+
+[[package]]
+name = "vergen"
+version = "10.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7081a999aada4e01c8ee04d32254e021e317dd051a250169305fbf2acf21824"
+dependencies = [
+ "anyhow",
+ "bon",
  "rustc_version 0.4.1",
  "rustversion",
- "vergen-lib",
+ "vergen-lib 10.0.3",
 ]
 
 [[package]]
@@ -10149,8 +10168,8 @@ dependencies = [
  "git2",
  "rustversion",
  "time",
- "vergen",
- "vergen-lib",
+ "vergen 9.1.0",
+ "vergen-lib 9.1.0",
 ]
 
 [[package]]
@@ -10161,6 +10180,17 @@ checksum = "b34a29ba7e9c59e62f229ae1932fb1b8fb8a6fdcc99215a641913f5f5a59a569"
 dependencies = [
  "anyhow",
  "derive_builder",
+ "rustversion",
+]
+
+[[package]]
+name = "vergen-lib"
+version = "10.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1343066736be577e40cf72914ecd68b369f7033ce0f7db6b25a6d6f7fbb3ed70"
+dependencies = [
+ "anyhow",
+ "bon",
  "rustversion",
 ]
 
@@ -11014,7 +11044,7 @@ dependencies = [
  "anyhow",
  "heck 0.5.0",
  "indexmap 2.14.0",
- "prettyplease",
+ "prettyplease 0.2.37",
  "syn 2.0.117",
  "wasm-metadata",
  "wit-bindgen-core",
@@ -11028,7 +11058,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c0f9bfd77e6a48eccf51359e3ae77140a7f50b1e2ebfe62422d8afdaffab17a"
 dependencies = [
  "anyhow",
- "prettyplease",
+ "prettyplease 0.2.37",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
