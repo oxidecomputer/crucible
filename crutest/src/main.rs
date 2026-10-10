@@ -3777,63 +3777,70 @@ async fn one906_workload(
                         *fail += 1;
                     }
                 }
-                // Two consecutive failures marks a downstairs as down,
-                // to avoid tripping on one slow response.
-                let down = fails.iter().any(|&f| f >= 2);
-                if down {
+                // Wait for Two consecutive failures to mark a repair port
+                // as unreachable, to avoid tripping on one slow response.
+                let ports_down = fails.iter().any(|&f| f >= 2);
+
+                // Ask the upstairs how many clients are Active.  A
+                // client can fault (congestion, too many outstanding
+                // bytes, inactivity timeout) while its repair port still
+                // answers, so a port check alone would not see every
+                // disturbance.
+                let wc = volume.query_work_queue().await.ok();
+                let active = wc.as_ref().map(|w| w.active_count).unwrap_or(0);
+                let ds_count =
+                    wc.as_ref().map(|w| w.ds_count).unwrap_or(usize::MAX);
+
+                // The cluster is disturbed if any repair port is
+                // unreachable or any client is not Active (faulting,
+                // live-repairing, or reconnecting).  Issuing IO into a
+                // disturbed cluster risks an error we could not tell
+                // apart from a real failure.  The repair window is not
+                // what this test is exercising so we pause through
+                // all of it.  The test run with downstairs on VMs runs
+                // into trouble during repair, so don't try to send IO
+                // during that window.
+                let disturbed = ports_down || active != num_targets;
+
+                if disturbed {
                     waiting = 0;
                     probe_sent = false;
                     if !paused.swap(true, Ordering::SeqCst) {
-                        let bad: Vec<_> = fails
-                            .iter()
-                            .enumerate()
-                            .filter(|&(_, &f)| f >= 2)
-                            .map(|(i, _)| i)
-                            .collect();
-                        warn!(
-                            log,
-                            "one906: pausing IO, downstairs {bad:?} \
-                             not responding"
-                        );
-                    }
-                } else if paused.load(Ordering::SeqCst) {
-                    // Every downstairs answers probes again, but the
-                    // repair port answering does not prove a downstairs
-                    // is back in service: after a silent death the
-                    // upstairs keeps the old connection Active (and
-                    // buffers IO to it) until its ~45s inactivity
-                    // timeout, so active_count is a stale read then.
-                    //
-                    // Use a positive liveness check instead.  If a
-                    // downstairs is not Active the upstairs is still
-                    // faulting or live-repairing, so just wait (and
-                    // re-probe once it returns).  Otherwise send one
-                    // read+flush probe and wait for the work queue to
-                    // drain: a flush only retires once it is terminal
-                    // on all three clients, so ds_count returning to
-                    // zero means every downstairs really processed it,
-                    // not merely that the repair port answers or that a
-                    // stale Active lingers.  The probe is sent once per
-                    // episode; we do not re-send while it is in flight.
-                    let wc = volume.query_work_queue().await.ok();
-                    let active =
-                        wc.as_ref().map(|w| w.active_count).unwrap_or(0);
-                    let ds_count =
-                        wc.as_ref().map(|w| w.ds_count).unwrap_or(usize::MAX);
-                    if active != num_targets {
-                        // Still faulting / live-repairing.  Abandon any
-                        // probe so we send a fresh one once all clients
-                        // are Active again.
-                        probe_sent = false;
-                        if waiting.is_multiple_of(8) {
-                            info!(
+                        if ports_down {
+                            let bad: Vec<_> = fails
+                                .iter()
+                                .enumerate()
+                                .filter(|&(_, &f)| f >= 2)
+                                .map(|(i, _)| i)
+                                .collect();
+                            warn!(
                                 log,
-                                "one906: waiting for recovery, \
-                                 {active}/{num_targets} downstairs ACTIVE"
+                                "one906: pausing IO, downstairs {bad:?} \
+                                 not responding"
+                            );
+                        } else {
+                            warn!(
+                                log,
+                                "one906: pausing IO, {active}/{num_targets} \
+                                 downstairs ACTIVE"
                             );
                         }
-                        waiting += 1;
-                    } else if !probe_sent {
+                    }
+                } else if paused.load(Ordering::SeqCst) {
+                    // Ports are up and the upstairs reports every client
+                    // Active, but that is not enough to resume: after a
+                    // silent death the upstairs keeps the old connection
+                    // Active (and buffers IO to it) until its ~45s
+                    // inactivity timeout, so active_count can be a stale
+                    // read here.  Confirm with a positive liveness
+                    // check: send one read+flush probe and wait for the
+                    // work queue to drain.  A flush only retires once it
+                    // is terminal on all three clients, so ds_count
+                    // returning to zero means every downstairs really
+                    // processed it, not merely that the port answers or
+                    // that a stale Active lingers.  The probe is sent
+                    // once per episode; we do not re-send it in flight.
+                    if !probe_sent {
                         if one906_send_probe(&volume, bs).await {
                             probe_sent = true;
                         }
