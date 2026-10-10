@@ -1974,7 +1974,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serde_with_macros",
- "similar 2.7.0",
  "slab",
  "slog",
  "smallvec",
