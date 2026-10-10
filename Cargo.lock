@@ -1882,7 +1882,7 @@ version = "0.0.0"
 dependencies = [
  "crucible-workspace-hack",
  "libc",
- "num-derive",
+ "num-derive 0.5.1",
  "num-traits",
  "thiserror 2.0.18",
 ]
@@ -1894,7 +1894,7 @@ source = "git+https://github.com/oxidecomputer/crucible?rev=bd9a0e2abe6b6b89aec8
 dependencies = [
  "crucible-workspace-hack",
  "libc",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "thiserror 2.0.18",
 ]
@@ -5281,6 +5281,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "num-derive"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4e98dc3b890f6c23a0f9d3d491a2823d0dea0fa656302a13dd225fa924112a8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -8955,7 +8966,7 @@ dependencies = [
  "log",
  "memmem",
  "nix 0.29.0",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "ordered-float 4.2.0",
  "pest",
