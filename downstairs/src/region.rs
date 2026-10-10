@@ -3944,6 +3944,41 @@ pub(crate) mod test {
         validate_whole_region(&mut region, &data);
     }
 
+    fn test_flush_resets_block_dirty(backend: Backend) {
+        let dir = tempdir().unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
+
+        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
+        let writes = RegionWrite(prepare_writes(0..10, &mut data));
+
+        {
+            let ext = region.get_opened_extent_mut(ExtentId(0));
+            for i in 0..10 {
+                assert!(!ext.block_dirty(i));
+            }
+        }
+
+        region.region_write(&writes, JobId(0), false).unwrap();
+
+        {
+            let ext = region.get_opened_extent_mut(ExtentId(0));
+            for i in 0..10 {
+                assert!(ext.block_dirty(i));
+            }
+        }
+
+        region.region_flush(1, 1, &None, JobId(1), None).unwrap();
+
+        {
+            let ext = region.get_opened_extent_mut(ExtentId(0));
+            for i in 0..10 {
+                assert!(!ext.block_dirty(i));
+            }
+        }
+    }
+
     /// Macro defining the full region test suite
     ///
     /// Functions in the test suite should take a `b: Backend` parameter and
@@ -3995,7 +4030,8 @@ pub(crate) mod test {
                 test_write_single_large_contiguous_span_extents,
                 test_write_unwritten_single_large_contiguous,
                 test_write_unwritten_single_large_contiguous_span_extents,
-                test_read_single_large_contiguous_span_extents
+                test_read_single_large_contiguous_span_extents,
+                test_flush_resets_block_dirty
             );
         };
 
