@@ -1140,24 +1140,11 @@ dependencies = [
 
 [[package]]
 name = "console"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c926e00cc70edefdc64d3a5ff31cc65bb97a3460097762bd23afb4d8145fccf8"
-dependencies = [
- "encode_unicode 0.3.6",
- "lazy_static",
- "libc",
- "unicode-width 0.1.14",
- "windows-sys 0.45.0",
-]
-
-[[package]]
-name = "console"
 version = "0.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e96a4956774c13c126a8b5af4daa79384f4d826534c95a02d76afb39e2ab64e3"
 dependencies = [
- "encode_unicode 1.0.0",
+ "encode_unicode",
  "libc",
  "unicode-width 0.2.0",
  "windows-sys 0.61.1",
@@ -1987,7 +1974,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serde_with_macros",
- "similar",
+ "similar 2.7.0",
  "slab",
  "slog",
  "smallvec",
@@ -2663,7 +2650,7 @@ dependencies = [
  "semver 1.0.28",
  "serde_json",
  "sha2 0.10.9",
- "similar",
+ "similar 2.7.0",
  "supports-color",
  "textwrap",
  "thiserror 2.0.21",
@@ -2812,12 +2799,6 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "encode_unicode"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a357d28ed41a50f9c765dbfe56cbc04a64e53e5fc58ba79fbc34c10ef3df831f"
-
-[[package]]
-name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
@@ -2914,14 +2895,14 @@ dependencies = [
 
 [[package]]
 name = "expectorate"
-version = "1.2.0"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cfe29c067b3dd398703f5cb05420a21c21079edfbcfa96c3ff2d9bde55cc8b3"
+checksum = "b772da95a569ac0198446076713b5654aac569583123a7eb6e02d71d9588613b"
 dependencies = [
  "atomicwrites",
- "console 0.15.7",
+ "console",
  "newline-converter",
- "similar",
+ "similar 3.2.0",
 ]
 
 [[package]]
@@ -4230,7 +4211,7 @@ version = "0.18.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9433806cd6b4ec1aba79c021c7e4c58fb4c3b9977c085062e611ac929998fb0c"
 dependencies = [
- "console 0.16.6",
+ "console",
  "portable-atomic",
  "rayon",
  "unicode-width 0.2.0",
@@ -8289,6 +8270,15 @@ name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+dependencies = [
+ "bstr",
+]
+
+[[package]]
+name = "similar"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
 dependencies = [
  "bstr",
 ]
