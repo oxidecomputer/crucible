@@ -947,7 +947,7 @@ dependencies = [
  "terminfo",
  "thiserror 2.0.21",
  "which",
- "windows-sys 0.61.1",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1085,7 +1085,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.1",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -3949,7 +3949,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-layer",
@@ -6882,7 +6882,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -7647,7 +7647,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.1",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7715,7 +7715,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.1",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8910,7 +8910,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.1",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8919,7 +8919,7 @@ version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2111ef44dae28680ae9752bb89409e7310ca33a8c621ebe7b106cf5c928b3ac0"
 dependencies = [
- "windows-sys 0.61.1",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8942,7 +8942,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.61.1",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9221,9 +9221,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
 dependencies = [
  "bytes",
  "libc",
