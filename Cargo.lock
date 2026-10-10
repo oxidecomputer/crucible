@@ -1919,6 +1919,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "generic-array",
+ "getrandom 0.3.1",
  "getrandom 0.4.1",
  "hashbrown 0.17.0",
  "hex",
