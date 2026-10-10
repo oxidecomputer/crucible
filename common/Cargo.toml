@@ -3,7 +3,7 @@ name = "crucible-common"
 version = "0.0.1"
 authors = ["Joshua M. Clulow <jmc@oxide.computer>", "Alan Hanson <alan@oxide.computer>"]
 license = "MPL-2.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
@@ -32,5 +32,5 @@ proptest.workspace = true
 test-strategy.workspace = true
 
 [build-dependencies]
-vergen = { version = "9.0.6", features = ["cargo", "rustc"] }
-vergen-git2 = "1.0.7"
+vergen = { version = "9.1.0", features = ["cargo", "rustc"] }
+vergen-git2 = "9.1.0"

@@ -1,6 +1,6 @@
 // Copyright 2022 Oxide Computer Company
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use std::net::SocketAddr;
 

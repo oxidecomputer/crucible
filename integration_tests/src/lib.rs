@@ -1,4 +1,4 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 #[cfg(test)]
 mod integration_tests {
@@ -8,18 +8,22 @@ mod integration_tests {
     use std::sync::Arc;
 
     use anyhow::*;
-    use base64::{engine, Engine};
+    use base64::{Engine, engine};
     use crucible::volume::VolumeBuilder;
     use crucible::*;
+    use crucible_client_types::DownstairsInfo;
+    use crucible_client_types::DownstairsInfoStatus;
     use crucible_client_types::RegionExtentInfo;
+    use crucible_client_types::UpstairsInfoStatus;
     use crucible_client_types::VolumeConstructionRequest;
+    use crucible_client_types::VolumeInfo;
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
-    use httptest::{matchers::*, responders::*, Expectation, Server};
+    use httptest::{Expectation, Server, matchers::*, responders::*};
     use repair_client::Client;
     use sha2::Digest;
-    use slog::{info, o, warn, Drain, Logger};
+    use slog::{Drain, Logger, info, o, warn};
     use tempfile::*;
     use tokio::sync::mpsc;
     use uuid::*;
@@ -351,14 +355,14 @@ mod integration_tests {
 
     impl<T: TestDownstairsDataset> Drop for TestDownstairs<T> {
         fn drop(&mut self) {
-            if self.dataset.stop_downstairs_during_drop() {
-                if let Some(downstairs) = self.downstairs.take() {
-                    tokio::task::block_in_place(move || {
-                        tokio::runtime::Handle::current()
-                            .block_on(async move { downstairs.stop().await })
-                            .unwrap();
-                    });
-                }
+            if self.dataset.stop_downstairs_during_drop()
+                && let Some(downstairs) = self.downstairs.take()
+            {
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current()
+                        .block_on(async move { downstairs.stop().await })
+                        .unwrap();
+                });
             }
         }
     }
@@ -481,6 +485,17 @@ mod integration_tests {
                 .set_logger(csl())
                 .build()?;
             downstairs.clone_region(source).await
+        }
+
+        // Stop this downstairs, freeing the port it was listening on.  Used
+        // to simulate a downstairs that is not running.  The address that was
+        // assigned during spawn is still recorded in any CrucibleOpts we
+        // handed out, so the upstairs will try (and fail) to connect to it.
+        pub async fn stop(&mut self) -> Result<()> {
+            if let Some(downstairs) = self.downstairs.take() {
+                downstairs.stop().await?;
+            }
+            Ok(())
         }
 
         pub fn address(&self) -> SocketAddr {
@@ -714,7 +729,6 @@ mod integration_tests {
             self.downstairs3.address()
         }
 
-        #[cfg_attr(not(target_os = "illumos"), expect(unused))]
         pub fn snapshot_exists(&self, snapshot_name: &str) -> Result<bool> {
             Ok(self.downstairs1.snapshot_exists(snapshot_name)?
                 && self.downstairs2.snapshot_exists(snapshot_name)?
@@ -745,7 +759,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -794,7 +808,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -850,7 +864,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1001,7 +1015,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1081,7 +1095,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Volume {
@@ -1140,7 +1154,7 @@ mod integration_tests {
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
                     opts,
-                    gen: 1,
+                    generation: 1,
                 },
             )),
         };
@@ -1149,6 +1163,61 @@ mod integration_tests {
         volume.activate().await?;
 
         // Read one block: should be all 0x00
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
+        volume.read(BlockIndex(0), &mut buffer).await?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_just_read_one_downstairs() -> Result<()> {
+        // Create three read-only downstairs, but only leave one of them
+        // running.  A single read-only downstairs is enough to activate a
+        // read-only upstairs, so both activation and a read should succeed.
+        const BLOCK_SIZE: usize = 512;
+
+        // small(true) creates and starts all three downstairs read only.  We
+        // capture the opts (which record all three addresses) before stopping
+        // two of them, leaving only downstairs1 running.
+        let mut tds = DefaultTestDownstairsSet::small(true).await?;
+        let opts = tds.opts();
+
+        tds.downstairs2.stop().await?;
+        tds.downstairs3.stop().await?;
+
+        // Put the region under sub_volumes (not as a read_only_parent) so that
+        // flushes are actually sent to it.
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                generation: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Volume::construct(vcr, None, csl()).await?;
+        volume.activate().await?;
+
+        // Read one block: should be all 0x00
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
+        volume.read(BlockIndex(0), &mut buffer).await?;
+
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
+
+        // Manually send a flush.  With only one downstairs running, the flush
+        // still completes: the two stopped downstairs have their jobs moved to
+        // Skipped, so the flush is complete on all clients and acks back to us.
+        // This should not hang.
+        volume.flush(None).await?;
+
+        // A second read after the flush should also complete successfully.
         let mut buffer = Buffer::new(1, BLOCK_SIZE);
         volume.read(BlockIndex(0), &mut buffer).await?;
 
@@ -1184,7 +1253,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1250,7 +1319,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1318,7 +1387,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -1383,7 +1452,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -1392,7 +1461,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -1440,8 +1509,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_volume_write_unwritten_subvols_sparse(
-    ) -> Result<()> {
+    async fn integration_test_volume_write_unwritten_subvols_sparse()
+    -> Result<()> {
         // Test a single layer volume with two subvolumes,
         // verify a first write_unwritten that crosses the subvols
         // works as expected.
@@ -1465,7 +1534,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -1474,7 +1543,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -1566,7 +1635,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -1575,7 +1644,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -2113,7 +2182,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -2122,7 +2191,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -2193,8 +2262,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_volume_subvols_parent_scrub_sparse_2(
-    ) -> Result<()> {
+    async fn integration_test_volume_subvols_parent_scrub_sparse_2()
+    -> Result<()> {
         // Test a volume with two sub volumes, and 3/4th RO parent
         // Write a few spots, one spanning the sub vols.
         // Verify scrubber and everything works as expected.
@@ -2237,7 +2306,7 @@ mod integration_tests {
             blocks_per_extent: tds1.blocks_per_extent(),
             extent_count: tds1.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
         let tds2 = DefaultTestDownstairsSet::small(false).await?;
         let opts = tds2.opts();
@@ -2246,7 +2315,7 @@ mod integration_tests {
             blocks_per_extent: tds2.blocks_per_extent(),
             extent_count: tds2.extent_count(),
             opts,
-            gen: 1,
+            generation: 1,
         });
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -2349,7 +2418,7 @@ mod integration_tests {
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
                     opts: opts.clone(),
-                    gen: 1,
+                    generation: 1,
                 },
             )),
         };
@@ -2367,7 +2436,7 @@ mod integration_tests {
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
                     opts,
-                    gen: 1,
+                    generation: 1,
                 },
             )),
         };
@@ -2533,13 +2602,15 @@ mod integration_tests {
 
             assert_eq!(&buffer[..], random_buffer);
 
-            assert!(volume
-                .write(
-                    BlockIndex(0),
-                    BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
-                )
-                .await
-                .is_err());
+            assert!(
+                volume
+                    .write(
+                        BlockIndex(0),
+                        BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
+                    )
+                    .await
+                    .is_err()
+            );
 
             volume.flush(None).await?;
         }
@@ -2558,7 +2629,7 @@ mod integration_tests {
                 blocks_per_extent: top_layer_tds.blocks_per_extent(),
                 extent_count: top_layer_tds.extent_count(),
                 opts: top_layer_opts,
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Volume {
@@ -2570,7 +2641,7 @@ mod integration_tests {
                             .blocks_per_extent(),
                         extent_count: test_downstairs_set.extent_count(),
                         opts: bottom_layer_opts,
-                        gen: 3,
+                        generation: 3,
                     }],
                     read_only_parent: None,
                 },
@@ -2629,12 +2700,14 @@ mod integration_tests {
             DefaultTestDownstairsSet::small_sqlite(false).await?;
 
         // This must be a SQLite extent!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -2671,12 +2744,14 @@ mod integration_tests {
         test_downstairs_set.reboot_read_only().await?;
 
         // This must still be a SQLite backend!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         // Validate that this now accepts reads and flushes, but rejects writes
         {
@@ -2705,13 +2780,15 @@ mod integration_tests {
 
             assert_eq!(&buffer[..], random_buffer);
 
-            assert!(volume
-                .write(
-                    BlockIndex(0),
-                    BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
-                )
-                .await
-                .is_err());
+            assert!(
+                volume
+                    .write(
+                        BlockIndex(0),
+                        BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
+                    )
+                    .await
+                    .is_err()
+            );
 
             volume.flush(None).await?;
         }
@@ -2723,12 +2800,14 @@ mod integration_tests {
         let bottom_layer_opts = test_downstairs_set.opts();
 
         // The new volume is **not** using the SQLite backend!
-        assert!(!top_layer_tds
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            !top_layer_tds
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let vcr = VolumeConstructionRequest::Volume {
             id: Uuid::new_v4(),
@@ -2738,7 +2817,7 @@ mod integration_tests {
                 blocks_per_extent: top_layer_tds.blocks_per_extent(),
                 extent_count: top_layer_tds.extent_count(),
                 opts: top_layer_opts,
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Volume {
@@ -2750,7 +2829,7 @@ mod integration_tests {
                             .blocks_per_extent(),
                         extent_count: test_downstairs_set.extent_count(),
                         opts: bottom_layer_opts,
-                        gen: 3,
+                        generation: 3,
                     }],
                     read_only_parent: None,
                 },
@@ -2806,12 +2885,14 @@ mod integration_tests {
         let mut test_downstairs_set =
             DefaultTestDownstairsSet::small_sqlite(false).await?;
         // This must be a SQLite extent!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -2846,21 +2927,25 @@ mod integration_tests {
         drop(volume);
 
         // This must still be a SQLite extent!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         test_downstairs_set.reboot_read_write().await?;
         // This should now be migrated, and the DB file should be deleted
-        assert!(!test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            !test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3061,12 +3146,14 @@ mod integration_tests {
             DefaultTestDownstairsSet::small_sqlite(false).await?;
 
         // This must be a SQLite extent!
-        assert!(test_downstairs_set
-            .downstairs1
-            .path()
-            .unwrap()
-            .join("00/000/000.db")
-            .exists());
+        assert!(
+            test_downstairs_set
+                .downstairs1
+                .path()
+                .unwrap()
+                .join("00/000/000.db")
+                .exists()
+        );
 
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder
@@ -3795,8 +3882,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_volume_replace_downstairs_then_takeover(
-    ) -> Result<()> {
+    async fn integration_test_volume_replace_downstairs_then_takeover()
+    -> Result<()> {
         let log = csl();
         // Replace a downstairs with a new one which will kick off
         // LiveRepair. Then spin up a new Upstairs with a newer
@@ -4516,8 +4603,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_guest_downstairs_unwritten_sparse_mid(
-    ) -> Result<()> {
+    async fn integration_test_guest_downstairs_unwritten_sparse_mid()
+    -> Result<()> {
         // Test using the guest layer to verify a new region is
         // what we expect, and a write_unwritten and read work as expected,
         // this time with sparse writes where the middle block is written
@@ -4573,8 +4660,8 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn integration_test_guest_downstairs_unwritten_sparse_end(
-    ) -> Result<()> {
+    async fn integration_test_guest_downstairs_unwritten_sparse_end()
+    -> Result<()> {
         // Test write_unwritten and read work as expected,
         // this time with sparse writes where the last block is written
         const BLOCK_SIZE: usize = 512;
@@ -4822,7 +4909,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -4925,7 +5012,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -5025,7 +5112,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -5078,7 +5165,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: None,
         };
@@ -5162,7 +5249,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -5221,7 +5308,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -5357,7 +5444,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: read_only_parent.clone(),
         };
@@ -5399,7 +5486,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent,
         };
@@ -5448,7 +5535,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: None,
         };
@@ -5902,6 +5989,56 @@ mod integration_tests {
         client.detach(&volume_id.to_string()).await.unwrap();
     }
 
+    // Test attaching and detaching the same volume multiple times
+    #[tokio::test]
+    async fn test_pantry_attach_detach_multiple() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Start a pantry, get the client for it
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        client.detach(&volume_id.to_string()).await.unwrap();
+
+        // Attach it again
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: tds.opts(),
+                generation: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        client
+            .attach(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::AttachRequest {
+                    // the type here is
+                    // crucible_pantry_client::types::VolumeConstructionRequest,
+                    // not
+                    // crucible::VolumeConstructionRequest, but they are the
+                    // same thing! take a trip through JSON
+                    // to get to the right type
+                    volume_construction_request: serde_json::from_str(
+                        &serde_json::to_string(&vcr).unwrap(),
+                    )
+                    .unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_volume_replace_vcr() {
         // Test of a replacement of a downstairs given two
@@ -5926,7 +6063,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -5970,7 +6107,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: new_opts.clone(),
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: None,
         };
@@ -6004,7 +6141,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts: opts.clone(),
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -6045,7 +6182,7 @@ mod integration_tests {
             blocks_per_extent: tds.blocks_per_extent(),
             extent_count: tds.extent_count(),
             opts: opts.clone(),
-            gen: 2,
+            generation: 2,
         });
 
         let new_sub_vol = vec![VolumeConstructionRequest::Region {
@@ -6053,7 +6190,7 @@ mod integration_tests {
             blocks_per_extent: sv_tds.blocks_per_extent(),
             extent_count: sv_tds.extent_count(),
             opts: sv_opts.clone(),
-            gen: 1,
+            generation: 1,
         }];
 
         let new_vol = VolumeConstructionRequest::Volume {
@@ -6082,7 +6219,7 @@ mod integration_tests {
             blocks_per_extent: tds.blocks_per_extent(),
             extent_count: tds.extent_count(),
             opts: new_opts.clone(),
-            gen: 3,
+            generation: 3,
         });
 
         // Our "new" VCR must have a new downstairs in the opts, and have
@@ -6130,7 +6267,8 @@ mod integration_tests {
             crucible_pantry_client::types::VolumeStatus {
                 active: true,
                 seen_active: true,
-                num_job_handles: 0,
+                num_job_handles: 1,
+                info: _,
             }
         ));
 
@@ -6144,7 +6282,7 @@ mod integration_tests {
                 blocks_per_extent: tds.blocks_per_extent(),
                 extent_count: tds.extent_count(),
                 opts,
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -6163,7 +6301,8 @@ mod integration_tests {
             crucible_pantry_client::types::VolumeStatus {
                 active: false,
                 seen_active: true,
-                num_job_handles: 0,
+                num_job_handles: 1,
+                info: _,
             }
         ));
     }
@@ -6180,7 +6319,7 @@ mod integration_tests {
                 blocks_per_extent: child.blocks_per_extent(),
                 extent_count: child.extent_count(),
                 opts: child.opts(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -6218,7 +6357,7 @@ mod integration_tests {
                 blocks_per_extent: child.blocks_per_extent(),
                 extent_count: child.extent_count(),
                 opts: child.opts(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: None,
         };
@@ -6250,6 +6389,272 @@ mod integration_tests {
 
         if !child.snapshot_exists(&snapshot_name)? {
             bail!("snapshot disappeared after second flush!");
+        }
+
+        Ok(())
+    }
+
+    /// Validate the VolumeInfo from the Pantry
+    #[tokio::test]
+    async fn test_pantry_get_volume_info() {
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = DefaultTestDownstairsSet::big(false).await.unwrap();
+        let opts = tds.opts();
+
+        // Start a pantry, get the client for it, then use it to bulk_write
+        // in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        let status =
+            client.volume_status(&volume_id.to_string()).await.unwrap();
+
+        let crucible_pantry_client::types::VolumeStatus { info, .. } =
+            status.into_inner();
+
+        use crucible_pantry_client::types::DownstairsInfoStatus;
+        use crucible_pantry_client::types::UpstairsInfoStatus;
+
+        let crucible_pantry_client::types::VolumeInfo::Volume {
+            sub_volumes,
+            ..
+        } = info
+        else {
+            panic!("wrong variant");
+        };
+
+        assert_eq!(sub_volumes.len(), 1);
+
+        let crucible_pantry_client::types::VolumeInfo::Upstairs {
+            state,
+            block_size: _,
+            upstairs_id: _,
+            session_id: _,
+            generation,
+            read_only,
+            encrypted,
+            reconcile_in_progress,
+            live_repair_in_progress,
+            targets,
+        } = &sub_volumes[0]
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(*state, UpstairsInfoStatus::Active);
+        assert_eq!(*generation, 1);
+        assert!(!(*read_only));
+        assert!(*encrypted);
+        assert!(!(*reconcile_in_progress));
+        assert!(!(*live_repair_in_progress));
+
+        for (i, target) in targets.iter().enumerate() {
+            let crucible_pantry_client::types::DownstairsInfo {
+                region_id: _,
+                target_addr,
+                repair_addr: _,
+                state,
+            } = &target;
+
+            assert_eq!(
+                target_addr.as_ref().map(|x| x.parse().unwrap()),
+                Some(opts.target[i])
+            );
+            assert_eq!(*state, DownstairsInfoStatus::Active);
+        }
+    }
+
+    /// Validate the VolumeInfo for multiple sub-volumes and a read-only parent
+    #[tokio::test]
+    async fn test_volume_info_multiple_subvolumes() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        let tds1 = DefaultTestDownstairsSet::small(false).await?;
+        let tds2 = DefaultTestDownstairsSet::big(false).await?;
+        let tds3 = DefaultTestDownstairsSet::problem().await?;
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![
+                VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds1.blocks_per_extent(),
+                    extent_count: tds1.extent_count(),
+                    opts: tds1.opts(),
+                    generation: 1,
+                },
+                VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds2.blocks_per_extent(),
+                    extent_count: tds2.extent_count(),
+                    opts: tds2.opts(),
+                    generation: 2,
+                },
+            ],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds3.blocks_per_extent(),
+                    extent_count: tds3.extent_count(),
+                    opts: tds3.opts(),
+                    generation: 3,
+                },
+            )),
+        };
+
+        let volume = Volume::construct(vcr, None, csl()).await?;
+
+        volume.activate().await?;
+
+        // `problem` is 10M, so the total size should be `small` + `big`,
+        // meaning 5120 + 50M.
+
+        let sv1 = tds1.blocks_per_extent()
+            * tds1.extent_count() as u64
+            * BLOCK_SIZE as u64;
+
+        let sv2 = tds2.blocks_per_extent()
+            * tds2.extent_count() as u64
+            * BLOCK_SIZE as u64;
+
+        assert_eq!(volume.total_size().await?, sv1 + sv2);
+
+        // Verify the VolumeInfo for all three region sets
+
+        let info = volume.query_volume_info().await?;
+
+        let VolumeInfo::Volume {
+            sub_volumes,
+            read_only_parent,
+        } = info
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(sub_volumes.len(), 2);
+        assert!(read_only_parent.is_some());
+
+        // `small` downstairs set
+
+        let VolumeInfo::Upstairs {
+            state,
+            block_size: _,
+            upstairs_id: _,
+            session_id: _,
+            generation,
+            read_only,
+            encrypted,
+            reconcile_in_progress,
+            live_repair_in_progress,
+            targets,
+        } = &sub_volumes[0]
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(*state, UpstairsInfoStatus::Active);
+        assert_eq!(*generation, 1);
+        assert!(!(*read_only));
+        assert!(*encrypted);
+        assert!(!(*reconcile_in_progress));
+        assert!(!(*live_repair_in_progress));
+
+        let opts = tds1.opts();
+
+        for (i, target) in targets.iter().enumerate() {
+            let DownstairsInfo {
+                region_id: _,
+                target_addr,
+                repair_addr: _,
+                state,
+            } = &target;
+
+            assert_eq!(target_addr.as_ref(), Some(&opts.target[i]));
+            assert_eq!(*state, DownstairsInfoStatus::Active);
+        }
+
+        // `big` downstairs set
+
+        let VolumeInfo::Upstairs {
+            state,
+            block_size: _,
+            upstairs_id: _,
+            session_id: _,
+            generation,
+            read_only,
+            encrypted,
+            reconcile_in_progress,
+            live_repair_in_progress,
+            targets,
+        } = &sub_volumes[1]
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(*state, UpstairsInfoStatus::Active);
+        assert_eq!(*generation, 2);
+        assert!(!(*read_only));
+        assert!(*encrypted);
+        assert!(!(*reconcile_in_progress));
+        assert!(!(*live_repair_in_progress));
+
+        let opts = tds2.opts();
+
+        for (i, target) in targets.iter().enumerate() {
+            let DownstairsInfo {
+                region_id: _,
+                target_addr,
+                repair_addr: _,
+                state,
+            } = &target;
+
+            assert_eq!(target_addr.as_ref(), Some(&opts.target[i]));
+            assert_eq!(*state, DownstairsInfoStatus::Active);
+        }
+
+        // `problem` downstairs set
+
+        let Some(read_only_parent) = read_only_parent else {
+            panic!("should be Some");
+        };
+
+        let VolumeInfo::Upstairs {
+            state,
+            block_size: _,
+            upstairs_id: _,
+            session_id: _,
+            generation,
+            read_only,
+            encrypted,
+            reconcile_in_progress,
+            live_repair_in_progress,
+            targets,
+        } = &*read_only_parent
+        else {
+            panic!("wrong variant!");
+        };
+
+        assert_eq!(*state, UpstairsInfoStatus::Active);
+        assert_eq!(*generation, 3);
+        assert!(!(*read_only));
+        assert!(*encrypted);
+        assert!(!(*reconcile_in_progress));
+        assert!(!(*live_repair_in_progress));
+
+        let opts = tds3.opts();
+
+        for (i, target) in targets.iter().enumerate() {
+            let DownstairsInfo {
+                region_id: _,
+                target_addr,
+                repair_addr: _,
+                state,
+            } = &target;
+
+            assert_eq!(target_addr.as_ref(), Some(&opts.target[i]));
+            assert_eq!(*state, DownstairsInfoStatus::Active);
         }
 
         Ok(())

@@ -7,7 +7,13 @@ use std::{
 };
 
 use crate::{
-    cdt,
+    AckStatus, ActiveJobs, AllocRingBuffer, BlockRes, Buffer, ClientData,
+    ClientIOStateCount, ClientId, ClientMap, ConnectionMode, CrucibleError,
+    DownstairsIO, DownstairsMend, DsState, DsStateData, ExtentFix,
+    ExtentRepairIDs, IOState, IOStateCount, IOop, ImpactedBlocks, JobId,
+    Message, NegotiationState, RawReadResponse, RawWrite, ReconcileIO,
+    ReconciliationId, RegionDefinition, RegionMetadata, ReplaceResult,
+    SnapshotDetails, WorkSummary, cdt,
     client::{
         ClientAction, ClientFaultReason, ClientNegotiationFailed,
         ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
@@ -20,19 +26,12 @@ use crate::{
     notify::{NotifyQueue, NotifyRequest},
     stats::DownstairsStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
-    AckStatus, ActiveJobs, AllocRingBuffer, BlockRes, Buffer, ClientData,
-    ClientIOStateCount, ClientId, ClientMap, ConnectionMode, CrucibleError,
-    DownstairsIO, DownstairsMend, DsState, DsStateData, ExtentFix,
-    ExtentRepairIDs, IOState, IOStateCount, IOop, ImpactedBlocks, JobId,
-    Message, NegotiationState, RawReadResponse, RawWrite, ReconcileIO,
-    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    WorkSummary,
 };
 use crucible_common::{BlockIndex, ExtentId, NegotiationError};
 use crucible_protocol::WriteHeader;
 
 use ringbuffer::RingBuffer;
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{Logger, debug, error, info, o, warn};
 use uuid::Uuid;
 
 /// Downstairs data
@@ -163,6 +162,20 @@ pub(crate) enum LiveRepairState {
     FinalFlush {
         flush_job: PendingJob,
     },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum LiveRepairStart {
+    /// Live-repair has started
+    Started,
+    /// Live-repair is already running
+    AlreadyRunning,
+    /// No downstairs is in `LiveRepairReady`
+    NotNeeded,
+    /// All three downstairs need live-repair (oh no)
+    AllNeedRepair,
+    /// There is no source downstairs available
+    NoSource,
 }
 
 impl LiveRepairState {
@@ -591,7 +604,7 @@ impl Downstairs {
         }
 
         if self.gw_active.remove(&ds_id) {
-            self.acked_ids.push(ds_id);
+            self.acked_ids.enqueue(ds_id);
         } else {
             panic!("job {ds_id} not on gw_active list");
         }
@@ -677,8 +690,11 @@ impl Downstairs {
         );
 
         // Restart the IO task for that specific client, transitioning to a new
-        // state.
-        self.clients[client_id].reinitialize(up_state, self.can_replay);
+        // state.  We can replay as long as all jobs since the last flush are
+        // buffered (indicated by `self.can_replay`), and there's no live-repair
+        // in progress.
+        let can_replay = self.can_replay && !self.live_repair_in_progress();
+        self.clients[client_id].reinitialize(up_state, can_replay);
 
         // If the IO task stops on its own, then under certain circumstances,
         // we want to skip all of its jobs.  (If we requested that the IO task
@@ -843,6 +859,7 @@ impl Downstairs {
         self.ds_active.for_each(|ds_id, job| {
             // We don't need to send anything before our last good flush
             if lf.is_some_and(|lf| *ds_id <= lf) {
+                // ZZZ This assert fired, new changes?
                 assert_eq!(IOState::Done, job.state[client_id]);
                 return;
             }
@@ -870,7 +887,16 @@ impl Downstairs {
     /// Returns `true` if repair is needed, `false` otherwise
     pub(crate) fn collate(&mut self) -> Result<bool, NegotiationError> {
         let r = self.check_region_metadata()?;
-        Ok(self.start_reconciliation(r))
+        Ok(self.start_reconciliation(r, |data| {
+            let DsStateData::Connecting {
+                state: NegotiationStateData::WaitQuorum(r),
+                ..
+            } = data
+            else {
+                panic!("client is not in WaitQuorum");
+            };
+            r
+        }))
     }
 
     /// Checks that region metadata is valid
@@ -908,10 +934,10 @@ impl Downstairs {
 
             for (i, m) in rec.iter().enumerate() {
                 max_flush = max_flush.max(m.flush + 1);
-                max_gen = max_gen.max(m.gen + 1);
+                max_gen = max_gen.max(m.generation + 1);
                 if i < MAX_LOG {
                     flush_log.push(m.flush);
-                    gen_log.push(m.gen);
+                    gen_log.push(m.generation);
                     dirty_log.push(m.dirty);
                 }
             }
@@ -959,9 +985,46 @@ impl Downstairs {
         Ok(CollateData { max_flush, max_gen })
     }
 
+    /// Begins reconciliation from all downstairs in `LiveRepairReady`
+    ///
+    /// # Panics
+    /// If any of the downstairs is not in `LiveRepairReady`
+    #[must_use]
+    pub(crate) fn reconcile_from_live_repair_ready(&mut self) -> bool {
+        let mut max_flush = 0;
+        let mut max_gen = 0;
+        for client in self.clients.iter_mut() {
+            let DsStateData::Connecting {
+                state: NegotiationStateData::LiveRepairReady(data),
+                ..
+            } = client.state_data()
+            else {
+                panic!("got invalid client state");
+            };
+            for m in data.iter() {
+                max_flush = max_flush.max(m.flush + 1);
+                max_gen = max_gen.max(m.generation + 1);
+            }
+        }
+        self.start_reconciliation(CollateData { max_gen, max_flush }, |data| {
+            let DsStateData::Connecting {
+                state: NegotiationStateData::LiveRepairReady(r),
+                ..
+            } = data
+            else {
+                panic!("client is not in LiveRepairReady");
+            };
+            r
+        })
+    }
+
     /// Begins reconciliation, using the given collation data
     #[must_use]
-    fn start_reconciliation(&mut self, data: CollateData) -> bool {
+    fn start_reconciliation<G: Fn(&DsStateData) -> &RegionMetadata>(
+        &mut self,
+        data: CollateData,
+        getter: G,
+    ) -> bool {
         let CollateData { max_flush, max_gen } = data;
 
         /*
@@ -974,7 +1037,7 @@ impl Downstairs {
          * Determine what extents don't match and what to do
          * about that
          */
-        if let Some(reconcile_list) = self.mismatch_list() {
+        if let Some(reconcile_list) = self.mismatch_list(getter) {
             for c in self.clients.iter_mut() {
                 c.begin_reconcile();
             }
@@ -1005,6 +1068,11 @@ impl Downstairs {
         }
     }
 
+    /// Checks whether a reconciliation is in progress
+    pub(crate) fn reconcile_in_progress(&self) -> bool {
+        self.reconcile.is_some()
+    }
+
     /// Checks whether a live-repair is in progress
     pub(crate) fn live_repair_in_progress(&self) -> bool {
         // A live-repair is in progress if any client is in the LiveRepair
@@ -1022,10 +1090,14 @@ impl Downstairs {
     ///
     /// This function is idempotent; it returns without doing anything if
     /// live-repair either can't be started or is already running.
-    pub(crate) fn check_live_repair_start(&mut self, up_state: &UpstairsState) {
+    #[must_use]
+    pub(crate) fn check_live_repair_start(
+        &mut self,
+        up_state: &UpstairsState,
+    ) -> LiveRepairStart {
         // If we're already doing live-repair, then we can't start live-repair
         if self.live_repair_in_progress() {
-            return;
+            return LiveRepairStart::AlreadyRunning;
         }
 
         // Begin setting up live-repair state
@@ -1050,12 +1122,15 @@ impl Downstairs {
 
         // Can't start live-repair if no one is LiveRepairReady
         if repair_downstairs.is_empty() {
-            return;
+            return LiveRepairStart::NotNeeded;
+        } else if repair_downstairs.len() == 3 {
+            warn!(self.log, "All three downstairs require repair");
+            return LiveRepairStart::AllNeedRepair;
         }
 
         // Can't start live-repair if we don't have a source downstairs
         let Some(source_downstairs) = source_downstairs else {
-            return;
+            return LiveRepairStart::NoSource;
         };
 
         // Move the upstairs that were LiveRepairReady to LiveRepair
@@ -1064,6 +1139,26 @@ impl Downstairs {
         // to abort the repair on the troublesome clients.
         for &cid in &repair_downstairs {
             self.clients[cid].start_live_repair(up_state);
+        }
+
+        // Any offline downstairs should now be moved to faulted, as we don't
+        // or can't replay to them, so they must come back through LR
+        for cid in ClientId::iter() {
+            match self.clients[cid].state() {
+                DsState::Connecting {
+                    mode: ConnectionMode::Offline,
+                    ..
+                } => {
+                    warn!(
+                        self.log,
+                        "Forcing offline downstairs {cid} to faulted"
+                    );
+                    self.clients[cid].set_connection_mode_faulted();
+                }
+                _state => {
+                    // ignore Downstairs in irrelevant states
+                }
+            }
         }
 
         // Submit the initial repair jobs, which kicks everything off
@@ -1077,6 +1172,8 @@ impl Downstairs {
 
         let repair = self.repair.as_ref().unwrap();
         self.notify_live_repair_start(repair);
+
+        LiveRepairStart::Started
     }
 
     /// Checks whether live-repair can continue
@@ -1241,14 +1338,27 @@ impl Downstairs {
                     info!(self.log, "LiveRepair final flush submitted");
                     cdt::up__to__ds__flush__start!(|| flush_id.0);
 
+                    // If all downstairs are inactive, then the flush will be
+                    // immediately skipped by `submit_flush`.  We have to
+                    // manually set that result in the `PendingJob`; otherwise,
+                    // the live-repair will never be resolved.  We detect this
+                    // case when the flush is absent from `ds_active` (because
+                    // it immediately retired itself upon submission).
+                    let mut flush_job = PendingJob::new(flush_id);
+                    if self.ds_active.get(&flush_id).is_none() {
+                        info!(
+                            self.log,
+                            "LiveRepair final flush was skipped everywhere"
+                        );
+                        flush_job.result = Some(Err(CrucibleError::IoError(
+                            "job was skipped on all downstairs".to_owned(),
+                        )));
+                    }
+
                     // The borrow was dropped earlier, so reborrow `self.repair`
                     self.repair.as_mut().unwrap().state =
-                        LiveRepairState::FinalFlush {
-                            flush_job: PendingJob::new(flush_id),
-                        }
+                        LiveRepairState::FinalFlush { flush_job }
                 } else {
-                    let repair_id = repair.id;
-                    self.notify_live_repair_progress(repair_id, next_extent);
                     self.send_next_live_repair(up_state);
                 };
             }
@@ -1783,20 +1893,6 @@ impl Downstairs {
 
         reconcile.current_work = Some(next);
 
-        let reconcile_id = reconcile.id;
-
-        // `on_reconciliation_job_done` increments one of these and
-        // decrements the other, so add them together to get total task
-        // count to send to Nexus.
-        let task_count =
-            self.reconcile_repaired + reconcile.reconcile_repair_needed;
-
-        self.notify_reconcile_progress(
-            reconcile_id,
-            self.reconcile_repaired,
-            task_count,
-        );
-
         false
     }
 
@@ -1931,6 +2027,13 @@ impl Downstairs {
                 }
             ) {
                 c.set_active();
+            } else if matches!(c.state(), DsState::Active) {
+                info!(
+                    self.log,
+                    "client {} is in state {:?}, Already active",
+                    i,
+                    c.state(),
+                );
             } else {
                 warn!(
                     self.log,
@@ -1965,18 +2068,14 @@ impl Downstairs {
     }
 
     /// Compares region metadata from all three clients and builds a mend list
-    fn mismatch_list(&self) -> Option<DownstairsMend> {
+    fn mismatch_list<G: Fn(&DsStateData) -> &RegionMetadata>(
+        &self,
+        getter: G,
+    ) -> Option<DownstairsMend> {
         let log = self.log.new(o!("" => "mend".to_string()));
         let mut meta = ClientMap::new();
         for i in ClientId::iter() {
-            let DsStateData::Connecting {
-                state: NegotiationStateData::WaitQuorum(r),
-                ..
-            } = self.clients[i].state_data()
-            else {
-                panic!("client {i} is not in WaitQuorum");
-            };
-            meta.insert(i, r);
+            meta.insert(i, getter(self.clients[i].state_data()));
         }
         DownstairsMend::new(&meta, log)
     }
@@ -2302,7 +2401,7 @@ impl Downstairs {
         );
 
         if acked {
-            self.acked_ids.push(ds_id)
+            self.acked_ids.enqueue(ds_id);
         } else {
             self.gw_active.insert(ds_id);
         }
@@ -2819,9 +2918,9 @@ impl Downstairs {
                 assert!(job.acked);
 
                 retired.push(id);
-                self.retired_ids.push(id);
+                self.retired_ids.enqueue(id);
                 let summary = job.io_summarize(id);
-                self.retired_jobs.push(summary);
+                self.retired_jobs.enqueue(summary);
                 for cid in ClientId::iter() {
                     self.clients[cid].retire_job(job);
                 }
@@ -3780,24 +3879,6 @@ impl Downstairs {
         }
     }
 
-    fn notify_live_repair_progress(
-        &self,
-        repair_id: Uuid,
-        current_extent: ExtentId,
-    ) {
-        if let Some(notify) = &self.notify {
-            let extent_count = self.ddef.unwrap().extent_count();
-            notify.send(NotifyRequest::LiveRepairProgress {
-                upstairs_id: self.cfg.upstairs_id,
-                repair_id,
-                // surely we won't have u64::MAX extents
-                current_item: current_extent.0 as i64,
-                // i am serious, and don't call me shirley
-                total_items: extent_count as i64,
-            });
-        }
-    }
-
     fn notify_reconcile_start(&self, reconcile: &ReconcileData) {
         if let Some(notify) = &self.notify {
             let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
@@ -3865,24 +3946,6 @@ impl Downstairs {
                 repair_id: reconcile.id,
                 aborted,
                 repairs,
-            });
-        }
-    }
-
-    fn notify_reconcile_progress(
-        &self,
-        reconcile_id: Uuid,
-        current_task: usize,
-        task_count: usize,
-    ) {
-        if let Some(notify) = &self.notify {
-            notify.send(NotifyRequest::ReconcileProgress {
-                upstairs_id: self.cfg.upstairs_id,
-                repair_id: reconcile_id,
-                // surely we won't have usize::MAX extents
-                current_item: current_task as i64,
-                // i am serious, and don't call me shirley
-                total_items: task_count as i64,
             });
         }
     }
@@ -3963,16 +4026,17 @@ struct DownstairsBackpressureConfig {
 pub(crate) mod test {
     use super::{
         ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
-        ConnectionMode, Downstairs, DsState, NegotiationStateData, PendingJob,
+        ConnectionMode, Downstairs, DsState, LiveRepairStart,
+        NegotiationStateData, PendingJob,
     };
     use crate::{
-        downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
-        live_repair::ExtentInfo,
-        upstairs::UpstairsState,
         BlockOpWaiter, BlockRes, ClientId, CrucibleError, DsStateData,
         ExtentFix, ExtentRepairIDs, IOState, IOop, ImpactedBlocks, JobId,
         RawReadResponse, ReconcileIO, ReconcileIOState, ReconciliationId,
         RegionMetadata, SnapshotDetails,
+        downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
+        live_repair::ExtentInfo,
+        upstairs::UpstairsState,
     };
 
     use bytes::BytesMut;
@@ -4038,7 +4102,7 @@ pub(crate) mod test {
             NegotiationStateData::WaitForPromote,
             NegotiationStateData::WaitForRegionInfo,
             NegotiationStateData::GetExtentVersions,
-            NegotiationStateData::LiveRepairReady,
+            NegotiationStateData::LiveRepairReady(Default::default()),
         ] {
             ds.clients[to_repair].checked_state_transition(
                 &UpstairsState::Active,
@@ -6432,9 +6496,11 @@ pub(crate) mod test {
 
         // The last skipped flush should still be on the skipped list
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(0)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(0)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
@@ -6609,9 +6675,11 @@ pub(crate) mod test {
         // One downstairs should have a skipped job on its list.
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(1)]
-            .skipped_jobs
-            .contains(&JobId(1001)));
+        assert!(
+            ds.clients[ClientId::new(1)]
+                .skipped_jobs
+                .contains(&JobId(1001))
+        );
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
         // Enqueue the flush.
@@ -6647,9 +6715,11 @@ pub(crate) mod test {
         // Only the skipped flush should remain.
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(1)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(1)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
@@ -7129,9 +7199,11 @@ pub(crate) mod test {
 
         // Skipped jobs just has the flush
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(0)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(0)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
 
         // The writes, the read, and the flush should be completed.
         assert_eq!(ds.completed().len(), 3);
@@ -7223,13 +7295,17 @@ pub(crate) mod test {
 
         // Skipped jobs now just have the flush.
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(0)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(0)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(2)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
+        assert!(
+            ds.clients[ClientId::new(2)]
+                .skipped_jobs
+                .contains(&JobId(1002))
+        );
 
         // The writes, the read, and the flush should be completed.
         assert_eq!(ds.completed().len(), 3);
@@ -7475,18 +7551,24 @@ pub(crate) mod test {
                 flush_number: 3,
                 dirty: false,
             };
-            assert!(ds.clients[ClientId::new(0)]
-                .repair_info
-                .replace(ei)
-                .is_none());
-            assert!(ds.clients[ClientId::new(1)]
-                .repair_info
-                .replace(ei)
-                .is_none());
-            assert!(ds.clients[ClientId::new(2)]
-                .repair_info
-                .replace(ei)
-                .is_none());
+            assert!(
+                ds.clients[ClientId::new(0)]
+                    .repair_info
+                    .replace(ei)
+                    .is_none()
+            );
+            assert!(
+                ds.clients[ClientId::new(1)]
+                    .repair_info
+                    .replace(ei)
+                    .is_none()
+            );
+            assert!(
+                ds.clients[ClientId::new(2)]
+                    .repair_info
+                    .replace(ei)
+                    .is_none()
+            );
 
             let repair_extent = if source == ClientId::new(0) {
                 vec![ClientId::new(1), ClientId::new(2)]
@@ -7574,32 +7656,44 @@ pub(crate) mod test {
             // is the source.
             // First try one source, one repair
             let repair = if source == ClientId::new(0) {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(1)]
             } else {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(0)]
             };
 
@@ -7608,32 +7702,44 @@ pub(crate) mod test {
 
             // Next try the other downstairs to repair.
             let repair = if source == ClientId::new(2) {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(1)]
             } else {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(2)]
             };
 
@@ -7660,46 +7766,64 @@ pub(crate) mod test {
             // is the source.
             // One source, two repair
             let repair = if source == ClientId::new(0) {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(1), ClientId::new(2)]
             } else if source == ClientId::new(1) {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(0), ClientId::new(2)]
             } else {
-                assert!(ds.clients[ClientId::new(0)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(1)]
-                    .repair_info
-                    .replace(bad_ei)
-                    .is_none());
-                assert!(ds.clients[ClientId::new(2)]
-                    .repair_info
-                    .replace(good_ei)
-                    .is_none());
+                assert!(
+                    ds.clients[ClientId::new(0)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(1)]
+                        .repair_info
+                        .replace(bad_ei)
+                        .is_none()
+                );
+                assert!(
+                    ds.clients[ClientId::new(2)]
+                        .repair_info
+                        .replace(good_ei)
+                        .is_none()
+                );
                 vec![ClientId::new(0), ClientId::new(1)]
             };
 
@@ -9570,7 +9694,8 @@ pub(crate) mod test {
 
         // Start the repair normally. This enqueues the close & reopen jobs, and
         // reserves Job IDs for the repair/noop
-        ds.check_live_repair_start(&UpstairsState::Active);
+        let r = ds.check_live_repair_start(&UpstairsState::Active);
+        assert_eq!(r, LiveRepairStart::Started);
         assert!(ds.live_repair_in_progress());
 
         // Submit a write.

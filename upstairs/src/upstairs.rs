@@ -1,7 +1,12 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
+
 //! Data structures specific to Crucible's `struct Upstairs`
+
 use crate::{
-    cdt,
+    BlockOp, BlockRes, Buffer, ClientId, ClientMap, ConnectionMode,
+    CrucibleOpts, DsState, DsStateData, EncryptionContext, GuestIoHandle,
+    Message, NegotiationStateData, RegionDefinition, RegionDefinitionStatus,
+    SnapshotDetails, WQCounts, cdt,
     client::{
         ClientAction, ClientNegotiationFailed, ClientRunResult,
         ClientStopReason, NegotiationResult, NegotiationState,
@@ -11,31 +16,29 @@ use crate::{
         DeferredBlockOp, DeferredMessage, DeferredQueue, DeferredRead,
         DeferredWrite, EncryptedWrite,
     },
-    downstairs::{Downstairs, DownstairsAction},
+    downstairs::{Downstairs, DownstairsAction, LiveRepairStart},
     extent_from_offset,
     io_limits::IOLimitGuard,
     stats::UpStatOuter,
-    BlockOp, BlockRes, Buffer, ClientId, ClientMap, ConnectionMode,
-    CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
-    RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_client_types::RegionExtentInfo;
+use crucible_client_types::VolumeInfo;
 use crucible_common::{BlockIndex, CrucibleError};
 use serde::{Deserialize, Serialize};
 
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 use bytes::BytesMut;
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{Logger, debug, error, info, o, warn};
 use tokio::{
     sync::mpsc,
-    time::{sleep_until, Instant},
+    time::{Instant, sleep_until},
 };
 use uuid::Uuid;
 
@@ -314,7 +317,7 @@ impl UpstairsConfig {
 impl Upstairs {
     pub(crate) fn new(
         opt: &CrucibleOpts,
-        gen: u64,
+        generation: u64,
         expected_region_def: Option<RegionDefinition>,
         guest: GuestIoHandle,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
@@ -376,7 +379,7 @@ impl Upstairs {
             encryption_context,
             upstairs_id: uuid,
             session_id,
-            generation: AtomicU64::new(gen),
+            generation: AtomicU64::new(generation),
             read_only: opt.read_only,
         });
 
@@ -614,8 +617,8 @@ impl Upstairs {
             }
         }
 
-        // Check whether we need to start live-repair
-        self.check_live_repair_start();
+        // Check whether we need to start live-repair or reconciliation
+        self.ensure_downstairs_consistency();
 
         // Check whether we need to mark an offline Downstairs as faulted
         // because too many jobs have piled up.
@@ -906,7 +909,10 @@ impl Upstairs {
     /// any Downstairs from
     /// `DsStateData::Connecting { state:  NegotiationStateData::LiveRepairReady, .. }`
     /// back to [DsStateData::Active] without actually performing any repair.
-    pub(crate) fn check_live_repair_start(&mut self) {
+    ///
+    /// If all Downstairs are in `LiveRepairReady`, we instead begin
+    /// reconciliation.
+    pub(crate) fn ensure_downstairs_consistency(&mut self) {
         if !matches!(self.state, UpstairsState::Active) {
             return;
         }
@@ -921,8 +927,26 @@ impl Upstairs {
             return;
         }
 
-        // Try to start live-repair
-        self.downstairs.check_live_repair_start(&self.state);
+        // Try to start live-repair; fall back to reconciliation if necessary
+        match self.downstairs.check_live_repair_start(&self.state) {
+            LiveRepairStart::AllNeedRepair => {
+                info!(
+                    self.log,
+                    "all Downstairs need live-repair; doing reconciliation"
+                );
+                if self.downstairs.reconcile_from_live_repair_ready() {
+                    self.downstairs.send_next_reconciliation_req();
+                } else {
+                    self.on_reconciliation_done(false);
+                }
+            }
+            LiveRepairStart::Started
+            | LiveRepairStart::AlreadyRunning
+            | LiveRepairStart::NotNeeded
+            | LiveRepairStart::NoSource => {
+                // We don't need any special handling of these cases
+            }
+        }
     }
 
     /// Returns `true` if we're ready to accept guest IO
@@ -997,12 +1021,12 @@ impl Upstairs {
             BlockOp::GoActive { done } => {
                 self.set_active_request(done);
             }
-            BlockOp::GoActiveWithGen { gen, done } => {
+            BlockOp::GoActiveWithGen { generation, done } => {
                 // We allow this if we are not active yet, or we are active
                 // with the requested generation number.
                 match &self.state {
                     UpstairsState::Active | UpstairsState::GoActive(..) => {
-                        if self.cfg.generation() == gen {
+                        if self.cfg.generation() == generation {
                             // Okay, we want to activate with what we already
                             // have, that's valid; let the set_active_request
                             // handle things.
@@ -1023,7 +1047,9 @@ impl Upstairs {
                     | UpstairsState::Disabled(..) => {
                         // This case, we update our generation and then
                         // let set_active_request handle the rest.
-                        self.cfg.generation.store(gen, Ordering::Release);
+                        self.cfg
+                            .generation
+                            .store(generation, Ordering::Release);
                         self.set_active_request(done);
                     }
                 }
@@ -1072,6 +1098,10 @@ impl Upstairs {
                         ));
                     }
                 };
+            }
+            BlockOp::QueryVolumeInfo { done } => {
+                let status = self.get_volume_info();
+                done.send_ok(status);
             }
             // Testing options
             BlockOp::QueryExtentInfo { done } => {
@@ -1142,7 +1172,14 @@ impl Upstairs {
                     done.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
-
+                if self.cfg.read_only {
+                    // While we ACK a guest sent flush here, The upstairs
+                    // internally will still send a flush to all connected RO
+                    // downstairs, which they are expected to handle.  This
+                    // internal flush serves to clean out completed jobs.
+                    done.send_ok(());
+                    return;
+                }
                 let n = self.downstairs.active_client_count();
                 let required = if snapshot_details.is_some() { 3 } else { 2 };
                 if n < required {
@@ -1173,6 +1210,20 @@ impl Upstairs {
                     &self.state,
                     crate::client::ClientFaultReason::RequestedFault,
                 );
+                done.send_ok(());
+            }
+
+            #[cfg(test)]
+            BlockOp::FlushCheck { done } => {
+                // Deterministically run the work the automatic flush timer
+                // does, so a test can trigger the internal flush that a
+                // read-only guest flush intentionally skips.  We omit the
+                // timer's has_jobs guard because the test is forcing this
+                // explicitly.
+                if self.need_flush {
+                    let io_guard = self.try_acquire_io(0);
+                    self.submit_flush(None, None, io_guard);
+                }
                 done.send_ok(());
             }
         }
@@ -1314,15 +1365,23 @@ impl Upstairs {
 
         self.need_flush = false;
 
-        /*
-         * Get the next ID for our new guest work job. Note that the flush
-         * ID and the next_id are connected here, in that all future writes
-         * should be flushed at the next flush ID.
-         */
-
         if snapshot_details.is_some() {
+            if self.cfg.read_only {
+                info!(
+                    self.log,
+                    "rejecting flush with snap request for read-only upstairs",
+                );
+
+                if let Some(res) = res {
+                    res.send_err(CrucibleError::ModifyingReadOnlyRegion);
+                }
+
+                return;
+            }
+
             info!(self.log, "flush with snap requested");
         }
+
         let ds_id =
             self.downstairs
                 .submit_flush(snapshot_details, res, io_guard);
@@ -1990,7 +2049,8 @@ impl Upstairs {
     ///
     /// Read only upstairs don't have any reconciliation to do. If we are the
     /// first downstairs to join, then activate the upstairs.  Otherwise just
-    /// move downstairs in WaitQuorum to Active.
+    /// move downstairs in WaitQuorum to Active. If the upstairs is
+    /// deactivating, deactivate any downstairs in WaitQuorum.
     ///
     /// # Panics
     /// If this upstairs is not read only.
@@ -2026,6 +2086,28 @@ impl Upstairs {
                 // the active region set.
                 info!(self.log, "Added downstairs to the active Upstairs");
                 self.downstairs.on_reconciliation_skipped(false);
+            }
+            UpstairsState::Deactivating(..) => {
+                // A downstairs has reached WaitQuorum, but we are
+                // already deactivating. Deactivate any client in
+                // WaitQuorum so the deactivation can complete.
+                for i in ClientId::iter() {
+                    if matches!(
+                        self.downstairs.clients[i].state(),
+                        DsState::Connecting {
+                            state: NegotiationState::WaitQuorum,
+                            ..
+                        }
+                    ) {
+                        info!(
+                            self.log,
+                            "deactivating client {i} in \
+                             WaitQuorum during read-only \
+                             reconciliation skip"
+                        );
+                        self.downstairs.clients[i].deactivate(&self.state);
+                    }
+                }
             }
             _ => {
                 warn!(
@@ -2222,16 +2304,109 @@ impl Upstairs {
     pub(crate) fn ds_state(&self, client_id: ClientId) -> DsState {
         self.downstairs.clients[client_id].state()
     }
+
+    pub fn get_volume_info(&self) -> VolumeInfo {
+        use crucible_client_types::DownstairsInfoConnectionMode;
+        use crucible_client_types::DownstairsInfoNegotiationStatus;
+        use crucible_client_types::DownstairsInfoStatus;
+        use crucible_client_types::UpstairsInfoStatus;
+
+        let mut targets = Vec::with_capacity(3);
+
+        for client in self.downstairs.clients.iter() {
+            let state = match client.state_data() {
+                DsStateData::Connecting { state, mode } => {
+                    DownstairsInfoStatus::Connecting {
+                        state: match state {
+                            NegotiationStateData::WaitConnect(_) => {
+                                DownstairsInfoNegotiationStatus::WaitConnect
+                            }
+
+                            NegotiationStateData::Start
+                            | NegotiationStateData::WaitForPromote
+                            | NegotiationStateData::WaitForRegionInfo
+                            | NegotiationStateData::GetExtentVersions => {
+                                DownstairsInfoNegotiationStatus::Negotiating
+                            }
+
+                            NegotiationStateData::WaitQuorum(_) => {
+                                DownstairsInfoNegotiationStatus::WaitQuorum
+                            }
+
+                            NegotiationStateData::Reconcile => {
+                                DownstairsInfoNegotiationStatus::Reconcile
+                            }
+
+                            NegotiationStateData::LiveRepairReady(_) => {
+                                DownstairsInfoNegotiationStatus::LiveRepairReady
+                            }
+                        },
+
+                        mode: match mode {
+                            ConnectionMode::New => {
+                                DownstairsInfoConnectionMode::New
+                            }
+                            ConnectionMode::Offline => {
+                                DownstairsInfoConnectionMode::Offline
+                            }
+                            ConnectionMode::Faulted => {
+                                DownstairsInfoConnectionMode::Faulted
+                            }
+                            ConnectionMode::Replaced => {
+                                DownstairsInfoConnectionMode::Replaced
+                            }
+                        },
+                    }
+                }
+
+                DsStateData::Active => DownstairsInfoStatus::Active,
+
+                DsStateData::LiveRepair => DownstairsInfoStatus::LiveRepair,
+
+                DsStateData::Stopping(_) => DownstairsInfoStatus::Stopping,
+            };
+
+            let target = crucible_client_types::DownstairsInfo {
+                region_id: client.id(),
+                target_addr: client.target_addr(),
+                repair_addr: client.repair_addr(),
+                state,
+            };
+
+            targets.push(target);
+        }
+
+        VolumeInfo::Upstairs {
+            state: match self.state {
+                UpstairsState::Initializing => UpstairsInfoStatus::Initializing,
+                UpstairsState::GoActive(_) => UpstairsInfoStatus::GoActive,
+                UpstairsState::Active => UpstairsInfoStatus::Active,
+                UpstairsState::Deactivating(_) => {
+                    UpstairsInfoStatus::Deactivating
+                }
+                UpstairsState::Disabled(_) => UpstairsInfoStatus::Disabled,
+            },
+            block_size: self.ddef.get_def().map(|ddef| ddef.block_size()),
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+            generation: self.cfg.generation(),
+            read_only: self.cfg.read_only,
+            encrypted: self.cfg.encrypted(),
+            reconcile_in_progress: self.downstairs.reconcile_in_progress(),
+            live_repair_in_progress: self.downstairs.live_repair_in_progress(),
+            targets,
+        }
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
     use crate::{
+        Block, BlockOp, BlockOpWaiter, DsStateData, JobId,
+        NegotiationStateData, RegionMetadata,
         client::{ClientFaultReason, ClientStopReason},
         test::{make_encrypted_upstairs, make_upstairs},
-        Block, BlockOp, BlockOpWaiter, DsStateData, JobId,
-        NegotiationStateData,
     };
     use bytes::BytesMut;
     use crucible_common::integrity_hash;
@@ -2267,8 +2442,8 @@ pub(crate) mod test {
         // Move our downstairs client fail_id to LiveRepair.
         to_live_repair_ready(&mut up, or_ds);
 
-        // Assert that the repair started
-        up.check_live_repair_start();
+        // Assert that a consistency check starts the repair
+        up.ensure_downstairs_consistency();
         assert!(up.downstairs.live_repair_in_progress());
 
         // The first thing that should happen after we start repair_extent
@@ -2282,6 +2457,11 @@ pub(crate) mod test {
 
     /// Helper function to legally move the given client to live-repair ready
     pub(crate) fn to_live_repair_ready(up: &mut Upstairs, to_repair: ClientId) {
+        active_to_faulted(up, to_repair);
+        faulted_to_live_repair_ready(up, to_repair);
+    }
+
+    fn active_to_faulted(up: &mut Upstairs, to_repair: ClientId) {
         up.downstairs.fault_client(
             to_repair,
             &UpstairsState::Active,
@@ -2292,12 +2472,23 @@ pub(crate) mod test {
             client_id: to_repair,
             action: ClientAction::TaskStopped(ClientRunResult::RequestedStop),
         }));
+    }
+
+    fn faulted_to_live_repair_ready(up: &mut Upstairs, to_repair: ClientId) {
+        faulted_to_live_repair_ready_with(up, to_repair, Default::default());
+    }
+
+    fn faulted_to_live_repair_ready_with(
+        up: &mut Upstairs,
+        to_repair: ClientId,
+        meta: RegionMetadata,
+    ) {
         let mode = ConnectionMode::Faulted;
         for state in [
             NegotiationStateData::WaitForPromote,
             NegotiationStateData::WaitForRegionInfo,
             NegotiationStateData::GetExtentVersions,
-            NegotiationStateData::LiveRepairReady,
+            NegotiationStateData::LiveRepairReady(meta),
         ] {
             up.downstairs.clients[to_repair].checked_state_transition(
                 &up.state,
@@ -3611,13 +3802,13 @@ pub(crate) mod test {
 
         // Before we are active, we have no need to repair or check for future
         // repairs.
-        up.check_live_repair_start();
+        up.ensure_downstairs_consistency();
         assert!(!up.downstairs.live_repair_in_progress());
 
         up.force_active().unwrap();
 
         // No need to repair or check for future repairs here either
-        up.check_live_repair_start();
+        up.ensure_downstairs_consistency();
         assert!(!up.downstairs.live_repair_in_progress());
 
         // No downstairs should change state.
@@ -3640,7 +3831,7 @@ pub(crate) mod test {
 
         // Force client 1 into LiveRepairReady
         to_live_repair_ready(&mut up, ClientId::new(1));
-        up.check_live_repair_start();
+        up.ensure_downstairs_consistency();
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some());
@@ -3659,8 +3850,8 @@ pub(crate) mod test {
         to_live_repair_ready(&mut up, ClientId::new(1));
         up.ds_transition(ClientId::new(1), DsStateData::LiveRepair);
 
-        // Start the live-repair
-        up.check_live_repair_start();
+        // Check for downstairs consistency, which starts the live-repair
+        up.ensure_downstairs_consistency();
         assert!(up.downstairs.live_repair_in_progress());
 
         // Pretend that DS 0 faulted then came back through to LiveRepairReady;
@@ -3668,7 +3859,7 @@ pub(crate) mod test {
         // repair_check_deadline to check again in the future.
         to_live_repair_ready(&mut up, ClientId::new(0));
 
-        up.check_live_repair_start();
+        up.ensure_downstairs_consistency();
         assert!(up.downstairs.live_repair_in_progress());
     }
 
@@ -3683,11 +3874,11 @@ pub(crate) mod test {
         up.force_active().unwrap();
         to_live_repair_ready(&mut up, ClientId::new(1));
 
-        up.check_live_repair_start();
+        up.ensure_downstairs_consistency();
         assert!(up.downstairs.live_repair_in_progress());
 
         // Checking again is idempotent
-        up.check_live_repair_start();
+        up.ensure_downstairs_consistency();
         assert!(up.downstairs.live_repair_in_progress());
     }
 
@@ -4586,5 +4777,440 @@ pub(crate) mod test {
                 panic!("returned Ok!");
             }
         }
+    }
+
+    /// Helper function to set a downstairs to offline state
+    fn set_downstairs_offline(up: &mut Upstairs, client_id: ClientId) {
+        // Simulate the client going offline by transitioning it to
+        // Connecting/Offline.  This mimics what happens when a client
+        // spontaneously disconnects and gets reinitialized
+        up.ds_transition(
+            client_id,
+            DsStateData::Connecting {
+                mode: ConnectionMode::Offline,
+                state: NegotiationStateData::Start,
+            },
+        );
+    }
+
+    #[test]
+    fn test_offline_becomes_faulted_when_live_repair_starts() {
+        // Start with a faulted downstairs (LiveRepairReady), an offline
+        // downstairs, and an active downstairs.
+        // When live repair starts, the offline downstairs must become faulted.
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), false);
+        up.force_active().unwrap();
+
+        // Setup initial states:
+        // Client 0: Active (will be source for live repair)
+        // Client 1: Faulted -> LiveRepairReady (needs live repair)
+        // Client 2: Offline (should become faulted when live repair starts)
+
+        // Keep client 0 active (it's already active from force_active())
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+
+        // Set client 1 to LiveRepairReady state
+        to_live_repair_ready(&mut up, ClientId::new(1));
+        assert_eq!(
+            up.ds_state(ClientId::new(1)),
+            DsState::Connecting {
+                state: NegotiationState::LiveRepairReady,
+                mode: ConnectionMode::Faulted
+            }
+        );
+
+        // Set client 2 to offline state
+        set_downstairs_offline(&mut up, ClientId::new(2));
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::Start,
+                mode: ConnectionMode::Offline
+            }
+        );
+
+        // Verify live repair hasn't started yet
+        assert!(!up.downstairs.live_repair_in_progress());
+
+        // Trigger live repair start
+        up.ensure_downstairs_consistency();
+
+        // Verify live repair has started
+        assert!(up.downstairs.live_repair_in_progress());
+
+        // Verify client 1 is now in LiveRepair state
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
+
+        // Verify client 2 (previously offline) is now faulted
+        // This is the key assertion for this test case
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::Start,
+                mode: ConnectionMode::Faulted
+            }
+        );
+
+        // Client 0 should still be active (source for live repair)
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+    }
+
+    #[test]
+    fn test_downstairs_goes_offline_during_live_repair() {
+        // Start with all three downstairs active.  Put one into live repair,
+        // then have another go offline during live repair.
+        // The offline downstairs must be immediately faulted and never
+        // replay IOs.
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), false);
+        up.force_active().unwrap();
+
+        // All three clients start active
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(2)), DsState::Active);
+
+        // Put client 1 into LiveRepairReady and start live repair
+        to_live_repair_ready(&mut up, ClientId::new(1));
+        up.ensure_downstairs_consistency();
+
+        // Verify live repair started
+        assert!(up.downstairs.live_repair_in_progress());
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
+
+        // Clients 0 and 2 should still be active
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(2)), DsState::Active);
+
+        // Now simulate client 2 spontaneously going offline during live repair
+        // This is what would happen when a connection drops unexpectedly
+        up.apply_client_action(
+            ClientId::new(2),
+            ClientAction::TaskStopped(ClientRunResult::Timeout),
+        );
+
+        // After check_gone_too_long, client 2 should be faulted (not offline)
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::Start,
+                mode: ConnectionMode::Faulted
+            }
+        );
+    }
+
+    #[test]
+    fn test_downstairs_three_live_repair() {
+        // Start with all three downstairs active.  Put all three into
+        // live-repair (oh no), then see what happens.
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), false);
+        up.force_active().unwrap();
+
+        // All three clients start active
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(2)), DsState::Active);
+
+        // Put all clients in live-repair.  For the purposes of this test, we
+        // fault each downstairs first, so that live-repair doesn't start midway
+        // through the faulting.
+        for id in ClientId::iter() {
+            active_to_faulted(&mut up, id);
+        }
+
+        // Set up our region metadata to indicate that one client is dirty
+        // This doesn't trigger anything, because we're poking the state machine
+        // internals (instead of sending it events).
+        for id in ClientId::iter() {
+            faulted_to_live_repair_ready_with(
+                &mut up,
+                id,
+                RegionMetadata::new(
+                    &[1; 12],                      // generation
+                    &[1; 12],                      // flush
+                    &[id == ClientId::new(0); 12], // dirty
+                ),
+            );
+            up.downstairs.clients[id].repair_addr =
+                Some("0.0.0.0:1".parse().unwrap());
+        }
+
+        // Send it an event, which should trigger the beginning of
+        // reconciliation (because it will now notice that all three downstairs
+        // are in live-repair)
+        up.apply(UpstairsAction::NoOp);
+
+        // Check that we're doing reconciliation
+        for id in ClientId::iter() {
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    state: NegotiationState::Reconcile,
+                }
+            );
+        }
+        // Each extent has 4 associated repair jobs
+        let expected_repairs = ddef.extent_count() as usize
+            * ddef.extent_size().value as usize
+            * 4;
+        assert_eq!(up.downstairs.reconcile_repair_needed(), expected_repairs);
+    }
+
+    #[test]
+    fn test_downstairs_three_live_repair_failed_reconcile() {
+        // Regression test for crucible#1980.  Start with all three downstairs
+        // active, put all three into live-repair so that we fall back to
+        // reconciliation while the upstairs is active, then abort that
+        // reconciliation.  The downstairs should restart and come back
+        // through reconciliation, instead of panicking on an invalid state
+        // transition.
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), false);
+        up.force_active().unwrap();
+
+        for id in ClientId::iter() {
+            active_to_faulted(&mut up, id);
+        }
+
+        for id in ClientId::iter() {
+            faulted_to_live_repair_ready_with(
+                &mut up,
+                id,
+                RegionMetadata::new(
+                    &[1; 12],                      // generation
+                    &[1; 12],                      // flush
+                    &[id == ClientId::new(0); 12], // dirty
+                ),
+            );
+            up.downstairs.clients[id].repair_addr =
+                Some("0.0.0.0:1".parse().unwrap());
+        }
+
+        // Start reconciliation, because all three downstairs need live-repair
+        up.apply(UpstairsAction::NoOp);
+        for id in ClientId::iter() {
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    state: NegotiationState::Reconcile,
+                }
+            );
+        }
+
+        // Reconciliation fails, which stops all three clients
+        up.downstairs.abort_reconciliation(&up.state);
+        assert!(matches!(up.state, UpstairsState::Active));
+        for id in ClientId::iter() {
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Stopping(ClientStopReason::NegotiationFailed(
+                    ClientNegotiationFailed::FailedReconcile
+                ))
+            );
+        }
+
+        // When the client tasks stop, each client should restart in the
+        // Faulted mode (because the upstairs is active).
+        for id in ClientId::iter() {
+            up.apply_client_action(
+                id,
+                ClientAction::TaskStopped(ClientRunResult::RequestedStop),
+            );
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Connecting {
+                    mode: ConnectionMode::Faulted,
+                    state: NegotiationState::Start,
+                }
+            );
+        }
+
+        // Bring all three clients back to live-repair ready.  Since all three
+        // still need repair, we should fall back to reconciliation again.
+        for id in ClientId::iter() {
+            faulted_to_live_repair_ready_with(
+                &mut up,
+                id,
+                RegionMetadata::new(
+                    &[1; 12],                      // generation
+                    &[1; 12],                      // flush
+                    &[id == ClientId::new(0); 12], // dirty
+                ),
+            );
+            up.downstairs.clients[id].repair_addr =
+                Some("0.0.0.0:1".parse().unwrap());
+        }
+        up.apply(UpstairsAction::NoOp);
+        for id in ClientId::iter() {
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    state: NegotiationState::Reconcile,
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reject_snapshot_of_read_only_upstairs() {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), true);
+        up.force_active().unwrap();
+
+        let (brw, res) = BlockOpWaiter::pair();
+
+        up.submit_flush(
+            Some(res),
+            Some(SnapshotDetails {
+                snapshot_name: String::from("invalid-request"),
+            }),
+            None,
+        );
+
+        assert!(matches!(
+            brw.wait().await,
+            Err(CrucibleError::ModifyingReadOnlyRegion),
+        ));
+    }
+
+    /// Verify that a read-only upstairs that is deactivating can
+    /// handle a downstairs reaching WaitQuorum.
+    #[tokio::test]
+    async fn deactivate_ro_with_late_third_downstairs() {
+        // Activate with only two downstairs
+        let ddef = RegionDefinition::default();
+        let mut up = Upstairs::test_default(Some(ddef), true);
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            for state in [
+                NegotiationStateData::Start,
+                NegotiationStateData::WaitForPromote,
+                NegotiationStateData::WaitForRegionInfo,
+                NegotiationStateData::GetExtentVersions,
+                NegotiationStateData::WaitQuorum(Default::default()),
+            ] {
+                up.ds_transition(
+                    cid,
+                    DsStateData::Connecting {
+                        mode: ConnectionMode::New,
+                        state,
+                    },
+                );
+            }
+        }
+        let (_rx, done) = BlockOpWaiter::pair();
+        up.state = UpstairsState::GoActive(done);
+
+        up.connect_ro_region_set();
+        assert!(matches!(&up.state, &UpstairsState::Active));
+
+        // Now request deactivation.
+        let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
+            done: ds_done_res,
+        }));
+
+        // Clients 0 and 1 were Active, so they are now deactivating.
+        assert_eq!(
+            up.ds_state(ClientId::new(0)),
+            DsState::Stopping(ClientStopReason::Deactivated),
+        );
+        assert_eq!(
+            up.ds_state(ClientId::new(1)),
+            DsState::Stopping(ClientStopReason::Deactivated),
+        );
+
+        // Client 2 never activated, it's still in WaitConnect and
+        // the deactivation loop considers it already done.
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::WaitConnect,
+                mode: ConnectionMode::New,
+            },
+        );
+
+        // Now simulate client 2 negotiating to WaitQuorum while
+        // deactivation is in progress.
+        let cid2 = ClientId::new(2);
+        for state in [
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+        ] {
+            up.ds_transition(
+                cid2,
+                DsStateData::Connecting {
+                    mode: ConnectionMode::New,
+                    state,
+                },
+            );
+        }
+
+        // Simulate an ExtentVersions message, which should put Client 2 into
+        // WaitQuorum.  It should then immediately shift to deactivating.
+        warn!(up.log, "about to send ExtentVersions message");
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(2),
+            action: ClientAction::Response(Message::ExtentVersions {
+                gen_numbers: vec![],
+                flush_numbers: vec![],
+                dirty_bits: vec![],
+            }),
+        }));
+        warn!(up.log, "done sending ExtentVersions message");
+
+        // Client 2 should now be deactivating, not stuck.
+        assert_eq!(
+            up.ds_state(cid2),
+            DsState::Stopping(ClientStopReason::Deactivated),
+        );
+
+        // Complete deactivation for all three clients by having
+        // their IO tasks stop.
+        for cid in ClientId::iter() {
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: cid,
+                action: ClientAction::TaskStopped(
+                    ClientRunResult::RequestedStop,
+                ),
+            }));
+        }
+
+        // Deactivation is complete, upstairs transitions to
+        // Initializing.
+        assert!(matches!(up.state, UpstairsState::Initializing));
+
+        let reply = ds_done_brw.wait().await;
+        assert!(reply.is_ok());
     }
 }

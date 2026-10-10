@@ -51,7 +51,7 @@ pub(crate) mod up_test {
         upstairs::Upstairs,
     };
 
-    use base64::{engine, Engine};
+    use base64::{Engine, engine};
     use pseudo_file::IOSpan;
 
     // Create a simple logger
@@ -398,8 +398,8 @@ pub(crate) mod up_test {
 
     // Validate that reading a blank block works
     #[test]
-    pub fn test_upstairs_validate_encrypted_read_response_blank_block(
-    ) -> Result<()> {
+    pub fn test_upstairs_validate_encrypted_read_response_blank_block()
+    -> Result<()> {
         // Set up the encryption context
         let mut key = vec![0u8; 32];
         rand::fill(&mut key[..]);
@@ -446,8 +446,8 @@ pub(crate) mod up_test {
     }
 
     #[test]
-    pub fn test_upstairs_validate_unencrypted_read_response_blank_block(
-    ) -> Result<()> {
+    pub fn test_upstairs_validate_unencrypted_read_response_blank_block()
+    -> Result<()> {
         let mut data = BytesMut::with_capacity(512);
         data.resize(512, 0u8);
 

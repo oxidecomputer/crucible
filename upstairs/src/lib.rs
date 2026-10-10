@@ -1,4 +1,4 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
@@ -11,20 +11,22 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use crucible_client_types::{
-    CrucibleOpts, RegionExtentInfo, ReplaceResult, VolumeConstructionRequest,
-};
+pub use crucible_client_types::CrucibleOpts;
+pub use crucible_client_types::RegionExtentInfo;
+pub use crucible_client_types::ReplaceResult;
+pub use crucible_client_types::VolumeConstructionRequest;
+pub use crucible_client_types::VolumeInfo;
 pub use crucible_common::*;
 pub use crucible_protocol::*;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 pub use bytes::{Bytes, BytesMut};
 use oximeter::types::ProducerRegistry;
 use ringbuffer::AllocRingBuffer;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slog::{error, info, o, warn, Logger};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use slog::{Logger, error, info, o, warn};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tracing::instrument;
 use usdt::register_probes;
 use uuid::Uuid;
@@ -128,7 +130,10 @@ pub mod testing {
 #[async_trait]
 pub trait BlockIO: Sync {
     async fn activate(&self) -> Result<(), CrucibleError>;
-    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError>;
+    async fn activate_with_gen(
+        &self,
+        generation: u64,
+    ) -> Result<(), CrucibleError>;
 
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
@@ -137,6 +142,17 @@ pub trait BlockIO: Sync {
         &self,
     ) -> Result<Option<RegionExtentInfo>, CrucibleError>;
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError>;
+
+    /// Return a VolumeInfo object.
+    ///
+    /// This only make sense for Volume, Subvolume, and Guest, so it is only
+    /// implemented for those.
+    async fn query_volume_info(&self) -> Result<VolumeInfo, CrucibleError> {
+        crucible_bail!(
+            Unsupported,
+            "query_volume_info not implemented for this type"
+        );
+    }
 
     // Total bytes of Volume
     async fn total_size(&self) -> Result<u64, CrucibleError>;
@@ -484,7 +500,7 @@ impl<T> ClientMap<T> {
     }
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (ClientId, &T)> {
         self.0
-             .0
+            .0
             .iter()
             .enumerate()
             .flat_map(|(i, v)| v.as_ref().map(|v| (ClientId::new(i as u8), v)))
@@ -583,10 +599,9 @@ impl EncryptionContext {
         ];
 
         // macos' and illumos' libc contain this
-        extern "C" {
+        unsafe extern "C" {
             pub fn arc4random_buf(buf: *mut libc::c_void, nbytes: libc::size_t);
         }
-
         unsafe {
             arc4random_buf(random_iv.as_mut_ptr() as *mut libc::c_void, 12)
         }
@@ -1510,7 +1525,7 @@ pub(crate) enum BlockOp {
         done: BlockRes,
     },
     GoActiveWithGen {
-        gen: u64,
+        generation: u64,
         done: BlockRes,
     },
     Deactivate {
@@ -1536,6 +1551,9 @@ pub(crate) enum BlockOp {
     QueryUpstairsUuid {
         done: BlockRes<Uuid>,
     },
+    QueryVolumeInfo {
+        done: BlockRes<VolumeInfo>,
+    },
     // Begin testing options.
     QueryExtentInfo {
         done: BlockRes<RegionExtentInfo>,
@@ -1556,6 +1574,11 @@ pub(crate) enum BlockOp {
     #[cfg(test)]
     FaultDownstairs {
         client_id: ClientId,
+        done: BlockRes<()>,
+    },
+
+    #[cfg(test)]
+    FlushCheck {
         done: BlockRes<()>,
     },
 }
@@ -1626,7 +1649,7 @@ pub(crate) fn format_job_list(ids: &[JobId]) -> String {
  */
 pub fn up_main(
     opt: CrucibleOpts,
-    gen: u64,
+    generation: u64,
     region_def: Option<RegionDefinition>,
     guest: GuestIoHandle,
     producer_registry: Option<ProducerRegistry>,
@@ -1668,8 +1691,13 @@ pub fn up_main(
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let mut up =
-        upstairs::Upstairs::new(&opt, gen, region_def, guest, tls_context);
+    let mut up = upstairs::Upstairs::new(
+        &opt,
+        generation,
+        region_def,
+        guest,
+        tls_context,
+    );
 
     #[cfg(test)]
     if disable_backpressure {

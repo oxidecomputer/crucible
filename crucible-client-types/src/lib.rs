@@ -1,6 +1,6 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
-use base64::{engine, Engine};
+use base64::{Engine, engine};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -29,7 +29,8 @@ pub enum VolumeConstructionRequest {
         blocks_per_extent: u64,
         extent_count: u32,
         opts: CrucibleOpts,
-        gen: u64,
+        #[serde(rename = "gen")]
+        generation: u64,
     },
     File {
         id: Uuid,
@@ -164,4 +165,169 @@ pub struct RegionExtentInfo {
     pub blocks_per_extent: u64,
     /// Total number of extents that make up this region.
     pub extent_count: u32,
+}
+
+/// A tree representation of the info and status of all parts of a Volume.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeInfo {
+    Volume {
+        sub_volumes: Vec<VolumeInfo>,
+        read_only_parent: Option<Box<VolumeInfo>>,
+    },
+
+    Upstairs {
+        state: UpstairsInfoStatus,
+        block_size: Option<u64>,
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        generation: u64,
+        read_only: bool,
+        encrypted: bool,
+        reconcile_in_progress: bool,
+        live_repair_in_progress: bool,
+        targets: Vec<DownstairsInfo>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownstairsInfoNegotiationStatus {
+    WaitConnect,
+    Negotiating,
+    WaitQuorum,
+    Reconcile,
+    LiveRepairReady,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownstairsInfoConnectionMode {
+    New,
+    Offline,
+    Faulted,
+    Replaced,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DownstairsInfo {
+    pub region_id: Option<Uuid>,
+    pub target_addr: Option<SocketAddr>,
+    pub repair_addr: Option<SocketAddr>,
+    pub state: DownstairsInfoStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum DownstairsInfoStatus {
+    Connecting {
+        state: DownstairsInfoNegotiationStatus,
+        mode: DownstairsInfoConnectionMode,
+    },
+    Active,
+    LiveRepair,
+    Stopping,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstairsInfoStatus {
+    Initializing,
+    GoActive,
+    Active,
+    Deactivating,
+    Disabled,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_region_gen_field_serialization_consistency() {
+        // Test that the Rust field named "generation" serializes to JSON as "gen"
+        // and deserializes from JSON "gen" back to Rust field "generation"
+        use std::net::SocketAddr;
+
+        // Create a Region with generation field
+        let original_vcr = VolumeConstructionRequest::Region {
+            block_size: 512,
+            blocks_per_extent: 100,
+            extent_count: 10,
+            opts: CrucibleOpts {
+                id: "12345678-1234-1234-1234-123456789abc".parse().unwrap(),
+                target: vec!["127.0.0.1:3810".parse::<SocketAddr>().unwrap()],
+                lossy: false,
+                flush_timeout: None,
+                key: None,
+                cert_pem: None,
+                key_pem: None,
+                root_cert_pem: None,
+                control: None,
+                read_only: false,
+            },
+            generation: 42,
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&original_vcr).unwrap();
+
+        // Verify JSON contains "gen" not "generation"
+        assert!(
+            json.contains("\"gen\""),
+            "JSON should contain 'gen' field, got: {}",
+            json
+        );
+        assert!(
+            !json.contains("\"generation\""),
+            "JSON should not contain 'generation' field, got: {}",
+            json
+        );
+
+        // Deserialize back
+        let deserialized_vcr: VolumeConstructionRequest =
+            serde_json::from_str(&json).expect("Failed to deserialize");
+
+        // Verify the Rust field is accessible as "generation"
+        if let VolumeConstructionRequest::Region { generation, .. } =
+            deserialized_vcr
+        {
+            assert_eq!(generation, 42, "generation field should be 42");
+        } else {
+            panic!("Expected Region variant");
+        }
+
+        // Also test that manually created JSON with "gen" works
+        let manual_json = r#"{
+            "type": "region",
+            "block_size": 512,
+            "blocks_per_extent": 100,
+            "extent_count": 10,
+            "opts": {
+                "id": "12345678-1234-1234-1234-123456789abc",
+                "target": ["127.0.0.1:3810"],
+                "lossy": false,
+                "flush_timeout": null,
+                "key": null,
+                "cert_pem": null,
+                "key_pem": null,
+                "root_cert_pem": null,
+                "control": null,
+                "read_only": false
+            },
+            "gen": 99
+        }"#;
+
+        let manual_vcr: VolumeConstructionRequest =
+            serde_json::from_str(manual_json)
+                .expect("Failed to deserialize manual JSON");
+
+        if let VolumeConstructionRequest::Region { generation, .. } = manual_vcr
+        {
+            assert_eq!(generation, 99, "generation field should be 99");
+        } else {
+            panic!("Expected Region variant");
+        }
+    }
 }

@@ -1,23 +1,29 @@
-// Copyright 2024 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
+
 use std::{
     net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::{
-    io_limits::{IOLimitView, IOLimits},
     BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, ReadBlockContext,
     ReplaceResult, UpstairsAction,
+    io_limits::{IOLimitView, IOLimits},
+    up_main,
+    volume::build_region_definition,
 };
+use crucible_client_types::CrucibleOpts;
 use crucible_client_types::RegionExtentInfo;
-use crucible_common::{build_logger, BlockIndex, CrucibleError};
+use crucible_client_types::VolumeInfo;
+use crucible_common::{BlockIndex, CrucibleError, build_logger};
 use crucible_protocol::SnapshotDetails;
+use oximeter::types::ProducerRegistry;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-use slog::{info, warn, Logger};
+use slog::{Logger, info, warn};
 use tokio::sync::mpsc;
-use tracing::{instrument, span, Level};
+use tracing::{Level, instrument, span};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -166,6 +172,22 @@ impl Guest {
         (guest, io)
     }
 
+    pub fn create_and_up_main(
+        log: Logger,
+        opts: CrucibleOpts,
+        extent_info: RegionExtentInfo,
+        generation: u64,
+        producer_registry: Option<ProducerRegistry>,
+    ) -> anyhow::Result<Guest> {
+        let region_def = build_region_definition(&extent_info, &opts)?;
+        let (guest, io) = Guest::new(Some(log));
+
+        let _join_handle =
+            up_main(opts, generation, Some(region_def), io, producer_registry)?;
+
+        Ok(guest)
+    }
+
     /*
      * This is used to submit a new BlockOp IO request to Crucible.
      *
@@ -213,6 +235,16 @@ impl Guest {
         self.send_and_wait(|done| BlockOp::FaultDownstairs { client_id, done })
             .await
     }
+
+    /// Run the work that the automatic flush timer performs
+    ///
+    /// This is used in tests to deterministically trigger the internal flush
+    /// that a read-only guest flush intentionally skips.
+    #[cfg(test)]
+    pub async fn flush_check(&self) -> Result<(), CrucibleError> {
+        self.send_and_wait(|done| BlockOp::FlushCheck { done })
+            .await
+    }
 }
 
 #[async_trait]
@@ -228,19 +260,23 @@ impl BlockIO for Guest {
         Ok(())
     }
 
-    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
+    async fn activate_with_gen(
+        &self,
+        generation: u64,
+    ) -> Result<(), CrucibleError> {
         let (rx, done) = BlockOpWaiter::pair();
-        self.send(BlockOp::GoActiveWithGen { gen, done }).await;
+        self.send(BlockOp::GoActiveWithGen { generation, done })
+            .await;
         info!(
             self.log,
-            "The guest has requested activation with gen:{}", gen
+            "The guest has requested activation with gen:{generation}"
         );
 
         rx.wait().await?;
 
         info!(
             self.log,
-            "The guest has finished waiting for activation with:{}", gen
+            "The guest has finished waiting for activation with:{generation}"
         );
 
         Ok(())
@@ -261,6 +297,7 @@ impl BlockIO for Guest {
         self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
             .await
     }
+
     async fn query_extent_info(
         &self,
     ) -> Result<Option<RegionExtentInfo>, CrucibleError> {
@@ -268,6 +305,14 @@ impl BlockIO for Guest {
             .send_and_wait(|done| BlockOp::QueryExtentInfo { done })
             .await?;
         Ok(Some(ei))
+    }
+
+    async fn query_volume_info(&self) -> Result<VolumeInfo, CrucibleError> {
+        let status = self
+            .send_and_wait(|done| BlockOp::QueryVolumeInfo { done })
+            .await?;
+
+        Ok(status)
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {

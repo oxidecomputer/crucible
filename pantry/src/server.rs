@@ -4,16 +4,23 @@ use super::pantry::Pantry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
-use base64::{engine, Engine};
-use crucible_pantry_api::*;
-use crucible_pantry_types::*;
+use anyhow::{Result, anyhow};
+use base64::{Engine, engine};
+use crucible_pantry_api::{CruciblePantryApi, crucible_pantry_api_mod};
+use crucible_pantry_types::pantry::{
+    AttachBackgroundRequest, AttachRequest, AttachResult, BulkReadRequest,
+    BulkReadResponse, BulkWriteRequest, ImportFromUrlRequest,
+    ImportFromUrlResponse, JobPath, JobPollResponse, JobResultOkResponse,
+    PantryStatus, ReplaceRequest, ReplaceResult, ScrubResponse,
+    SnapshotRequest, ValidateRequest, ValidateResponse, VolumePath,
+    VolumeStatus,
+};
 use dropshot::{
     ClientSpecifiesVersionInHeader, HandlerTaskMode, HttpError,
     HttpResponseDeleted, HttpResponseOk, HttpResponseUpdatedNoContent,
     Path as TypedPath, RequestContext, TypedBody, VersionPolicy,
 };
-use slog::{info, o, Logger};
+use slog::{Logger, info, o};
 use std::result::Result as SResult;
 
 #[derive(Debug)]
@@ -84,7 +91,7 @@ impl CruciblePantryApi for CruciblePantryImpl {
         rqctx: RequestContext<Self::Context>,
         path: TypedPath<VolumePath>,
         body: TypedBody<ReplaceRequest>,
-    ) -> SResult<HttpResponseOk<crucible::ReplaceResult>, HttpError> {
+    ) -> SResult<HttpResponseOk<ReplaceResult>, HttpError> {
         let path = path.into_inner();
         let body = body.into_inner();
         let pantry = rqctx.context();
@@ -262,6 +269,7 @@ pub fn run_server(
             + crate::pantry::PantryEntry::MAX_CHUNK_SIZE * 2,
         default_handler_task_mode: HandlerTaskMode::Detached,
         log_headers: vec![],
+        compression: dropshot::CompressionConfig::None,
     })
     .version_policy(VersionPolicy::Dynamic(Box::new(
         ClientSpecifiesVersionInHeader::new(

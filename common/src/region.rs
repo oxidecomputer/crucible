@@ -1,5 +1,5 @@
 // Copyright 2021 Oxide Computer Company
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

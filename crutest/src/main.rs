@@ -1,9 +1,10 @@
-// Copyright 2023 Oxide Computer Company
-use anyhow::{anyhow, bail, Result};
+// Copyright 2026 Oxide Computer Company
+
+use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use clap::Parser;
-use futures::stream::FuturesOrdered;
 use futures::StreamExt;
+use futures::stream::FuturesOrdered;
 use human_bytes::human_bytes;
 use indicatif::{ProgressBar, ProgressStyle};
 use oximeter::types::ProducerRegistry;
@@ -12,15 +13,15 @@ use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
-use slog::{info, o, warn, Logger};
+use slog::{Logger, info, o, warn};
 use std::fmt;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -32,11 +33,12 @@ mod protocol;
 mod stats;
 pub use stats::*;
 
-use crucible::volume::{VolumeBuilder, VolumeInfo};
+use crucible::volume::VolumeBuilder;
+use crucible::volume::VolumeExtentInfo;
 use crucible::*;
 use crucible_client_types::RegionExtentInfo;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
-use dsc_client::{types::DownstairsState, Client};
+use dsc_client::{Client, types::DownstairsState};
 use repair_client::Client as repair_client;
 
 /*
@@ -139,6 +141,8 @@ enum Workload {
     /// Select a random offset/length, then Write/Flush/Read that
     /// offset/length.
     WFR,
+    /// Do reads and writes, keep going if there are errors.
+    Yolo,
 }
 
 #[derive(Debug, Parser)]
@@ -172,8 +176,8 @@ pub struct Opt {
     #[clap(long, global = true, action)]
     flush_timeout: Option<f32>,
 
-    #[clap(short, global = true, long, default_value_t = 0, action)]
-    gen: u64,
+    #[clap(short, global = true, long = "gen", default_value_t = 0, action)]
+    generation: u64,
 
     /// The key for an encrypted downstairs.
     #[clap(short, global = true, long, action)]
@@ -204,7 +208,7 @@ pub struct Opt {
     #[clap(short, global = true, long, action, conflicts_with = "stable")]
     quit: bool,
 
-    /// For the verify test, if this option is included we will allow
+    /// For the verify and yolo tests, if this option is included we will allow
     /// the write log range of data to pass the verify_volume check.
     #[clap(long, global = true, action)]
     range: bool,
@@ -374,6 +378,14 @@ impl RandReadWriteConfig {
     }
 }
 
+/// For tests that need to pick an operation to do.
+#[derive(Debug, Copy, Clone)]
+enum Op {
+    Flush,
+    Read,
+    Write,
+}
+
 /// Configuration for `bufferbloat_workload`
 #[derive(Copy, Clone, Debug)]
 struct BufferbloatConfig {
@@ -401,7 +413,7 @@ impl BufferbloatConfig {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DiskInfo {
-    volume_info: VolumeInfo,
+    volume_info: VolumeExtentInfo,
     write_log: WriteLog,
     max_block_io: usize,
 }
@@ -514,7 +526,12 @@ impl WriteLog {
     pub fn update_wc(&mut self, index: usize) {
         assert!(self.count_cur[index] >= self.count_min[index]);
         // TODO: handle more than u32 max writes to the same location.
-        self.count_cur[index] += 1;
+        self.count_cur[index] = self.count_cur[index].wrapping_add(1);
+    }
+    pub fn undo_update_wc(&mut self, index: usize) {
+        assert!(self.count_cur[index] >= self.count_min[index]);
+        // TODO: handle more than u32 max writes to the same location.
+        self.count_cur[index] = self.count_cur[index].wrapping_sub(1);
     }
 
     // This returns the value we should expect to find at the given index,
@@ -604,15 +621,6 @@ impl WriteLog {
             let shift = self.count_min[index] / 256;
 
             let s_value = value as u32 + (256 * shift);
-            println!(
-                "Shift {}, v:{} sv:{} min:{} cur:{}",
-                shift,
-                value,
-                s_value,
-                self.count_min[index],
-                self.count_cur[index],
-            );
-
             res = s_value >= self.count_min[index]
                 && s_value <= self.count_cur[index];
 
@@ -664,10 +672,8 @@ async fn load_write_log(
     /*
      * Only verify the volume if requested.
      */
-    if verify {
-        if let Err(e) = verify_volume(volume, di, false).await {
-            bail!("Initial volume verify failed: {:?}", e)
-        }
+    if verify && let Err(e) = verify_volume(volume, di, false).await {
+        bail!("Initial volume verify failed: {:?}", e)
     }
     Ok(())
 }
@@ -760,7 +766,7 @@ async fn make_a_volume(
         };
         info!(test_log, "Using VCR: {:?}", vcr);
 
-        if opt.gen != 0 {
+        if opt.generation != 0 {
             warn!(test_log, "gen option is ignored when VCR is provided");
         }
         if !opt.target.is_empty() {
@@ -839,7 +845,7 @@ async fn make_a_volume(
                 .add_subvolume_create_guest(
                     crucible_opts.clone(),
                     extent_info.clone(),
-                    opt.gen,
+                    opt.generation,
                     pr.clone(),
                 )
                 .await
@@ -897,7 +903,7 @@ async fn make_a_volume(
             .add_subvolume_create_guest(
                 crucible_opts.clone(),
                 extent_info,
-                opt.gen,
+                opt.generation,
                 pr,
             )
             .await
@@ -968,13 +974,13 @@ async fn main() -> Result<()> {
         // so we can pass that on to the upstairs.
         // Finally, spin out a task with the server to provide the endpoint
         // so metrics can be collected by Oximeter.
-        println!(
-            "Creating a metric collect endpoint at {}",
-            opt.metric_collect
+        info!(
+            test_log,
+            "Creating a metric collect endpoint at {}", opt.metric_collect
         );
         match client_oximeter(opt.metric_collect, opt.metric_register) {
             Err(e) => {
-                println!("Failed to register with Oximeter {:?}", e);
+                info!(test_log, "Failed to register with Oximeter {:?}", e);
                 pr = None;
             }
             Ok(server) => {
@@ -1009,16 +1015,19 @@ async fn main() -> Result<()> {
     }
 
     if opt.retry_activate {
-        while let Err(e) = volume.activate_with_gen(opt.gen).await {
-            println!("Activate returns: {:#}  Retrying", e);
+        while let Err(e) = volume.activate_with_gen(opt.generation).await {
+            info!(test_log, "Activate returns: {:#}  Retrying", e);
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         }
-        println!("Activate successful");
+        info!(test_log, "Activate successful");
     } else {
-        volume.activate_with_gen(opt.gen).await?;
+        volume.activate_with_gen(opt.generation).await?;
     }
 
-    println!("Wait for a query_work_queue command to finish before sending IO");
+    info!(
+        test_log,
+        "Wait for a query_work_queue command to finish before sending IO"
+    );
     volume.query_work_queue().await?;
 
     loop {
@@ -1028,7 +1037,7 @@ async fn main() -> Result<()> {
             }
             _ => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                println!("Waiting for upstairs to be active");
+                info!(test_log, "Waiting for upstairs to be active");
             }
         }
     }
@@ -1065,7 +1074,7 @@ async fn main() -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<SignalAction>(4);
     if opt.continuous {
-        println!("Setup signal handler");
+        info!(test_log, "Setup signal handler");
         let signals = Signals::new([SIGUSR1, SIGUSR2])?;
         tokio::spawn(handle_signals(signals, shutdown_tx));
     }
@@ -1076,19 +1085,19 @@ async fn main() -> Result<()> {
      */
     match opt.workload {
         Workload::Balloon => {
-            println!("Run balloon test");
+            info!(test_log, "Run balloon test");
             balloon_workload(&volume, &mut disk_info).await?;
         }
         Workload::Big => {
-            println!("Run big test");
+            info!(test_log, "Run big test");
             big_workload(&volume, &mut disk_info).await?;
         }
         Workload::Biggest => {
-            println!("Run biggest IO test");
+            info!(test_log, "Run biggest IO test");
             biggest_io_workload(&volume, &mut disk_info).await?;
         }
         Workload::Burst => {
-            println!("Run burst test (demo in a loop)");
+            info!(test_log, "Run burst test (demo in a loop)");
             burst_workload(&volume, 460, 190, &mut disk_info, &opt.verify_out)
                 .await?;
         }
@@ -1104,22 +1113,22 @@ async fn main() -> Result<()> {
              * not enough for a more exhaustive test.
              */
             let count = opt.count.unwrap_or(5);
-            println!("Run deactivate test");
-            deactivate_workload(&volume, count, &mut disk_info, opt.gen)
+            info!(test_log, "Run deactivate test");
+            deactivate_workload(&volume, count, &mut disk_info, opt.generation)
                 .await?;
         }
         Workload::Demo => {
-            println!("Run Demo test");
+            info!(test_log, "Run Demo test");
             let count = opt.count.unwrap_or(300);
             demo_workload(&volume, count, &mut disk_info).await?;
         }
         Workload::Dep => {
-            println!("Run dep test");
+            info!(test_log, "Run dep test");
             dep_workload(&volume, &mut disk_info).await?;
         }
 
         Workload::Dirty => {
-            println!("Run dirty test");
+            info!(test_log, "Run dirty test");
             let count = opt.count.unwrap_or(10);
             dirty_workload(&volume, &mut disk_info, count).await?;
 
@@ -1132,18 +1141,18 @@ async fn main() -> Result<()> {
              */
             if let Some(vo) = &opt.verify_out {
                 write_json(vo, &disk_info.write_log, true)?;
-                println!("Wrote out file {vo:?}");
+                info!(test_log, "Wrote out file {vo:?}");
             }
             return Ok(());
         }
 
         Workload::FastFill => {
-            println!("FastFill test");
+            info!(test_log, "FastFill test");
             fill_sparse_workload(&volume, &mut disk_info).await?;
         }
 
         Workload::Fill { skip_verify } => {
-            println!("Fill test");
+            info!(test_log, "Fill test");
             fill_workload(&volume, &mut disk_info, skip_verify).await?;
         }
 
@@ -1190,7 +1199,7 @@ async fn main() -> Result<()> {
         }
 
         Workload::One => {
-            println!("One test");
+            info!(test_log, "One test");
             one_workload(&volume, &mut disk_info).await?;
         }
         Workload::RandRead { cfg } => {
@@ -1235,7 +1244,7 @@ async fn main() -> Result<()> {
             }
         }
         Workload::Nothing => {
-            println!("Do nothing test, just start");
+            info!(test_log, "Do nothing test, just start");
             /*
              * If we don't want to quit right away, then just loop
              * forever
@@ -1248,13 +1257,13 @@ async fn main() -> Result<()> {
             }
         }
         Workload::Repair => {
-            println!("Run Repair workload");
+            info!(test_log, "Run Repair workload");
             let count = opt.count.unwrap_or(10);
             repair_workload(&volume, count, &mut disk_info).await?;
             drop(volume);
             if let Some(vo) = &opt.verify_out {
                 write_json(vo, &disk_info.write_log, true)?;
-                println!("Wrote out file {vo:?}");
+                info!(test_log, "Wrote out file {vo:?}");
             }
             return Ok(());
         }
@@ -1353,8 +1362,8 @@ async fn main() -> Result<()> {
                 &mut disk_info,
                 targets,
                 dsc_client,
-                opt.gen,
-                test_log,
+                opt.generation,
+                test_log.clone(),
             )
             .await?;
         }
@@ -1399,13 +1408,13 @@ async fn main() -> Result<()> {
                 &mut disk_info,
                 targets,
                 dsc_client,
-                opt.gen,
-                test_log,
+                opt.generation,
+                test_log.clone(),
             )
             .await?;
         }
         Workload::Span => {
-            println!("Span test");
+            info!(test_log, "Span test");
             span_workload(&volume, &mut disk_info).await?;
         }
         Workload::Verify => {
@@ -1421,12 +1430,12 @@ async fn main() -> Result<()> {
             }
             if let Some(vo) = &opt.verify_out {
                 write_json(vo, &disk_info.write_log, true)?;
-                println!("Wrote out file {vo:?}");
+                info!(test_log, "Wrote out file {vo:?}");
             }
             if opt.quit {
-                println!("Verify test completed");
+                info!(test_log, "Verify test completed");
             } else {
-                println!("Verify read loop begins");
+                info!(test_log, "Verify read loop begins");
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(10))
                         .await;
@@ -1437,7 +1446,7 @@ async fn main() -> Result<()> {
                     }
                     let mut wc = volume.show_work().await?;
                     while wc.up_count + wc.ds_count > 0 {
-                        println!("Waiting for all work to be completed");
+                        info!(test_log, "Waiting for all work to be completed");
                         tokio::time::sleep(tokio::time::Duration::from_secs(
                             10,
                         ))
@@ -1451,38 +1460,61 @@ async fn main() -> Result<()> {
             panic!("This case handled above");
         }
         Workload::WFR => {
-            println!("Run Write-Flush-Read random IO test");
+            info!(test_log, "Run Write-Flush-Read random IO test");
             let count = opt.count.unwrap_or(10);
             write_flush_read_workload(&volume, count, &mut disk_info).await?;
         }
+        Workload::Yolo => {
+            // Either we have a count, or we run until we get a signal.
+            let mut wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else {
+                    let count = opt.count.unwrap_or(500);
+                    WhenToQuit::Count { count }
+                }
+            };
+
+            yolo_workload(&volume, &mut wtq, &mut disk_info, false, opt.range)
+                .await?;
+        }
     }
 
-    if opt.verify_at_end {
-        if let Err(e) = verify_volume(&volume, &mut disk_info, false).await {
-            bail!("Final volume verify failed: {:?}", e)
-        }
+    if opt.verify_at_end
+        && let Err(e) = verify_volume(&volume, &mut disk_info, false).await
+    {
+        bail!("Final volume verify failed: {:?}", e)
     }
 
     if let Some(vo) = &opt.verify_out {
         write_json(vo, &disk_info.write_log, true)?;
-        println!("Wrote out file {vo:?}");
+        info!(test_log, "Wrote out file {vo:?}");
     }
 
-    println!("CLIENT: Tests done.  All submitted work has been ACK'd");
+    info!(
+        test_log,
+        "CLIENT: Tests done.  All submitted work has been ACK'd"
+    );
     loop {
         let wc = volume.show_work().await?;
-        println!(
+        info!(
+            test_log,
             "CLIENT: Up:{} ds:{} act:{}",
-            wc.up_count, wc.ds_count, wc.active_count
+            wc.up_count,
+            wc.ds_count,
+            wc.active_count
         );
         if opt.quit && wc.up_count + wc.ds_count == 0 {
-            println!("CLIENT: All crucible jobs finished, exiting program");
+            info!(
+                test_log,
+                "CLIENT: All crucible jobs finished, exiting program"
+            );
             return Ok(());
         } else if opt.stable
             && wc.up_count + wc.ds_count == 0
             && wc.active_count == downstairs_in_volume
         {
-            println!("CLIENT: All jobs finished, all DS active.");
+            info!(test_log, "CLIENT: All jobs finished, all DS active.");
             return Ok(());
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
@@ -2223,6 +2255,174 @@ async fn generic_workload(
     Ok(())
 }
 
+async fn yolo_workload(
+    volume: &Volume,
+    wtq: &mut WhenToQuit,
+    di: &mut DiskInfo,
+    read_only: bool,
+    range: bool,
+) -> Result<()> {
+    // TODO: Allow the user to specify a seed here.
+    let mut rng = rand_chacha::ChaCha8Rng::from_os_rng();
+
+    let total_blocks = di.volume_info.total_blocks();
+
+    let max_io_size = std::cmp::min(10, total_blocks);
+
+    let mut reads = 0;
+    let mut writes = 0;
+    let mut flushes = 0;
+    let mut read_errors = 0;
+    let mut write_errors = 0;
+    let mut verify_errors = 0;
+    let mut flush_errors = 0;
+    let mut last_print = Instant::now();
+    for c in 1.. {
+        // Read or Write both need this
+        // Pick a random size (in blocks) for the IO, up to max_io_size
+        let size = rng.random_range(1..=max_io_size);
+
+        // Once we have our IO size, decide where the starting offset should
+        // be, which is the total possible size minus the randomly chosen
+        // IO size.
+        let block_max = total_blocks - size + 1;
+        let block_index = rng.random_range(0..block_max);
+
+        // Convert offset and length to their byte values.
+        let offset = BlockIndex(block_index as u64);
+
+        // Select our next operation.
+        let choices = [
+            (Op::Flush, 1),
+            (Op::Read, 49),
+            (Op::Write, if read_only { 0 } else { 50 }),
+        ];
+        match choices.choose_weighted(&mut rng, |item| item.1).unwrap().0 {
+            Op::Flush => match volume.flush(None).await {
+                Ok(_) => {
+                    flushes += 1;
+                    di.write_log.commit();
+                }
+                Err(e) => {
+                    flush_errors += 1;
+                    eprintln!("Flush error: {:?}", e);
+                }
+            },
+            Op::Write => {
+                // Write
+                // Update the write count for all blocks we plan to write to.
+                for i in 0..size {
+                    di.write_log.update_wc(block_index + i);
+                }
+                let data = fill_vec(
+                    block_index,
+                    size,
+                    &di.write_log,
+                    di.volume_info.block_size,
+                );
+                assert_eq!(data[1], di.write_log.get_seed(block_index));
+                match volume.write(offset, data).await {
+                    Ok(_) => {
+                        writes += 1;
+                    }
+                    Err(e) => {
+                        write_errors += 1;
+                        eprintln!("Write error: {:?}", e);
+                        for i in 0..size {
+                            di.write_log.undo_update_wc(block_index + i);
+                        }
+                    }
+                }
+            }
+            Op::Read => {
+                // Read (+ verify)
+                let mut data = crucible::Buffer::repeat(
+                    255,
+                    size,
+                    di.volume_info.block_size as usize,
+                );
+                match volume.read(offset, &mut data).await {
+                    Ok(_) => {
+                        reads += 1;
+                        let data_len = data.len();
+                        let dl = data.into_bytes();
+                        match validate_vec(
+                            dl,
+                            block_index,
+                            &mut di.write_log,
+                            di.volume_info.block_size,
+                            range,
+                        ) {
+                            ValidateStatus::Bad => {
+                                eprintln!(
+                                    "Verify Error at {block_index} len:{data_len}"
+                                );
+                                verify_errors += 1;
+                            }
+                            ValidateStatus::InRange => {
+                                // If the caller is okay with the expected value
+                                // being in the range since the last commit,
+                                // then this is not an error.  If the caller
+                                // does not want this (range is false) then
+                                // this is an error.
+                                if !range {
+                                    eprintln!(
+                                        "Verify Error out of range at {block_index} len:{data_len}"
+                                    );
+                                    verify_errors += 1;
+                                }
+                            }
+                            ValidateStatus::Good => {}
+                        }
+                    }
+                    Err(e) => {
+                        read_errors += 1;
+                        eprintln!("read failed: {}", e);
+                    }
+                }
+            }
+        }
+        if last_print.elapsed() >= Duration::from_secs(10) {
+            println!(
+                "R:{} W:{} F:{} RE:{} WE:{} VE:{} FE:{}",
+                reads,
+                writes,
+                flushes,
+                read_errors,
+                write_errors,
+                verify_errors,
+                flush_errors
+            );
+            last_print = Instant::now();
+        }
+
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if c > *count {
+                    break;
+                }
+            }
+            WhenToQuit::Signal { shutdown_rx } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(volume, di, range).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {} // Ignore everything else
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // Make use of dsc to stop and start a downstairs while sending IO.  This
 // should trigger the replay code path.
 async fn replay_workload(
@@ -2307,7 +2507,7 @@ async fn replace_while_reconcile(
     di: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
-    mut gen: u64,
+    mut generation: u64,
     log: Logger,
 ) -> Result<()> {
     assert!(targets.len() % 3 == 1);
@@ -2368,10 +2568,10 @@ async fn replace_while_reconcile(
         info!(log, "[{c}] Request the upstairs activate");
         // Spawn a task to re-activate, this will not finish till all three
         // downstairs have reconciled.
-        gen += 1;
+        generation += 1;
         let gc = volume.clone();
         let handle =
-            tokio::spawn(async move { gc.activate_with_gen(gen).await });
+            tokio::spawn(async move { gc.activate_with_gen(generation).await });
 
         info!(log, "[{c}] wait {active_wait} for reconcile to start");
         tokio::time::sleep(tokio::time::Duration::from_secs(active_wait)).await;
@@ -2504,7 +2704,7 @@ async fn replace_before_active(
     di: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
-    mut gen: u64,
+    mut generation: u64,
     log: Logger,
 ) -> Result<()> {
     assert!(targets.len() % 3 == 1);
@@ -2547,10 +2747,10 @@ async fn replace_before_active(
         info!(log, "[{c}] Request the upstairs activate");
         // Spawn a task to re-activate, this will not finish till all three
         // downstairs respond.
-        gen += 1;
+        generation += 1;
         let gc = volume.clone();
         let handle =
-            tokio::spawn(async move { gc.activate_with_gen(gen).await });
+            tokio::spawn(async move { gc.activate_with_gen(generation).await });
 
         //  Give the activation request time to percolate in the upstairs.
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
@@ -2738,11 +2938,11 @@ async fn replace_workload(
                 break;
             }
             // See (if provided) we have reached a requested number of loops
-            if let Some(stop_at) = stop_at {
-                if c >= stop_at {
-                    println!("[{c}] Replace task ends as count was reached");
-                    break;
-                }
+            if let Some(stop_at) = stop_at
+                && c >= stop_at
+            {
+                println!("[{c}] Replace task ends as count was reached");
+                break;
             }
 
             // No stopping yet, let's do another loop.
@@ -3262,7 +3462,7 @@ async fn deactivate_workload(
     volume: &Volume,
     count: usize,
     di: &mut DiskInfo,
-    mut gen: u64,
+    mut generation: u64,
 ) -> Result<()> {
     let count_width = count.to_string().len();
     for c in 1..=count {
@@ -3303,8 +3503,8 @@ async fn deactivate_workload(
             width = count_width
         );
         let mut retry = 1;
-        gen += 1;
-        while let Err(e) = volume.activate_with_gen(gen).await {
+        generation += 1;
+        while let Err(e) = volume.activate_with_gen(generation).await {
             println!(
                 "{:>0width$}/{:>0width$}, Retry:{} activate {:?}",
                 c,

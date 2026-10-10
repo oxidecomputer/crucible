@@ -1,4 +1,4 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2026 Oxide Computer Company
 
 use super::*;
 use crate::guest::Guest;
@@ -13,6 +13,7 @@ use tokio::time::Instant;
 use crucible_client_types::RegionExtentInfo;
 use crucible_client_types::ReplacementRequestCheck;
 use crucible_client_types::VolumeConstructionRequest;
+use crucible_client_types::VolumeInfo;
 
 /// Creates a `RegionDefinition` from a set of parameters in a region
 /// construction request.
@@ -21,7 +22,7 @@ use crucible_client_types::VolumeConstructionRequest;
 // for each downstairs, each bearing the expected downstairs UUID for that
 // downstairs, but this requires those UUIDs to be present in `opts`, which
 // currently doesn't store them.
-fn build_region_definition(
+pub(crate) fn build_region_definition(
     extent_info: &RegionExtentInfo,
     opts: &CrucibleOpts,
 ) -> Result<RegionDefinition> {
@@ -193,16 +194,17 @@ impl VolumeBuilder {
         &mut self,
         opts: CrucibleOpts,
         extent_info: RegionExtentInfo,
-        gen: u64,
+        generation: u64,
         producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
-        let region_def = build_region_definition(&extent_info, &opts)?;
-        let (guest, io) = Guest::new(Some(self.0.log.clone()));
-
-        let _join_handle =
-            up_main(opts, gen, Some(region_def), io, producer_registry)?;
-
-        self.add_subvolume(Arc::new(guest)).await
+        self.add_subvolume(Arc::new(Guest::create_and_up_main(
+            self.0.log.clone(),
+            opts,
+            extent_info,
+            generation,
+            producer_registry,
+        )?))
+        .await
     }
 
     // Add a "parent" source for blocks.
@@ -258,6 +260,100 @@ impl From<VolumeInner> for Volume {
 impl From<VolumeBuilder> for Volume {
     fn from(v: VolumeBuilder) -> Volume {
         Volume(v.0.into())
+    }
+}
+
+fn to_arc_block_io<T>(b: T) -> Arc<dyn BlockIO + Send + Sync>
+where
+    T: BlockIO + Send + Sync + 'static,
+{
+    Arc::new(b)
+}
+
+#[async_recursion]
+async fn blockio_from_construction_request(
+    request: VolumeConstructionRequest,
+    producer_registry: Option<ProducerRegistry>,
+    log: Logger,
+) -> Result<Arc<dyn BlockIO + Send + Sync>> {
+    match request {
+        VolumeConstructionRequest::Volume {
+            id,
+            block_size,
+            sub_volumes,
+            read_only_parent,
+        } => {
+            let mut vol =
+                VolumeBuilder::new_with_id(block_size, id, log.clone());
+
+            for subreq in sub_volumes {
+                vol.add_subvolume(
+                    blockio_from_construction_request(
+                        subreq,
+                        producer_registry.clone(),
+                        log.clone(),
+                    )
+                    .await?,
+                )
+                .await?;
+            }
+
+            if let Some(read_only_parent) = read_only_parent {
+                vol.add_read_only_parent(
+                    blockio_from_construction_request(
+                        *read_only_parent,
+                        producer_registry,
+                        log,
+                    )
+                    .await?,
+                )
+                .await?;
+            }
+
+            let volume: Volume = vol.into();
+
+            Ok(volume.as_blockio())
+        }
+
+        VolumeConstructionRequest::Url {
+            id,
+            block_size,
+            url,
+        } => {
+            let bio = ReqwestBlockIO::new(id, block_size, url).await?;
+            Ok(to_arc_block_io(bio))
+        }
+
+        VolumeConstructionRequest::Region {
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts,
+            generation,
+        } => {
+            let guest = Guest::create_and_up_main(
+                log.clone(),
+                opts,
+                RegionExtentInfo {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                },
+                generation,
+                producer_registry,
+            )?;
+
+            Ok(to_arc_block_io(guest))
+        }
+
+        VolumeConstructionRequest::File {
+            id,
+            block_size,
+            path,
+        } => {
+            let bio = FileBlockIO::new(id, block_size, path)?;
+            Ok(to_arc_block_io(bio))
+        }
     }
 }
 
@@ -615,7 +711,7 @@ impl Volume {
 
     pub async fn volume_extent_info(
         &self,
-    ) -> Result<VolumeInfo, CrucibleError> {
+    ) -> Result<VolumeExtentInfo, CrucibleError> {
         // A volume has multiple levels of extent info, not just one.
         let mut volumes = Vec::new();
 
@@ -626,7 +722,7 @@ impl Volume {
                     // it, we verify that the block sizes match, so we never
                     // expect there to be a mismatch.
                     assert_eq!(self.block_size, ei.block_size);
-                    let svi = SubVolumeInfo {
+                    let svi = SubVolumeExtentInfo {
                         blocks_per_extent: ei.blocks_per_extent,
                         extent_count: ei.extent_count,
                     };
@@ -642,7 +738,7 @@ impl Volume {
             }
         }
 
-        Ok(VolumeInfo {
+        Ok(VolumeExtentInfo {
             block_size: self.block_size,
             volumes,
         })
@@ -670,7 +766,7 @@ impl BlockIO for VolumeInner {
             }
         }
 
-        if let Some(ref read_only_parent) = &self.read_only_parent {
+        if let Some(read_only_parent) = &self.read_only_parent {
             read_only_parent.activate().await?;
             info!(
                 self.log,
@@ -681,9 +777,13 @@ impl BlockIO for VolumeInner {
 
         Ok(())
     }
-    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
+
+    async fn activate_with_gen(
+        &self,
+        generation: u64,
+    ) -> Result<(), CrucibleError> {
         for sub_volume in &self.sub_volumes {
-            sub_volume.activate_with_gen(gen).await?;
+            sub_volume.activate_with_gen(generation).await?;
             info!(
                 self.log,
                 "Activated sub_volume {}",
@@ -698,8 +798,8 @@ impl BlockIO for VolumeInner {
             }
         }
 
-        if let Some(ref read_only_parent) = &self.read_only_parent {
-            read_only_parent.activate_with_gen(gen).await?;
+        if let Some(read_only_parent) = &self.read_only_parent {
+            read_only_parent.activate_with_gen(generation).await?;
             info!(
                 self.log,
                 "Activated read_only_parent {}",
@@ -728,7 +828,7 @@ impl BlockIO for VolumeInner {
             all_wq.active_count += sv_wq.active_count;
         }
 
-        if let Some(ref read_only_parent) = &self.read_only_parent {
+        if let Some(read_only_parent) = &self.read_only_parent {
             let rop_wq = read_only_parent.query_work_queue().await?;
             all_wq.up_count += rop_wq.up_count;
             all_wq.ds_count += rop_wq.ds_count;
@@ -753,7 +853,7 @@ impl BlockIO for VolumeInner {
             sub_volume.deactivate().await?;
         }
 
-        if let Some(ref read_only_parent) = &self.read_only_parent {
+        if let Some(read_only_parent) = &self.read_only_parent {
             read_only_parent.deactivate().await?;
         }
 
@@ -767,13 +867,35 @@ impl BlockIO for VolumeInner {
             }
         }
 
-        if let Some(ref read_only_parent) = &self.read_only_parent {
+        if let Some(read_only_parent) = &self.read_only_parent {
             if !read_only_parent.query_is_active().await? {
                 return Ok(false);
             }
         }
 
         Ok(true)
+    }
+
+    async fn query_volume_info(&self) -> Result<VolumeInfo, CrucibleError> {
+        Ok(VolumeInfo::Volume {
+            sub_volumes: {
+                let mut statuses = Vec::with_capacity(self.sub_volumes.len());
+
+                for sub_volume in &self.sub_volumes {
+                    statuses.push(sub_volume.query_volume_info().await?);
+                }
+
+                statuses
+            },
+
+            read_only_parent: {
+                if let Some(rop) = &self.read_only_parent {
+                    Some(Box::new(rop.query_volume_info().await?))
+                } else {
+                    None
+                }
+            },
+        })
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
@@ -788,7 +910,7 @@ impl BlockIO for VolumeInner {
             }
 
             Ok(total_blocks * self.block_size)
-        } else if let Some(ref read_only_parent) = &self.read_only_parent {
+        } else if let Some(read_only_parent) = &self.read_only_parent {
             // If this volume only has a read only parent, report that size for
             // total size
             let total_blocks = read_only_parent.lba_range.end
@@ -824,7 +946,7 @@ impl BlockIO for VolumeInner {
         }
 
         if self.sub_volumes.is_empty() {
-            if let Some(ref read_only_parent) = &self.read_only_parent {
+            if let Some(read_only_parent) = &self.read_only_parent {
                 let res = read_only_parent.read(offset, data).await;
                 cdt::volume__read__done!(|| (cc, self.uuid));
                 return res;
@@ -956,7 +1078,7 @@ impl BlockIO for VolumeInner {
             wq_counts.active_count += sub_wq_counts.active_count;
         }
 
-        if let Some(ref read_only_parent) = &self.read_only_parent {
+        if let Some(read_only_parent) = &self.read_only_parent {
             let sub_wq_counts = read_only_parent.show_work().await?;
 
             wq_counts.up_count += sub_wq_counts.up_count;
@@ -1012,18 +1134,20 @@ impl BlockIO for VolumeInner {
     }
 }
 
+// TODO eventually put this in VolumeInfo?
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct VolumeInfo {
+pub struct VolumeExtentInfo {
     pub block_size: u64,
-    pub volumes: Vec<SubVolumeInfo>,
+    pub volumes: Vec<SubVolumeExtentInfo>,
 }
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct SubVolumeInfo {
+pub struct SubVolumeExtentInfo {
     pub blocks_per_extent: u64,
     pub extent_count: u32,
 }
 
-impl VolumeInfo {
+impl VolumeExtentInfo {
     pub fn total_size(&self) -> u64 {
         self.block_size * (self.total_blocks() as u64)
     }
@@ -1128,8 +1252,11 @@ impl BlockIO for SubVolume {
     async fn activate(&self) -> Result<(), CrucibleError> {
         self.block_io.activate().await
     }
-    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
-        self.block_io.activate_with_gen(gen).await
+    async fn activate_with_gen(
+        &self,
+        generation: u64,
+    ) -> Result<(), CrucibleError> {
+        self.block_io.activate_with_gen(generation).await
     }
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
         self.block_io.query_work_queue().await
@@ -1146,6 +1273,10 @@ impl BlockIO for SubVolume {
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         self.block_io.query_is_active().await
+    }
+
+    async fn query_volume_info(&self) -> Result<VolumeInfo, CrucibleError> {
+        self.block_io.query_volume_info().await
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
@@ -1210,6 +1341,8 @@ impl Volume {
         self.0.clone()
     }
 
+    /// Construct a Volume from a VolumeConstructionRequest. If the variant is
+    /// _not_ Volume, wrap it in a Volume.
     #[async_recursion]
     pub async fn construct(
         request: VolumeConstructionRequest,
@@ -1228,26 +1361,24 @@ impl Volume {
 
                 for subreq in sub_volumes {
                     vol.add_subvolume(
-                        Volume::construct(
+                        blockio_from_construction_request(
                             subreq,
                             producer_registry.clone(),
                             log.clone(),
                         )
-                        .await?
-                        .as_blockio(),
+                        .await?,
                     )
                     .await?;
                 }
 
                 if let Some(read_only_parent) = read_only_parent {
                     vol.add_read_only_parent(
-                        Volume::construct(
+                        blockio_from_construction_request(
                             *read_only_parent,
                             producer_registry,
                             log,
                         )
-                        .await?
-                        .as_blockio(),
+                        .await?,
                     )
                     .await?;
                 }
@@ -1255,51 +1386,20 @@ impl Volume {
                 Ok(vol.into())
             }
 
-            VolumeConstructionRequest::Url {
-                id,
-                block_size,
-                url,
-            } => {
+            VolumeConstructionRequest::Url { block_size, .. }
+            | VolumeConstructionRequest::Region { block_size, .. }
+            | VolumeConstructionRequest::File { block_size, .. } => {
                 let mut vol = VolumeBuilder::new(block_size, log.clone());
-                vol.add_subvolume(Arc::new(
-                    ReqwestBlockIO::new(id, block_size, url).await?,
-                ))
-                .await?;
-                Ok(vol.into())
-            }
-
-            VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts,
-                gen,
-            } => {
-                let mut vol = VolumeBuilder::new(block_size, log.clone());
-                vol.add_subvolume_create_guest(
-                    opts,
-                    RegionExtentInfo {
-                        block_size,
-                        blocks_per_extent,
-                        extent_count,
-                    },
-                    gen,
-                    producer_registry,
+                vol.add_subvolume(
+                    blockio_from_construction_request(
+                        request,
+                        producer_registry,
+                        log,
+                    )
+                    .await?,
                 )
                 .await?;
-                Ok(vol.into())
-            }
 
-            VolumeConstructionRequest::File {
-                id,
-                block_size,
-                path,
-            } => {
-                let mut vol = VolumeBuilder::new(block_size, log.clone());
-                vol.add_subvolume(Arc::new(FileBlockIO::new(
-                    id, block_size, path,
-                )?))
-                .await?;
                 Ok(vol.into())
             }
         }
@@ -1660,8 +1760,14 @@ impl Volume {
                 blocks_per_extent,
                 extent_count,
                 ref opts,
-                gen,
-            } => (block_size, blocks_per_extent, extent_count, opts, gen),
+                generation,
+            } => (
+                block_size,
+                blocks_per_extent,
+                extent_count,
+                opts,
+                generation,
+            ),
 
             _ => {
                 crucible_bail!(
@@ -1683,8 +1789,14 @@ impl Volume {
                 blocks_per_extent,
                 extent_count,
                 ref opts,
-                gen,
-            } => (block_size, blocks_per_extent, extent_count, opts, gen),
+                generation,
+            } => (
+                block_size,
+                blocks_per_extent,
+                extent_count,
+                opts,
+                generation,
+            ),
 
             _ => {
                 crucible_bail!(
@@ -1940,9 +2052,9 @@ mod test {
     use std::fs::File;
     use std::io::Write;
 
-    use base64::{engine, Engine};
+    use base64::{Engine, engine};
     use fakedata_generator::gen_ipv4;
-    use slog::{o, Drain, Logger};
+    use slog::{Drain, Logger, o};
     use tempfile::tempdir;
 
     // Create a simple logger
@@ -2465,8 +2577,8 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_parent_initialized_read_only_region_one_subvolume(
-    ) -> Result<()> {
+    async fn test_parent_initialized_read_only_region_one_subvolume()
+    -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
         // test initializing the read only parent with all byte values
@@ -2558,8 +2670,8 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_parent_uninitialized_read_only_region_one_subvolume(
-    ) -> Result<()> {
+    async fn test_parent_uninitialized_read_only_region_one_subvolume()
+    -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
         // test an uninitialized read only parent
@@ -2589,8 +2701,8 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_parent_initialized_read_only_region_with_multiple_sub_volumes_1(
-    ) -> Result<()> {
+    async fn test_parent_initialized_read_only_region_with_multiple_sub_volumes_1()
+    -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
         for i in 0x00..0xFF {
@@ -2636,8 +2748,8 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_parent_uninitialized_read_only_region_with_multiple_sub_volumes_1(
-    ) -> Result<()> {
+    async fn test_parent_uninitialized_read_only_region_with_multiple_sub_volumes_1()
+    -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
         let parent =
@@ -2667,8 +2779,8 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_parent_initialized_read_only_region_with_multiple_sub_volumes_2(
-    ) -> Result<()> {
+    async fn test_parent_initialized_read_only_region_with_multiple_sub_volumes_2()
+    -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
         for i in 0x00..0xFF {
@@ -2714,8 +2826,8 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_parent_uninitialized_read_only_region_with_multiple_sub_volumes_2(
-    ) -> Result<()> {
+    async fn test_parent_uninitialized_read_only_region_with_multiple_sub_volumes_2()
+    -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
 
         let parent =
@@ -3585,7 +3697,7 @@ mod test {
         blocks_per_extent: u64,
         extent_count: u32,
         opts: CrucibleOpts,
-        gen: u64,
+        generation: u64,
     ) -> Vec<VolumeConstructionRequest> {
         (0..sv_count)
             .map(|i| {
@@ -3601,7 +3713,7 @@ mod test {
                     blocks_per_extent,
                     extent_count,
                     opts: new_opts,
-                    gen,
+                    generation,
                 }
             })
             .collect()
@@ -3625,9 +3737,11 @@ mod test {
 
         for (i, sv) in new_vcr_vec.iter_mut().enumerate() {
             match sv {
-                VolumeConstructionRequest::Region { opts, gen, .. } => {
+                VolumeConstructionRequest::Region {
+                    opts, generation, ..
+                } => {
                     if change_gen {
-                        *gen += 1;
+                        *generation += 1;
                     }
                     if i == sv_changed {
                         opts.target[cid] = new_target;
@@ -3698,7 +3812,7 @@ mod test {
             blocks_per_extent,
             extent_count,
             opts: opts.clone(),
-            gen: 3,
+            generation: 3,
         });
 
         let (original_rop, replacement_rop) = match rop_mode {
@@ -3747,9 +3861,13 @@ mod test {
         };
 
         let log = csl();
-        info!(log,
+        info!(
+            log,
             "replacement of CID {} with sv_count:{} sv_changed:{} rop_mode:{:?}",
-            cid, sv_count, sv_changed, rop_mode
+            cid,
+            sv_count,
+            sv_changed,
+            rop_mode
         );
         let ReplacementRequestCheck::Valid { old, new } =
             Volume::compare_vcr_for_target_replacement(
@@ -3801,7 +3919,7 @@ mod test {
             blocks_per_extent,
             extent_count,
             opts: opts.clone(),
-            gen: 3,
+            generation: 3,
         });
 
         let (original_rop, replacement_rop) = match rop_mode {
@@ -3855,7 +3973,7 @@ mod test {
                     blocks_per_extent,
                     extent_count,
                     opts: replacement_opts.clone(),
-                    gen: 1, // Lower generation, should cause the error.
+                    generation: 1, // Lower generation, should cause the error.
                 }
             })
             .collect();
@@ -3900,7 +4018,7 @@ mod test {
             blocks_per_extent,
             extent_count,
             opts: opts.clone(),
-            gen: 3,
+            generation: 3,
         });
 
         let original = VolumeConstructionRequest::Volume {
@@ -3911,7 +4029,7 @@ mod test {
                 blocks_per_extent,
                 extent_count,
                 opts: opts.clone(),
-                gen: 2,
+                generation: 2,
             }],
             read_only_parent: Some(rop),
         };
@@ -3928,7 +4046,7 @@ mod test {
                 blocks_per_extent,
                 extent_count,
                 opts: opts.clone(),
-                gen: 3,
+                generation: 3,
             }],
             read_only_parent: None,
         };
@@ -3979,7 +4097,7 @@ mod test {
                     blocks_per_extent,
                     extent_count,
                     opts: opts.clone(),
-                    gen: 3,
+                    generation: 3,
                 });
                 Some(test_rop)
             }
@@ -4007,12 +4125,14 @@ mod test {
 
         let log = csl();
 
-        assert!(Volume::compare_vcr_for_target_replacement(
-            original.clone(),
-            original,
-            &log
-        )
-        .is_err());
+        assert!(
+            Volume::compare_vcr_for_target_replacement(
+                original.clone(),
+                original,
+                &log
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -4045,7 +4165,7 @@ mod test {
             blocks_per_extent,
             extent_count,
             opts: opts.clone(),
-            gen: 3,
+            generation: 3,
         });
 
         let (original_rop, replacement_rop) = match rop_mode {
@@ -4076,8 +4196,8 @@ mod test {
         // Update the sub_volumes for the replacement.
         for sv in sub_volumes.iter_mut() {
             match sv {
-                VolumeConstructionRequest::Region { gen, .. } => {
-                    *gen += 1;
+                VolumeConstructionRequest::Region { generation, .. } => {
+                    *generation += 1;
                 }
                 _ => {
                     panic!("Invalid VCR");
@@ -4184,12 +4304,14 @@ mod test {
             sv_changed,
         );
 
-        assert!(Volume::compare_vcr_for_target_replacement(
-            original,
-            replacement,
-            &log
-        )
-        .is_err());
+        assert!(
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -4253,12 +4375,14 @@ mod test {
             sv_count,
             sv_changed,
         );
-        assert!(Volume::compare_vcr_for_target_replacement(
-            original,
-            replacement,
-            &log
-        )
-        .is_err());
+        assert!(
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -4319,7 +4443,7 @@ mod test {
                     blocks_per_extent,
                     extent_count,
                     opts: opts.clone(),
-                    gen: 3,
+                    generation: 3,
                 },
             )),
         };
@@ -4331,12 +4455,14 @@ mod test {
             sv_count,
             sv_changed,
         );
-        assert!(Volume::compare_vcr_for_target_replacement(
-            original,
-            replacement,
-            &log
-        )
-        .is_err());
+        assert!(
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -4388,7 +4514,7 @@ mod test {
                     blocks_per_extent,
                     extent_count,
                     opts: rop_opts.clone(),
-                    gen: 4,
+                    generation: 4,
                 },
             )),
         };
@@ -4402,8 +4528,10 @@ mod test {
             // Use the same sub-volume, just bump the generation numbers
             for sv in sub_volumes.iter_mut() {
                 match sv {
-                    VolumeConstructionRequest::Region { gen, .. } => {
-                        *gen += 1;
+                    VolumeConstructionRequest::Region {
+                        generation, ..
+                    } => {
+                        *generation += 1;
                     }
                     _ => {
                         panic!("Unsupported VCR");
@@ -4424,7 +4552,7 @@ mod test {
                     blocks_per_extent,
                     extent_count,
                     opts: rop_opts.clone(),
-                    gen: 4,
+                    generation: 4,
                 },
             )),
         };
@@ -4489,7 +4617,7 @@ mod test {
             blocks_per_extent,
             extent_count,
             opts: rop_opts.clone(),
-            gen: 4,
+            generation: 4,
         };
 
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
@@ -4524,7 +4652,7 @@ mod test {
                     blocks_per_extent,
                     extent_count,
                     opts: rop_opts.clone(),
-                    gen: 4,
+                    generation: 4,
                 },
             )),
         };
@@ -4537,12 +4665,14 @@ mod test {
             sv_changed,
         );
 
-        assert!(Volume::compare_vcr_for_target_replacement(
-            original,
-            replacement,
-            &log
-        )
-        .is_err());
+        assert!(
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -4598,7 +4728,7 @@ mod test {
                     blocks_per_extent,
                     extent_count,
                     opts: replacement_opts,
-                    gen: replacement_gen,
+                    generation: replacement_gen,
                 }
             })
             .collect();
@@ -4617,12 +4747,14 @@ mod test {
             sv_count,
             sv_changed,
         );
-        assert!(Volume::compare_vcr_for_target_replacement(
-            original,
-            replacement,
-            &log
-        )
-        .is_err());
+        assert!(
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -4682,7 +4814,7 @@ mod test {
                     blocks_per_extent: replacement_bpe,
                     extent_count,
                     opts: replacement_opts,
-                    gen: replacement_gen,
+                    generation: replacement_gen,
                 }
             })
             .collect();
@@ -4701,12 +4833,14 @@ mod test {
             sv_count,
             sv_changed,
         );
-        assert!(Volume::compare_vcr_for_target_replacement(
-            original,
-            replacement,
-            &log
-        )
-        .is_err());
+        assert!(
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -4761,7 +4895,7 @@ mod test {
                     blocks_per_extent,
                     extent_count: replacement_ec,
                     opts: replacement_opts,
-                    gen: replacement_gen,
+                    generation: replacement_gen,
                 }
             })
             .collect();
@@ -4774,8 +4908,10 @@ mod test {
         };
 
         let log = csl();
-        assert!(Volume::compare_vcr_for_update(original, replacement, &log)
-            .is_err());
+        assert!(
+            Volume::compare_vcr_for_update(original, replacement, &log)
+                .is_err()
+        );
     }
 
     // This is a wrapper function to test changing CrucibleOpts structures.
@@ -4825,7 +4961,7 @@ mod test {
                     blocks_per_extent,
                     extent_count,
                     opts: replacement_opts,
-                    gen: replacement_gen,
+                    generation: replacement_gen,
                 }
             })
             .collect();
@@ -4868,17 +5004,19 @@ mod test {
 
         for sv in 1..4 {
             for sv_changed in 0..sv {
-                assert!(test_volume_replace_opts(
-                    vol_id,
-                    512,
-                    blocks_per_extent,
-                    extent_count,
-                    o_opts.clone(),
-                    n_opts.clone(),
-                    sv,
-                    sv_changed,
-                )
-                .is_err());
+                assert!(
+                    test_volume_replace_opts(
+                        vol_id,
+                        512,
+                        blocks_per_extent,
+                        extent_count,
+                        o_opts.clone(),
+                        n_opts.clone(),
+                        sv,
+                        sv_changed,
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -4902,17 +5040,19 @@ mod test {
 
         for sv in 1..4 {
             for sv_changed in 0..sv {
-                assert!(test_volume_replace_opts(
-                    vol_id,
-                    512,
-                    blocks_per_extent,
-                    extent_count,
-                    o_opts.clone(),
-                    n_opts.clone(),
-                    sv,
-                    sv_changed,
-                )
-                .is_err());
+                assert!(
+                    test_volume_replace_opts(
+                        vol_id,
+                        512,
+                        blocks_per_extent,
+                        extent_count,
+                        o_opts.clone(),
+                        n_opts.clone(),
+                        sv,
+                        sv_changed,
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -4936,17 +5076,19 @@ mod test {
 
         for sv in 1..4 {
             for sv_changed in 0..sv {
-                assert!(test_volume_replace_opts(
-                    vol_id,
-                    512,
-                    blocks_per_extent,
-                    extent_count,
-                    o_opts.clone(),
-                    n_opts.clone(),
-                    sv,
-                    sv_changed,
-                )
-                .is_err());
+                assert!(
+                    test_volume_replace_opts(
+                        vol_id,
+                        512,
+                        blocks_per_extent,
+                        extent_count,
+                        o_opts.clone(),
+                        n_opts.clone(),
+                        sv,
+                        sv_changed,
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -4972,17 +5114,19 @@ mod test {
 
         for sv in 1..4 {
             for sv_changed in 0..sv {
-                assert!(test_volume_replace_opts(
-                    vol_id,
-                    512,
-                    blocks_per_extent,
-                    extent_count,
-                    o_opts.clone(),
-                    n_opts.clone(),
-                    sv,
-                    sv_changed,
-                )
-                .is_err());
+                assert!(
+                    test_volume_replace_opts(
+                        vol_id,
+                        512,
+                        blocks_per_extent,
+                        extent_count,
+                        o_opts.clone(),
+                        n_opts.clone(),
+                        sv,
+                        sv_changed,
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -5006,17 +5150,19 @@ mod test {
 
         for sv in 1..4 {
             for sv_changed in 0..sv {
-                assert!(test_volume_replace_opts(
-                    vol_id,
-                    512,
-                    blocks_per_extent,
-                    extent_count,
-                    o_opts.clone(),
-                    n_opts.clone(),
-                    sv,
-                    sv_changed,
-                )
-                .is_err());
+                assert!(
+                    test_volume_replace_opts(
+                        vol_id,
+                        512,
+                        blocks_per_extent,
+                        extent_count,
+                        o_opts.clone(),
+                        n_opts.clone(),
+                        sv,
+                        sv_changed,
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -5040,17 +5186,19 @@ mod test {
 
         for sv in 1..4 {
             for sv_changed in 0..sv {
-                assert!(test_volume_replace_opts(
-                    vol_id,
-                    512,
-                    blocks_per_extent,
-                    extent_count,
-                    o_opts.clone(),
-                    n_opts.clone(),
-                    sv,
-                    sv_changed,
-                )
-                .is_err());
+                assert!(
+                    test_volume_replace_opts(
+                        vol_id,
+                        512,
+                        blocks_per_extent,
+                        extent_count,
+                        o_opts.clone(),
+                        n_opts.clone(),
+                        sv,
+                        sv_changed,
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -5074,17 +5222,19 @@ mod test {
 
         for sv in 1..4 {
             for sv_changed in 0..sv {
-                assert!(test_volume_replace_opts(
-                    vol_id,
-                    512,
-                    blocks_per_extent,
-                    extent_count,
-                    o_opts.clone(),
-                    n_opts.clone(),
-                    sv,
-                    sv_changed,
-                )
-                .is_err());
+                assert!(
+                    test_volume_replace_opts(
+                        vol_id,
+                        512,
+                        blocks_per_extent,
+                        extent_count,
+                        o_opts.clone(),
+                        n_opts.clone(),
+                        sv,
+                        sv_changed,
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -5108,17 +5258,19 @@ mod test {
 
         for sv in 1..4 {
             for sv_changed in 0..sv {
-                assert!(test_volume_replace_opts(
-                    vol_id,
-                    512,
-                    blocks_per_extent,
-                    extent_count,
-                    o_opts.clone(),
-                    n_opts.clone(),
-                    sv,
-                    sv_changed,
-                )
-                .is_err());
+                assert!(
+                    test_volume_replace_opts(
+                        vol_id,
+                        512,
+                        blocks_per_extent,
+                        extent_count,
+                        o_opts.clone(),
+                        n_opts.clone(),
+                        sv,
+                        sv_changed,
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -5142,17 +5294,19 @@ mod test {
 
         for sv in 1..4 {
             for sv_changed in 0..sv {
-                assert!(test_volume_replace_opts(
-                    vol_id,
-                    512,
-                    blocks_per_extent,
-                    extent_count,
-                    o_opts.clone(),
-                    n_opts.clone(),
-                    sv,
-                    sv_changed,
-                )
-                .is_err());
+                assert!(
+                    test_volume_replace_opts(
+                        vol_id,
+                        512,
+                        blocks_per_extent,
+                        extent_count,
+                        o_opts.clone(),
+                        n_opts.clone(),
+                        sv,
+                        sv_changed,
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -5168,7 +5322,7 @@ mod test {
                 block_size: 512,
                 blocks_per_extent: 131072,
                 extent_count: 128,
-                gen: 3,
+                generation: 3,
                 opts: CrucibleOpts {
                     id: vol_id,
                     target: vec![
@@ -5187,7 +5341,7 @@ mod test {
                         block_size: 512,
                         blocks_per_extent: 131072,
                         extent_count: 32,
-                        gen: 2,
+                        generation: 2,
                         opts: CrucibleOpts {
                             id: Uuid::new_v4(),
                             target: vec![
@@ -5219,8 +5373,10 @@ mod test {
                 ..
             } => {
                 match &mut sub_volumes[0] {
-                    VolumeConstructionRequest::Region { gen, .. } => {
-                        *gen += 1;
+                    VolumeConstructionRequest::Region {
+                        generation, ..
+                    } => {
+                        *generation += 1;
                     }
 
                     _ => {
@@ -5282,7 +5438,7 @@ mod test {
                 block_size: 512,
                 blocks_per_extent: 131072,
                 extent_count: 128,
-                gen: 3,
+                generation: 3,
                 opts: CrucibleOpts {
                     id: vol_id,
                     target: vec![
@@ -5301,7 +5457,7 @@ mod test {
                         block_size: 512,
                         blocks_per_extent: 131072,
                         extent_count: 32,
-                        gen: 2,
+                        generation: 2,
                         opts: CrucibleOpts {
                             id: Uuid::new_v4(),
                             target: vec![
@@ -5327,7 +5483,7 @@ mod test {
                                     block_size: 512,
                                     blocks_per_extent: 131072,
                                     extent_count: 32,
-                                    gen: 1,
+                                    generation: 1,
                                     opts: CrucibleOpts {
                                         id: Uuid::new_v4(),
                                         target: vec![
@@ -5434,7 +5590,7 @@ mod test {
                 block_size: 512,
                 blocks_per_extent: 131072,
                 extent_count: 128,
-                gen: 3,
+                generation: 3,
                 opts: CrucibleOpts {
                     id: vol_id,
                     target: vec![
@@ -5453,7 +5609,7 @@ mod test {
                         block_size: 512,
                         blocks_per_extent: 131072,
                         extent_count: 32,
-                        gen: 2,
+                        generation: 2,
                         opts: CrucibleOpts {
                             id: Uuid::new_v4(),
                             target: vec![
@@ -5485,8 +5641,10 @@ mod test {
                 ..
             } => {
                 match &mut sub_volumes[0] {
-                    VolumeConstructionRequest::Region { gen, .. } => {
-                        *gen += 1;
+                    VolumeConstructionRequest::Region {
+                        generation, ..
+                    } => {
+                        *generation += 1;
                     }
 
                     _ => {
@@ -5503,13 +5661,15 @@ mod test {
                         sub_volumes, ..
                     } => match &mut sub_volumes[0] {
                         VolumeConstructionRequest::Region {
-                            opts, gen, ..
+                            opts,
+                            generation,
+                            ..
                         } => {
                             opts.target[1] = "[fd00:1122:3344:111::a]:20000"
                                 .parse()
                                 .unwrap();
 
-                            *gen += 1;
+                            *generation += 1;
                         }
 
                         _ => {
@@ -5552,7 +5712,7 @@ mod test {
                 block_size: 512,
                 blocks_per_extent: 131072,
                 extent_count: 128,
-                gen: 3,
+                generation: 3,
                 opts: CrucibleOpts {
                     id: vol_id,
                     target: vec![
@@ -5571,7 +5731,7 @@ mod test {
                         block_size: 512,
                         blocks_per_extent: 131072,
                         extent_count: 32,
-                        gen: 2,
+                        generation: 2,
                         opts: CrucibleOpts {
                             id: Uuid::new_v4(),
                             target: vec![
@@ -5603,8 +5763,10 @@ mod test {
                 ..
             } => {
                 match &mut sub_volumes[0] {
-                    VolumeConstructionRequest::Region { gen, .. } => {
-                        *gen += 1;
+                    VolumeConstructionRequest::Region {
+                        generation, ..
+                    } => {
+                        *generation += 1;
                     }
 
                     _ => {
@@ -5621,13 +5783,15 @@ mod test {
                         sub_volumes, ..
                     } => match &mut sub_volumes[0] {
                         VolumeConstructionRequest::Region {
-                            opts, gen, ..
+                            opts,
+                            generation,
+                            ..
                         } => {
                             opts.target[1] = "[fd00:1122:3344:111::a]:20000"
                                 .parse()
                                 .unwrap();
 
-                            *gen -= 1;
+                            *generation -= 1;
                         }
 
                         _ => {
@@ -5663,7 +5827,7 @@ mod test {
                 block_size: 512,
                 blocks_per_extent: 131072,
                 extent_count: 128,
-                gen: 3,
+                generation: 3,
                 opts: CrucibleOpts {
                     id: vol_id,
                     target: vec![
@@ -5682,7 +5846,7 @@ mod test {
                         block_size: 512,
                         blocks_per_extent: 131072,
                         extent_count: 32,
-                        gen: 2,
+                        generation: 2,
                         opts: CrucibleOpts {
                             id: Uuid::new_v4(),
                             target: vec![
@@ -5775,7 +5939,7 @@ mod test {
                     control: None,
                     read_only: false,
                 },
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: None,
         };
@@ -5805,7 +5969,7 @@ mod test {
                         control: None,
                         read_only: false,
                     },
-                    gen: 1,
+                    generation: 1,
                 },
                 VolumeConstructionRequest::Region {
                     block_size: 4096,
@@ -5823,7 +5987,7 @@ mod test {
                         control: None,
                         read_only: false,
                     },
-                    gen: 1,
+                    generation: 1,
                 },
             ],
             read_only_parent: None,
@@ -5853,7 +6017,7 @@ mod test {
                     control: None,
                     read_only: false,
                 },
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Region {
@@ -5872,7 +6036,7 @@ mod test {
                         control: None,
                         read_only: false,
                     },
-                    gen: 1,
+                    generation: 1,
                 },
             )),
         };
@@ -5901,7 +6065,7 @@ mod test {
                     control: None,
                     read_only: false,
                 },
-                gen: 1,
+                generation: 1,
             }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Volume {
@@ -5923,7 +6087,7 @@ mod test {
                             control: None,
                             read_only: false,
                         },
-                        gen: 1,
+                        generation: 1,
                     }],
                     read_only_parent: None,
                 },

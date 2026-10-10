@@ -8,7 +8,7 @@ use std::os::unix::io::FromRawFd;
 use std::sync::Arc;
 use std::{cmp, io};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use futures::stream::StreamExt;
 use itertools::Itertools;
@@ -40,8 +40,8 @@ pub struct Opt {
     key: Option<String>,
 
     /// Generation
-    #[clap(short, long, default_value = "0", action)]
-    gen: u64,
+    #[clap(short, long = "gen", default_value = "0", action)]
+    generation: u64,
 
     /// TLS certificate
     #[clap(long, action)]
@@ -564,7 +564,7 @@ async fn main() -> Result<()> {
     let (guest, io) = Guest::new(None);
     let guest = Arc::new(guest);
 
-    let _join_handle = up_main(crucible_opts, opt.gen, None, io, None)?;
+    let _join_handle = up_main(crucible_opts, opt.generation, None, io, None)?;
     eprintln!("Crucible runtime is spawned");
 
     // IO time
@@ -596,7 +596,10 @@ async fn main() -> Result<()> {
             }
         }
         Err(e) => {
-            eprintln!("Encountered error while performing IO: {}. gracefully cleaning up.", e);
+            eprintln!(
+                "Encountered error while performing IO: {}. gracefully cleaning up.",
+                e
+            );
         }
     };
 

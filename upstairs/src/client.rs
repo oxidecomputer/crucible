@@ -1,15 +1,15 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt, format_job_list, integrity_hash, io_limits::ClientIOLimits,
-    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
     ClientIOStateCount, ClientId, ConnectionMode, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, DsStateData, EncryptionContext,
     IOState, IOop, JobId, Message, RawReadResponse, ReconcileIO,
-    ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
+    ReconcileIOState, RegionDefinitionStatus, RegionMetadata, cdt,
+    format_job_list, integrity_hash, io_limits::ClientIOLimits,
+    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
 };
-use crucible_common::{x509::TLSContext, NegotiationError, VerboseTimeout};
+use crucible_common::{NegotiationError, VerboseTimeout, x509::TLSContext};
 use crucible_protocol::{
-    MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
+    CRUCIBLE_MESSAGE_VERSION, MessageWriter, ReconciliationId,
 };
 use strum::IntoDiscriminant;
 
@@ -17,22 +17,22 @@ use std::{
     collections::BTreeSet,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slog::{debug, error, info, o, warn, Logger};
+use slog::{Logger, debug, error, info, o, warn};
 use tokio::{
     net::{TcpSocket, TcpStream},
     sync::{
         mpsc,
         oneshot::{self, error::RecvError},
     },
-    time::{sleep, sleep_until, Duration, Instant},
+    time::{Duration, Instant, sleep, sleep_until},
 };
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
@@ -253,7 +253,7 @@ impl DownstairsClient {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: self.cfg.upstairs_id,
             session_id: self.cfg.session_id,
-            gen: self.cfg.generation(),
+            generation: self.cfg.generation(),
             read_only: self.cfg.read_only,
             encrypted: self.cfg.encrypted(),
             alternate_versions: vec![],
@@ -397,11 +397,13 @@ impl DownstairsClient {
                         !self.skipped_jobs.contains(x)
                             && repair_min_id.map(|r| *x >= r).unwrap_or(true)
                     });
-                    info!(
-                        self.log,
-                        " {ds_id} final dependency list {}",
-                        format_job_list(dependencies),
-                    );
+                    if !dependencies.is_empty() {
+                        info!(
+                            self.log,
+                            " {ds_id} final dependency list {}",
+                            format_job_list(dependencies),
+                        );
+                    }
                 }
             }
         }
@@ -416,7 +418,10 @@ impl DownstairsClient {
         // If it's Done, then by definition it has been acked; test that here
         // to double-check.
         if IOState::Done == job.state[self.client_id] && !job.acked {
-            panic!("[{}] This job was not acked: {:?}", self.client_id, job);
+            panic!(
+                "{} [{}] This job was not acked: {:?}",
+                self.cfg.session_id, self.client_id, job
+            );
         }
 
         self.set_job_state(job, IOState::InProgress);
@@ -441,13 +446,29 @@ impl DownstairsClient {
         info!(self.log, "Transition from {:?} to Reconcile", self.state());
         let DsStateData::Connecting { state, mode } = &mut self.state else {
             panic!(
-                "invalid state {:?} for client {}",
+                "{} invalid state {:?} for client {}",
+                self.cfg.session_id,
                 self.state(),
                 self.client_id
             );
         };
-        assert_eq!(state.discriminant(), NegotiationState::WaitQuorum);
-        assert_eq!(mode, &ConnectionMode::New);
+        // There are two cases where reconciliation is allowed: either from a
+        // new connection, or if all three Downstairs need live-repair
+        // simultaneously.
+        match (state.discriminant(), &mode) {
+            (NegotiationState::WaitQuorum, ConnectionMode::New) => {
+                // This is fine.
+            }
+            (NegotiationState::LiveRepairReady, ConnectionMode::Faulted) => {
+                // This is also fine, but we need to tweak our connection mode
+                // because we're no longer doing live-repair.
+                *mode = ConnectionMode::New;
+            }
+            s => panic!(
+                "{} [{}] invalid (state, mode) tuple: ({s:?}",
+                self.cfg.session_id, self.client_id
+            ),
+        }
         *state = NegotiationStateData::Reconcile;
     }
 
@@ -757,7 +778,10 @@ impl DownstairsClient {
     /// .. }`
     pub(crate) fn set_connection_mode_faulted(&mut self) {
         let DsStateData::Connecting { mode, .. } = &mut self.state else {
-            panic!("not connecting");
+            panic!(
+                "{} [{}] not connecting",
+                self.cfg.session_id, self.client_id
+            );
         };
         assert_eq!(*mode, ConnectionMode::Offline);
         *mode = ConnectionMode::Faulted
@@ -827,7 +851,9 @@ impl DownstairsClient {
                 mode: ConnectionMode::New, // RO client checked above
                 ..
             } => panic!(
-                "enqueue should not be called from state {:?}",
+                "{} [{}] enqueue should not be called from state {:?}",
+                self.cfg.session_id,
+                self.client_id,
                 self.state()
             ),
         }
@@ -865,8 +891,9 @@ impl DownstairsClient {
     ) {
         if !Self::is_state_transition_valid(up_state, &self.state, &new_state) {
             panic!(
-                "invalid state transition for client {} from {:?} -> {:?} \
+                "{} invalid state transition for client {} from {:?} -> {:?} \
                  (with up_state: {:?})",
+                self.cfg.session_id,
                 self.client_id,
                 DsState::from(&self.state),
                 DsState::from(&new_state),
@@ -891,6 +918,20 @@ impl DownstairsClient {
                         NegotiationStateData::Start
                         | NegotiationStateData::WaitConnect(..),
                     ..
+                },
+            ) => true,
+
+            // Special case: LiveRepairReady is allowed to jump sideways into
+            // reconciliation if all three downstairs require live-repair
+            // (because otherwise we have no-one to repair from)
+            (
+                DsStateData::Connecting {
+                    state: NegotiationStateData::LiveRepairReady(..),
+                    mode: ConnectionMode::Faulted,
+                },
+                DsStateData::Connecting {
+                    state: NegotiationStateData::Reconcile,
+                    mode: ConnectionMode::New,
                 },
             ) => true,
 
@@ -926,7 +967,7 @@ impl DownstairsClient {
                         ConnectionMode::Offline
                     ) | (NegotiationStateData::Reconcile, ConnectionMode::New)
                         | (
-                            NegotiationStateData::LiveRepairReady,
+                            NegotiationStateData::LiveRepairReady(..),
                             ConnectionMode::Faulted | ConnectionMode::Replaced
                         )
                 )
@@ -938,7 +979,7 @@ impl DownstairsClient {
                 matches!(
                     (state, mode),
                     (
-                        NegotiationStateData::LiveRepairReady,
+                        NegotiationStateData::LiveRepairReady(..),
                         ConnectionMode::Faulted | ConnectionMode::Replaced
                     )
                 )
@@ -1001,6 +1042,22 @@ impl DownstairsClient {
                         NegotiationStateData::Start
                             | NegotiationStateData::WaitConnect(..)
                     )
+                ) || (
+                    // If all three downstairs needed live-repair while the
+                    // upstairs was active, we fall back to reconciliation.
+                    // If that reconciliation fails, the client must come back
+                    // and try reconciliation again.
+                    matches!(up_state, UpstairsState::Active)
+                        && matches!(
+                            (r, mode, state),
+                            (
+                                R::NegotiationFailed(
+                                    ClientNegotiationFailed::FailedReconcile
+                                ),
+                                ConnectionMode::Faulted,
+                                NegotiationStateData::Start
+                            )
+                        )
                 )
             }
 
@@ -1087,10 +1144,11 @@ impl DownstairsClient {
                                 // downstairs to stop and refuse to restart"
                                 // mode.
                                 let msg = format!(
-                                    "[{}] read hash mismatch on {} \n\
+                                    "{} [{}] {} read hash mismatch\n\
                                         Expected {:x?}\n\
                                         Computed {:x?}\n\
                                         job: {:?}",
+                                    self.cfg.session_id,
                                     self.client_id,
                                     ds_id,
                                     job_blocks,
@@ -1126,9 +1184,9 @@ impl DownstairsClient {
                         let ci = self.repair_info.replace(extent_info.unwrap());
                         if ci.is_some() {
                             panic!(
-                            "[{}] Unexpected repair found on insertion: {:?}",
-                            self.client_id, ci
-                        );
+                                "{} [{}] Unexpected repair found on insertion: {:?}",
+                                self.cfg.session_id, self.client_id, ci
+                            );
                         }
                     }
                     IOop::ExtentLiveRepair { .. }
@@ -1157,8 +1215,8 @@ impl DownstairsClient {
                     }
                     (IOop::Read { .. }, CrucibleError::DecryptionError) => {
                         panic!(
-                            "[{}] {} read decrypt error {:?} {:?}",
-                            self.client_id, ds_id, e, job
+                            "{} [{}] {} read decrypt error {:?} {:?}",
+                            self.cfg.session_id, self.client_id, ds_id, e, job
                         );
                     }
 
@@ -1181,7 +1239,8 @@ impl DownstairsClient {
         assert_eq!(
             old_state,
             IOState::InProgress,
-            "[{}] Job {ds_id} completed while not InProgress: {job:?}",
+            "{} [{}] Job {ds_id} completed while not InProgress: {job:?}",
+            self.cfg.session_id,
             self.client_id,
         );
     }
@@ -1212,7 +1271,7 @@ impl DownstairsClient {
         let DsStateData::Connecting { state, .. } = &self.state else {
             return;
         };
-        if matches!(state, NegotiationStateData::LiveRepairReady) {
+        if matches!(state, NegotiationStateData::LiveRepairReady(..)) {
             assert!(self.cfg.read_only);
 
             // TODO: could we do this transition early, by automatically
@@ -1230,7 +1289,7 @@ impl DownstairsClient {
         let DsStateData::Connecting { state, .. } = &self.state else {
             panic!("invalid state");
         };
-        assert!(matches!(state, NegotiationStateData::LiveRepairReady));
+        assert!(matches!(state, NegotiationStateData::LiveRepairReady(..)));
         self.checked_state_transition(up_state, DsStateData::LiveRepair);
     }
 
@@ -1280,7 +1339,7 @@ impl DownstairsClient {
                 self.send(Message::PromoteToActive {
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
-                    gen: self.cfg.generation(),
+                    generation: self.cfg.generation(),
                 });
                 Ok(NegotiationResult::NotDone)
             }
@@ -1320,7 +1379,7 @@ impl DownstairsClient {
             Message::YouAreNowActive {
                 upstairs_id,
                 session_id,
-                gen,
+                generation,
             } => {
                 if !matches!(state, NegotiationStateData::WaitForPromote) {
                     error!(
@@ -1357,16 +1416,16 @@ impl DownstairsClient {
                     });
                 }
                 let upstairs_gen = self.cfg.generation();
-                if upstairs_gen != gen {
+                if upstairs_gen != generation {
                     error!(
                         self.log,
                         "generation mismatch in YouAreNowActive: {} != {}",
                         upstairs_gen,
-                        gen
+                        generation,
                     );
                     err = Some(NegotiationError::GenerationNumberTooLow {
                         requested: upstairs_gen,
-                        actual: gen,
+                        actual: generation,
                     });
                 }
                 if let Some(e) = err {
@@ -1490,9 +1549,12 @@ impl DownstairsClient {
                         // TODO(#558) Figure out if we can handle this error.
                         // Possibly not.
                         panic!(
-                            "[{}] New downstairs region info mismatch: \
+                            "{} [{}] New downstairs region info mismatch: \
                                  {:?} vs. {:?}",
-                            self.client_id, ddef, region_def
+                            self.cfg.session_id,
+                            self.client_id,
+                            ddef,
+                            region_def
                         );
                     }
                 }
@@ -1574,7 +1636,7 @@ impl DownstairsClient {
                     }
 
                     ConnectionMode::Faulted | ConnectionMode::Replaced => {
-                        *state = NegotiationStateData::LiveRepairReady;
+                        *state = NegotiationStateData::LiveRepairReady(dsr);
                         NegotiationResult::LiveRepair
                     }
                     ConnectionMode::Offline => {
@@ -1586,7 +1648,10 @@ impl DownstairsClient {
                 };
                 Ok(out)
             }
-            m => panic!("invalid message in continue_negotiation: {m:?}"),
+            m => panic!(
+                "{} [{}] invalid message in continue_negotiation: {m:?}",
+                self.cfg.session_id, self.client_id
+            ),
         }
     }
 
@@ -1607,7 +1672,8 @@ impl DownstairsClient {
             }
         ) {
             panic!(
-                "[{}] should still be in reconcile, not {:?}",
+                "{} [{}] should still be in reconcile, not {:?}",
+                self.cfg.session_id,
                 self.client_id,
                 self.state()
             );
@@ -1662,7 +1728,10 @@ impl DownstairsClient {
                 // All other reconcile ops are sent as-is
                 self.send(job.op.clone());
             }
-            m => panic!("invalid reconciliation request {m:?}"),
+            m => panic!(
+                "{} [{}] invalid reconciliation request {m:?}",
+                self.cfg.session_id, self.client_id,
+            ),
         }
     }
 
@@ -1729,6 +1798,14 @@ impl DownstairsClient {
     pub(crate) fn id(&self) -> Option<Uuid> {
         self.region_uuid
     }
+
+    pub(crate) fn target_addr(&self) -> Option<SocketAddr> {
+        self.target_addr
+    }
+
+    pub(crate) fn repair_addr(&self) -> Option<SocketAddr> {
+        self.repair_addr
+    }
 }
 
 /// Tracks client negotiation progress
@@ -1756,10 +1833,10 @@ impl DownstairsClient {
 ///            │           │ New         │ Faulted / Replaced
 ///            │    ┌──────▼───┐    ┌────▼──────────┐
 ///            │    │WaitQuorum│    │LiveRepairReady│
-///            │    └────┬─────┘    └────┬──────────┘
-///            │         │               │
-///            │    ┌────▼────┐          │
-///            │    │Reconcile│          │
+///            │    └────┬─────┘    └─┬──┬──────────┘
+///            │         │            │  │
+///            │    ┌────▼────┐       │  │
+///            │    │Reconcile◄───────┘  │
 ///            │    └────┬────┘          │
 ///            │         │               │
 ///            │     ┌───▼──┐            │
@@ -1803,7 +1880,9 @@ pub enum NegotiationStateData {
     Reconcile,
 
     /// Waiting for live-repair to begin
-    LiveRepairReady,
+    // This state includes [`RegionMetadata`], because if all three Downstairs
+    // end up in `LiveRepairReady`, we have to perform reconciliation instead.
+    LiveRepairReady(RegionMetadata),
 }
 
 impl NegotiationStateData {
@@ -1842,7 +1921,7 @@ impl NegotiationStateData {
                 ConnectionMode::New
             ) | (
                 NegotiationStateData::GetExtentVersions,
-                NegotiationStateData::LiveRepairReady,
+                NegotiationStateData::LiveRepairReady(..),
                 ConnectionMode::Faulted | ConnectionMode::Replaced,
             )
         )
@@ -2359,10 +2438,12 @@ impl ClientIoTask {
 
             let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-            let server_name = tokio_rustls::rustls::ServerName::try_from(
-                format!("downstairs{}", self.client_id).as_str(),
-            )
-            .unwrap();
+            let server_name =
+                tokio_rustls::rustls::pki_types::ServerName::try_from(format!(
+                    "downstairs{}",
+                    self.client_id
+                ))
+                .unwrap();
 
             let sock = connector.connect(server_name, tcp).await.unwrap();
             let (read, write) = tokio::io::split(sock);
@@ -2558,10 +2639,10 @@ fn update_net_start_probes(m: &Message, cid: ClientId) {
         Message::ReadRequest { job_id, .. } => {
             cdt::ds__read__net__start!(|| (job_id.0, cid.get()));
         }
-        Message::Write { ref header, .. } => {
+        Message::Write { header, .. } => {
             cdt::ds__write__net__start!(|| (header.job_id.0, cid.get()));
         }
-        Message::WriteUnwritten { ref header, .. } => {
+        Message::WriteUnwritten { header, .. } => {
             cdt::ds__write__unwritten__net__start!(|| (
                 header.job_id.0,
                 cid.get()
@@ -2575,7 +2656,7 @@ fn update_net_start_probes(m: &Message, cid: ClientId) {
 }
 fn update_net_done_probes(m: &Message, cid: ClientId) {
     match m {
-        Message::ReadResponse { ref header, .. } => {
+        Message::ReadResponse { header, .. } => {
             cdt::ds__read__net__done!(|| (header.job_id.0, cid.get()));
         }
         Message::WriteAck { job_id, .. } => {

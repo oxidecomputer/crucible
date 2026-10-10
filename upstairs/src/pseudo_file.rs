@@ -212,9 +212,9 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
     }
     pub async fn activate_with_gen(
         &mut self,
-        gen: u64,
+        generation: u64,
     ) -> Result<(), CrucibleError> {
-        self.block_io.activate_with_gen(gen).await?;
+        self.block_io.activate_with_gen(generation).await?;
         self.sz = self.block_io.total_size().await?;
         self.block_size = self.block_io.get_block_size().await?;
         self.uuid = self.block_io.get_uuid().await?;

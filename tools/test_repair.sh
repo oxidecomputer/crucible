@@ -54,7 +54,7 @@ fi
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
-TEST_ROOT="${WORK_ROOT}/test_live_repair"
+TEST_ROOT="${WORK_ROOT}/test_repair"
 if [[ -d "$TEST_ROOT" ]]; then
     # Delete previous test data
     rm -r "$TEST_ROOT"
@@ -220,7 +220,7 @@ while [[ $count -lt $loops ]]; do
     then
         echo "Exit on verify fail, loop: $count, choice: $choice"
         echo "Check $test_log for details"
-	cleanup
+        cleanup
         exit 1
     fi
     set +o errexit

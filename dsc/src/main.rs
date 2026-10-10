@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use byte_unit::Byte;
 use clap::{Parser, Subcommand};
 use csv::WriterBuilder;
@@ -18,15 +18,15 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::process::{Child, Command};
 use tokio::runtime::Builder;
-use tokio::sync::{mpsc, watch, Mutex};
-use tokio::time::{sleep_until, Duration, Instant};
+use tokio::sync::{Mutex, mpsc, watch};
+use tokio::time::{Duration, Instant, sleep_until};
 use uuid::Uuid;
 
 pub mod client;
 pub mod control;
-use client::{client_main, ClientCommand};
+use client::{ClientCommand, client_main};
 use crucible_client_types::RegionExtentInfo;
-use crucible_common::{config_path, read_json, RegionDefinition};
+use crucible_common::{RegionDefinition, config_path, read_json};
 
 /// dsc  DownStairs Controller
 #[derive(Debug, Parser)]
@@ -1654,7 +1654,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::{NamedTempFile, tempdir};
 
     // Create a temporary file.  Close the file but return the path
     // so it won't be deleted.

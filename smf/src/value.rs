@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use num_traits::cast::FromPrimitive;
 
 use super::scf_sys::*;
-use super::{buf_for, str_from, Iter, Property, Result, Scf, ScfError};
+use super::{Iter, Property, Result, Scf, ScfError, buf_for, str_from};
 
 #[derive(Debug)]
 pub struct Value<'a> {
