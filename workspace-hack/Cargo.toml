@@ -73,7 +73,8 @@ slab = { version = "0.4" }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
 subtle = { version = "2" }
-syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "full"] }
+syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26" }
@@ -142,7 +143,8 @@ slab = { version = "0.4" }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
 subtle = { version = "2" }
-syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "full"] }
+syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
