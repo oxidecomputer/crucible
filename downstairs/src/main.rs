@@ -3,8 +3,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use slog::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -14,6 +18,35 @@ use crucible_common::{ExtentId, build_logger};
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
 use crucible_protocol::{CRUCIBLE_MESSAGE_VERSION, JobId};
+
+/// Install a tracing subscriber that exports spans via OTLP/HTTP to
+/// `endpoint` (e.g. `http://localhost:4318/v1/traces`).
+///
+/// Spans are exported until the returned provider is shut down or dropped.
+fn init_tracing(endpoint: String) -> Result<SdkTracerProvider> {
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint)
+        .build()
+        .context("Error initializing OTLP exporter")?;
+
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            Resource::builder().with_service_name("downstairs").build(),
+        )
+        .build();
+
+    let telemetry = tracing_opentelemetry::layer()
+        .with_tracer(provider.tracer("downstairs"));
+
+    tracing_subscriber::registry()
+        .with(telemetry)
+        .try_init()
+        .context("Error init tracing subscriber")?;
+
+    Ok(provider)
+}
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -51,6 +84,8 @@ enum Args {
         #[clap(short, long, action)]
         source: SocketAddr,
 
+        /// OTLP/HTTP trace collector endpoint,
+        /// e.g. http://localhost:4318/v1/traces
         #[clap(short, long, action)]
         trace_endpoint: Option<String>,
     },
@@ -196,6 +231,8 @@ enum Args {
         #[clap(long, action)]
         flush_errors: bool,
 
+        /// OTLP/HTTP trace collector endpoint,
+        /// e.g. http://localhost:4318/v1/traces
         #[clap(short, long, action)]
         trace_endpoint: Option<String>,
 
@@ -211,6 +248,8 @@ enum Args {
         mode: Mode,
     },
     Serve {
+        /// OTLP/HTTP trace collector endpoint,
+        /// e.g. http://localhost:4318/v1/traces
         #[clap(short, long, action)]
         trace_endpoint: Option<String>,
 
@@ -302,26 +341,16 @@ async fn main() -> Result<()> {
             trace_endpoint,
         } => {
             // Instrumentation is shared.
-            if let Some(endpoint) = trace_endpoint {
-                let tracer = opentelemetry_jaeger::new_agent_pipeline()
-                    .with_endpoint(endpoint) // usually port 6831
-                    .with_service_name("downstairs")
-                    .install_simple()
-                    .expect("Error initializing Jaeger exporter");
-
-                let telemetry =
-                    tracing_opentelemetry::layer().with_tracer(tracer);
-
-                tracing_subscriber::registry()
-                    .with(telemetry)
-                    .try_init()
-                    .expect("Error init tracing subscriber");
-            }
+            let tracer_provider =
+                trace_endpoint.map(init_tracing).transpose()?;
 
             let mut ds = Downstairs::new_builder(&data, true)
                 .set_logger(log)
                 .build()?;
             ds.clone_region(source).await?;
+            if let Some(provider) = tracer_provider {
+                provider.shutdown()?;
+            }
             Ok(())
         }
         Args::Create {
@@ -414,22 +443,10 @@ async fn main() -> Result<()> {
             root_cert_pem,
             mode,
         } => {
-            // Instrumentation is shared.
-            if let Some(endpoint) = trace_endpoint {
-                let tracer = opentelemetry_jaeger::new_agent_pipeline()
-                    .with_endpoint(endpoint) // usually port 6831
-                    .with_service_name("downstairs")
-                    .install_simple()
-                    .expect("Error initializing Jaeger exporter");
-
-                let telemetry =
-                    tracing_opentelemetry::layer().with_tracer(tracer);
-
-                tracing_subscriber::registry()
-                    .with(telemetry)
-                    .try_init()
-                    .expect("Error init tracing subscriber");
-            }
+            // Instrumentation is shared.  Hold the provider for the life
+            // of the process; dropping it stops span export.
+            let _tracer_provider =
+                trace_endpoint.map(init_tracing).transpose()?;
 
             let read_only = mode == Mode::Ro;
 
@@ -467,22 +484,10 @@ async fn main() -> Result<()> {
             trace_endpoint,
             bind_addr,
         } => {
-            // Instrumentation is shared.
-            if let Some(endpoint) = trace_endpoint {
-                let tracer = opentelemetry_jaeger::new_agent_pipeline()
-                    .with_endpoint(endpoint) // usually port 6831
-                    .with_service_name("downstairs")
-                    .install_simple()
-                    .expect("Error initializing Jaeger exporter");
-
-                let telemetry =
-                    tracing_opentelemetry::layer().with_tracer(tracer);
-
-                tracing_subscriber::registry()
-                    .with(telemetry)
-                    .try_init()
-                    .expect("Error init tracing subscriber");
-            }
+            // Instrumentation is shared.  Hold the provider for the life
+            // of the process; dropping it stops span export.
+            let _tracer_provider =
+                trace_endpoint.map(init_tracing).transpose()?;
 
             run_dropshot(bind_addr, &log).await
         }

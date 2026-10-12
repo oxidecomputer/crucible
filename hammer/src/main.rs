@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use uuid::Uuid;
 
@@ -10,6 +10,10 @@ use crucible::*;
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -31,6 +35,8 @@ pub struct Opt {
     #[clap(short, long, action)]
     verify_isolation: bool,
 
+    /// OTLP/HTTP trace collector endpoint,
+    /// e.g. http://localhost:4318/v1/traces
     #[clap(long, action)]
     tracing_endpoint: Option<String>,
 
@@ -91,22 +97,35 @@ async fn main() -> Result<()> {
         read_only: false,
     };
 
-    if let Some(tracing_endpoint) = opt.tracing_endpoint {
-        let tracer = opentelemetry_jaeger::new_agent_pipeline()
-            .with_endpoint(tracing_endpoint)
-            .with_service_name("crucible-hammer")
-            .install_simple()
-            .expect("Error initializing Jaeger exporter");
+    let tracer_provider = if let Some(endpoint) = opt.tracing_endpoint {
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .build()
+            .context("Error initializing OTLP exporter")?;
 
-        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+        let provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(
+                Resource::builder()
+                    .with_service_name("crucible-hammer")
+                    .build(),
+            )
+            .build();
+
+        let telemetry = tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("crucible-hammer"));
 
         tracing_subscriber::registry()
             .with(telemetry)
             .try_init()
-            .expect("Error init tracing subscriber");
+            .context("Error init tracing subscriber")?;
 
         println!("Set up tracing!");
-    }
+        Some(provider)
+    } else {
+        None
+    };
 
     // Create N CruciblePseudoFiles to test activation handoff.
     let mut cpfs: Vec<crucible::CruciblePseudoFile<Guest>> =
@@ -274,6 +293,10 @@ async fn main() -> Result<()> {
             break;
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    }
+
+    if let Some(provider) = tracer_provider {
+        provider.shutdown()?;
     }
 
     Ok(())

@@ -180,23 +180,17 @@ cargo run -q -p crucible-downstairs -- export -d var/itest -e alan.iso --count 2
 
 # Tracing #
 
+Traces are exported using OTLP over HTTP, so any OTLP collector will work.
 Run a Jaeger container in order to collect and visualize traces:
 
     $ docker run --rm -d --name jaeger \
-      -e COLLECTOR_ZIPKIN_HOST_PORT=:9411 \
-      -p 5775:5775/udp \
-      -p 6831:6831/udp \
-      -p 6832:6832/udp \
-      -p 5778:5778 \
       -p 16686:16686 \
-      -p 14268:14268 \
-      -p 14250:14250 \
-      -p 9411:9411 \
-      jaegertracing/all-in-one:1.24
+      -p 4318:4318 \
+      jaegertracing/jaeger:latest
 
 Pass an option to crucible-downstairs to send traces to Jaeger:
 
-    $ cargo run -q -p crucible-downstairs -- run -p 3830 -d var/3830 --trace-endpoint localhost:6831
+    $ cargo run -q -p crucible-downstairs -- run -p 3830 -d var/3830 --trace-endpoint http://localhost:4318/v1/traces
 
 Then, go to `http://localhost:16686` to see the Jaeger UI.
 
