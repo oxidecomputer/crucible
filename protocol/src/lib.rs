@@ -245,7 +245,7 @@ pub const CRUCIBLE_MESSAGE_VERSION: u32 = MessageVersion::current() as u32;
  *
  * bincode encodes each variant by its position in this enum, so new
  * variants must be added at the end.  Never reorder or remove a variant
- * while an older protocol version is still supported; the
+ * while an older protocol version is still supported.  The
  * `message_wire_tags_are_stable` test checks this.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
