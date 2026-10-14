@@ -554,11 +554,6 @@ pub enum Message {
         job_id: JobId,
         error: CrucibleError,
     },
-
-    /*
-     * Misc
-     */
-    Unknown(u32, BytesMut),
 }
 /*
  * If you just added or changed the Message enum above, you must also
@@ -637,8 +632,7 @@ impl Message {
             | Message::Flush { .. }
             | Message::Barrier { .. }
             | Message::ReadRequest { .. }
-            | Message::WriteUnwritten { .. }
-            | Message::Unknown(..) => None,
+            | Message::WriteUnwritten { .. } => None,
 
             Message::ExtentError { error, .. }
             | Message::ErrorReport { error, .. } => Some(error),
@@ -1375,17 +1369,16 @@ mod tests {
     /// The bincode tag that each `Message` variant is encoded with on the wire.
     ///
     /// bincode encodes an enum variant as its index in the enum, so these
-    /// values depend only on the order of the variants in the `Message` struct.
-    /// Peers running different (but compatible) protocol versions must agree on
-    /// the tag of every message they can exchange.  This means existing tags can
-    /// never change, new variants are only ever appended to the end of `Message`
-    /// (before `Unknown`), and no variant is ever removed or reordered while
-    /// an older protocol version is still supported.
+    /// values depend only on the order of the variants in the `Message` enum.
+    /// Peers running different (but compatible) protocol versions must agree
+    /// on the tag of every message they can exchange.  This means existing tags
+    /// can never change, new variants are only ever appended to the end of
+    /// `Message`, and no variant is ever removed or reordered while an older
+    /// protocol version is still supported.
     ///
-    /// If you added a new variant, give it the next tag here (moving `Unknown`
-    /// out beyond it.  If an existing tag has to change, you are breaking
-    /// compatibility with every older protocol version.  Is that really what
-    /// you want to do?
+    /// If you added a new variant, give it the next tag here.  If an existing
+    /// tag has to change, you are breaking compatibility with every older
+    /// protocol version.  Is that really what you want to do?
     fn wire_tag(d: MessageDiscriminants) -> u32 {
         match d {
             MessageDiscriminants::HereIAm => 0,
@@ -1429,9 +1422,6 @@ mod tests {
             MessageDiscriminants::WriteUnwritten => 38,
             MessageDiscriminants::WriteUnwrittenAck => 39,
             MessageDiscriminants::ErrorReport => 40,
-            // `Unknown` is never sent on the wire, so its tag is allowed to
-            // move as new variants are appended before it.
-            MessageDiscriminants::Unknown => 41,
         }
     }
 
@@ -1687,9 +1677,6 @@ mod tests {
                 job_id,
                 error,
             },
-            MessageDiscriminants::Unknown => {
-                Message::Unknown(0, BytesMut::new())
-            }
         }
     }
 
@@ -1724,17 +1711,14 @@ mod tests {
         }
     }
 
-    /// Test that every `Message` variant (other than `Unknown`) is framed by
-    /// `CrucibleEncoder` with the expected tag (after the 4-byte length), and
-    /// that `CrucibleDecoder` turns that same frame back into the original
-    /// message.
+    /// Test that every `Message` variant is framed by `CrucibleEncoder` with
+    /// the expected tag (after the 4-byte length), and that `CrucibleDecoder`
+    /// turns that same frame back into the original message.
     #[test]
     fn message_frame_tags_are_stable() -> Result<()> {
         use strum::IntoEnumIterator;
 
-        for d in MessageDiscriminants::iter()
-            .filter(|d| *d != MessageDiscriminants::Unknown)
-        {
+        for d in MessageDiscriminants::iter() {
             let m = sample_message(d);
 
             let mut buf = BytesMut::new();

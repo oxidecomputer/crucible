@@ -1881,8 +1881,7 @@ impl Upstairs {
             | Message::ExtentRepair { .. }
             | Message::ExtentReopen { .. }
             | Message::ExtentVersionsPlease
-            | Message::PromoteToActive { .. }
-            | Message::Unknown(..) => {
+            | Message::PromoteToActive { .. } => {
                 panic!("invalid response {m:?}")
             }
         }
