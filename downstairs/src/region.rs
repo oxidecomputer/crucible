@@ -5,7 +5,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use futures::TryStreamExt;
 
 use tracing::instrument;
@@ -111,6 +111,14 @@ pub struct Region {
     dirty_extents: HashSet<ExtentId>,
 
     read_only: bool,
+
+    /// Has an upstairs ever told this downstairs that it was active?
+    ///
+    /// Persisted in the region active state file (see [`active_path`]) for
+    /// read-write regions.  Read-only regions always report `true` and never
+    /// touch that file.  Once `true`, this never goes back to `false`.
+    been_active: bool,
+
     log: Logger,
 
     /// Thread pool for doing long-running CPU work outside the Tokio runtime
@@ -226,10 +234,19 @@ impl Region {
         if Path::new(&cp).exists() {
             bail!("Config file already exists {:?}", cp);
         }
+        // The same not existing rules apply to the active file as well.
+        let ap = active_path(dir.as_ref());
+        if ap.exists() {
+            bail!("Region active file already exists {ap:?}");
+        }
         mkdir_for_file(&cp)?;
 
         write_json(&cp, &def, false)?;
         info!(log, "Created new region file {:?}", cp);
+
+        // A new region has never been active.
+        write_json(&ap, &RegionActiveState::new(false), false)?;
+        info!(log, "Created new region active file {ap:?}");
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(WORKER_POOL_SIZE)
@@ -241,6 +258,7 @@ impl Region {
             extents: Vec::new(),
             dirty_extents: HashSet::new(),
             read_only: false,
+            been_active: false,
             log,
             pool,
         };
@@ -303,6 +321,18 @@ impl Region {
             );
         }
 
+        let been_active = if read_only {
+            // A read-only region must have been copied from an active
+            // downstairs.  We can safely assume that this region has been
+            // active.
+            true
+        } else {
+            Self::read_or_create_active_state(dir.as_ref(), log)?
+        };
+        if verbose {
+            info!(log, "Region been_active: {been_active}");
+        }
+
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(WORKER_POOL_SIZE)
             .build()?;
@@ -317,9 +347,62 @@ impl Region {
             extents,
             dirty_extents: HashSet::new(),
             read_only,
+            been_active,
             log: log.clone(),
             pool,
         })
+    }
+
+    /// Read the region active state file for a read-write region
+    ///
+    /// If the file does not exist (e.g. the region was created by a
+    /// downstairs that predates this file), we create it and  record that
+    /// the region has not been active.
+    fn read_or_create_active_state(dir: &Path, log: &Logger) -> Result<bool> {
+        let ap = active_path(dir);
+
+        // TODO(PR input wanted): an active state file that exists but cannot
+        // be read or parsed (including an unknown `version`) is currently a
+        // fatal error and the region will not open.  The alternative is to
+        // treat it as `been_active: false` and rewrite it, which would let a
+        // corrupt file silently reset the flag.  Is failing the right policy?
+        let state: Option<RegionActiveState> = read_json_maybe(&ap)
+            .with_context(|| format!("reading region active file {ap:?}"))?;
+
+        match state {
+            Some(state) => Ok(state.been_active()),
+            None => {
+                write_json(&ap, &RegionActiveState::new(false), false)?;
+                info!(log, "Created missing region active file {ap:?}");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Returns `true` if an upstairs has ever told this downstairs that it
+    /// was active (always `true` for a read-only region)
+    pub fn been_active(&self) -> bool {
+        self.been_active
+    }
+
+    /// Record that an upstairs has told this downstairs that it is active
+    ///
+    /// This only ever moves the flag from `false` to `true`.  It does nothing
+    /// if the flag is already set or if the region is read-only.
+    pub fn set_been_active(&mut self) -> Result<()> {
+        if self.read_only || self.been_active {
+            return Ok(());
+        }
+        let ap = active_path(&self.dir);
+        // TODO(PR input wanted): If we can't write the active file, we could
+        // continue, but should we?  The creation of this file is not essential
+        // to the function of either upstairs or downstairs, it just allows
+        // 2/3 activation to happen.
+        write_json(&ap, &RegionActiveState::new(true), true)
+            .with_context(|| format!("writing region active file {ap:?}"))?;
+        info!(self.log, "Region has been active, updated {ap:?}");
+        self.been_active = true;
+        Ok(())
     }
 
     /**
@@ -1465,6 +1548,162 @@ pub(crate) mod test {
         Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
+    }
+
+    fn read_active_state(dir: &Path) -> RegionActiveState {
+        read_json(active_path(dir)).unwrap()
+    }
+
+    #[test]
+    fn region_active_file_format() {
+        // The on-disk format is shared with other downstairs versions, so pin
+        // it down exactly in both directions.
+        let v = serde_json::to_value(RegionActiveState::new(false)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"version": "v1", "been_active": false})
+        );
+
+        let state: RegionActiveState =
+            serde_json::from_str(r#"{"version": "v1", "been_active": true}"#)
+                .unwrap();
+        assert_eq!(state, RegionActiveState::new(true));
+    }
+
+    #[test]
+    fn region_create_not_been_active() {
+        let dir = tempdir().unwrap();
+        let region = Region::create(&dir, new_region_options(), csl()).unwrap();
+        assert!(!region.been_active());
+        assert_eq!(
+            read_active_state(dir.path()),
+            RegionActiveState::new(false)
+        );
+    }
+
+    #[test]
+    fn region_create_existing_active_file() {
+        // Creating a region fails if an active file is already present.
+        let dir = tempdir().unwrap();
+        write_json(active_path(&dir), &RegionActiveState::new(true), false)
+            .unwrap();
+        Region::create(&dir, new_region_options(), csl()).unwrap_err();
+        assert!(!config_path(&dir).exists());
+        assert_eq!(read_active_state(dir.path()), RegionActiveState::new(true));
+    }
+
+    #[test]
+    fn region_open_missing_active_file() {
+        // A region created before the active file existed has no such file.
+        // Opening it read-write creates the file with `been_active: false`.
+        let dir = tempdir().unwrap();
+        let log = csl();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(1, Backend::RawFile).unwrap();
+        drop(region);
+
+        std::fs::remove_file(active_path(&dir)).unwrap();
+
+        let region = Region::open(&dir, true, false, &log).unwrap();
+        assert!(!region.been_active());
+        assert_eq!(
+            read_active_state(dir.path()),
+            RegionActiveState::new(false)
+        );
+    }
+
+    #[test]
+    fn region_set_been_active_persists() {
+        let dir = tempdir().unwrap();
+        let log = csl();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(1, Backend::RawFile).unwrap();
+
+        region.set_been_active().unwrap();
+        assert!(region.been_active());
+        assert_eq!(read_active_state(dir.path()), RegionActiveState::new(true));
+
+        // Setting it again is a no-op
+        region.set_been_active().unwrap();
+        assert!(region.been_active());
+        drop(region);
+
+        let region = Region::open(&dir, true, false, &log).unwrap();
+        assert!(region.been_active());
+        assert_eq!(read_active_state(dir.path()), RegionActiveState::new(true));
+    }
+
+    #[test]
+    fn region_read_only_been_active() {
+        // A read-only region is always reported as having been active, and
+        // never reads or writes the active file.
+        let dir = tempdir().unwrap();
+        let log = csl();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(1, Backend::RawFile).unwrap();
+        drop(region);
+
+        // With a `false` file present, the file is left alone
+        let mut region = Region::open(&dir, true, true, &log).unwrap();
+        assert!(region.been_active());
+        region.set_been_active().unwrap();
+        drop(region);
+        assert_eq!(
+            read_active_state(dir.path()),
+            RegionActiveState::new(false)
+        );
+
+        // With no file present, none is created
+        std::fs::remove_file(active_path(&dir)).unwrap();
+        let mut region = Region::open(&dir, true, true, &log).unwrap();
+        assert!(region.been_active());
+        region.set_been_active().unwrap();
+        drop(region);
+        assert!(!active_path(&dir).exists());
+
+        // The same holds when we open the region for dump access, it should
+        // not create a file, even if the region is read write.
+        let (region, errors) = Region::open_for_dump(&dir, &log).unwrap();
+        assert!(errors.is_empty());
+        assert!(region.been_active());
+        drop(region);
+        assert!(!active_path(&dir).exists());
+
+        // An unparseable file is ignored by a read-only open
+        std::fs::write(active_path(&dir), "not json").unwrap();
+        let region = Region::open(&dir, true, true, &log).unwrap();
+        assert!(region.been_active());
+    }
+
+    #[test]
+    fn region_open_bad_active_file() {
+        // A read-write open fails if the active file can't be parsed or has
+        // an unknown version.
+        let dir = tempdir().unwrap();
+        let log = csl();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(1, Backend::RawFile).unwrap();
+        drop(region);
+
+        std::fs::write(active_path(&dir), "not json").unwrap();
+        Region::open(&dir, true, false, &log).unwrap_err();
+
+        std::fs::write(
+            active_path(&dir),
+            r#"{"version": "v99", "been_active": true}"#,
+        )
+        .unwrap();
+        Region::open(&dir, true, false, &log).unwrap_err();
+
+        // The bad file is left in place
+        assert_eq!(
+            std::fs::read_to_string(active_path(&dir)).unwrap(),
+            r#"{"version": "v99", "been_active": true}"#,
+        );
     }
 
     fn copy_extent_dir(backend: Backend) {
