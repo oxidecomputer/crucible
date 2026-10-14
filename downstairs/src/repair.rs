@@ -276,6 +276,8 @@ fn extent_file_list(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::region::validate_repair_files;
+    use crucible_common::{active_path, config_path};
     use tempfile::tempdir;
 
     fn new_region_options() -> crucible_common::RegionOptions {
@@ -291,6 +293,27 @@ mod test {
     // Create a simple logger
     fn csl() -> Logger {
         build_logger()
+    }
+
+    #[test]
+    fn extent_files_exclude_region_files() -> Result<()> {
+        // The region config and active state files are local to each
+        // downstairs and repair must never offer them for copying.
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3, Backend::RawFile)?;
+        assert!(config_path(&dir).exists());
+        assert!(active_path(&dir).exists());
+
+        for eid in (0..3).map(ExtentId) {
+            let extent_dir = extent_dir(&dir, eid);
+            let files = extent_file_list(extent_dir, eid).unwrap();
+            assert!(validate_repair_files(eid, &files));
+            assert!(!files.iter().any(|f| f == "region.json"));
+            assert!(!files.iter().any(|f| f == "active.json"));
+        }
+
+        Ok(())
     }
 
     #[test]
