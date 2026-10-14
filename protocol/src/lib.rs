@@ -1724,9 +1724,10 @@ mod tests {
         }
     }
 
-    /// Test that every `Message` variant (other than `Unknown`) survives a
-    /// trip through `CrucibleEncoder` / `CrucibleDecoder`, and that the tag
-    /// in the frame (after the 4-byte length) is the expected one.
+    /// Test that every `Message` variant (other than `Unknown`) is framed by
+    /// `CrucibleEncoder` with the expected tag (after the 4-byte length), and
+    /// that `CrucibleDecoder` turns that same frame back into the original
+    /// message.
     #[test]
     fn message_frame_tags_are_stable() -> Result<()> {
         use strum::IntoEnumIterator;
@@ -1744,7 +1745,9 @@ mod tests {
                 "Message::{d:?} is framed with the wrong tag"
             );
 
-            assert_eq!(m, round_trip(&m)?, "Message::{d:?} round trip");
+            let decoded = CrucibleDecoder::new().decode(&mut buf)?;
+            assert_eq!(Some(m), decoded, "Message::{d:?} decoded wrong");
+            assert!(buf.is_empty(), "Message::{d:?} left trailing bytes");
         }
         Ok(())
     }
