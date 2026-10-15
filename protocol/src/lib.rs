@@ -480,6 +480,7 @@ pub enum Message {
     // `BeenActivePlease` / `BeenActive` (V14) are also part of the
     // metadata exchange, but are at the end of this enum to keep the wire
     // tags of older messages unchanged.
+
     RegionInfoPlease,
     RegionInfo {
         region_def: RegionDefinition,
