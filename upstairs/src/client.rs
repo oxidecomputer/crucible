@@ -9,7 +9,7 @@ use crate::{
 };
 use crucible_common::{NegotiationError, VerboseTimeout, x509::TLSContext};
 use crucible_protocol::{
-    CRUCIBLE_MESSAGE_VERSION, MessageWriter, ReconciliationId,
+    CRUCIBLE_MESSAGE_VERSION, MessageVersion, MessageWriter, ReconciliationId,
 };
 use strum::IntoDiscriminant;
 
@@ -248,15 +248,21 @@ impl DownstairsClient {
     }
 
     /// Send a `Message::HereIAm` via the client IO task
+    ///
+    /// We offer our newest version, with every older version we still
+    /// support as an alternate; the downstairs picks one of them.
     pub(crate) fn send_here_i_am(&mut self) {
+        let (newest, older) = MessageVersion::supported()
+            .split_first()
+            .expect("at least one supported message version");
         self.send(Message::HereIAm {
-            version: CRUCIBLE_MESSAGE_VERSION,
+            version: u32::from(*newest),
             upstairs_id: self.cfg.upstairs_id,
             session_id: self.cfg.session_id,
             generation: self.cfg.generation(),
             read_only: self.cfg.read_only,
             encrypted: self.cfg.encrypted(),
-            alternate_versions: vec![],
+            alternate_versions: older.iter().map(|v| u32::from(*v)).collect(),
         });
     }
 
@@ -1321,18 +1327,23 @@ impl DownstairsClient {
                     error!(self.log, "got version already");
                     return Err(NegotiationError::OutOfOrder);
                 };
-                if version != CRUCIBLE_MESSAGE_VERSION {
+                // The downstairs must pick one of the versions we offered
+                let supported = MessageVersion::supported();
+                let Some(negotiated_version) =
+                    MessageVersion::try_from(version)
+                        .ok()
+                        .filter(|v| supported.contains(v))
+                else {
                     error!(
                         self.log,
-                        "expected version {}, got {}",
-                        CRUCIBLE_MESSAGE_VERSION,
-                        version
+                        "expected one of versions {supported:?}, got {version}",
                     );
                     return Err(NegotiationError::IncompatibleVersion {
                         expected: CRUCIBLE_MESSAGE_VERSION,
                         actual: version,
                     });
-                }
+                };
+                info!(self.log, "negotiated version {negotiated_version}");
                 self.repair_addr = Some(repair_addr);
                 *state = NegotiationStateData::WaitForPromote;
                 self.send(Message::PromoteToActive {
@@ -1345,8 +1356,8 @@ impl DownstairsClient {
             Message::VersionMismatch { version } => {
                 error!(
                     self.log,
-                    "downstairs version is {version}, \
-                     ours is {CRUCIBLE_MESSAGE_VERSION}"
+                    "downstairs version is {version}, ours are {:?}",
+                    MessageVersion::supported(),
                 );
                 Err(NegotiationError::IncompatibleVersion {
                     expected: CRUCIBLE_MESSAGE_VERSION,
@@ -1967,6 +1978,69 @@ impl EnqueueResult {
 mod test {
     use super::*;
     use slog::Discard;
+
+    fn test_client() -> DownstairsClient {
+        DownstairsClient::new(
+            ClientId::new(0),
+            Arc::new(UpstairsConfig {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                generation: AtomicU64::new(1),
+                read_only: false,
+                encryption_context: None,
+            }),
+            None,
+            ClientIOLimits::new(100, 1024 * 1024),
+            Logger::root(Discard, o!()),
+            None,
+        )
+    }
+
+    /// Send `YesItsMe` with the given version to a client that is waiting
+    /// for it, returning the result of negotiation
+    fn yes_its_me(version: u32) -> Result<NegotiationResult, NegotiationError> {
+        let mut client = test_client();
+        client.set_active_request();
+        let mut ddef = RegionDefinitionStatus::WaitingForDownstairs;
+        client.continue_negotiation(
+            Message::YesItsMe {
+                version,
+                repair_addr: "127.0.0.1:1234".parse().unwrap(),
+            },
+            &UpstairsState::Initializing,
+            &mut ddef,
+        )
+    }
+
+    #[test]
+    fn test_yes_its_me_supported_versions() {
+        // Verify every supported version we offer is accepted
+        for v in MessageVersion::supported() {
+            assert!(matches!(
+                yes_its_me(u32::from(*v)),
+                Ok(NegotiationResult::NotDone)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_yes_its_me_unsupported_versions() {
+        // Versions we don't offer are rejected, including known versions
+        // that are older or newer than our supported set.
+        let supported = MessageVersion::supported();
+        let newest = u32::from(supported[0]);
+        let oldest = u32::from(supported[supported.len() - 1]);
+        for v in [0, oldest - 1, newest + 1, u32::MAX] {
+            assert!(
+                matches!(
+                    yes_its_me(v),
+                    Err(NegotiationError::IncompatibleVersion { actual, .. })
+                        if actual == v
+                ),
+                "version {v} should be rejected"
+            );
+        }
+    }
 
     #[test]
     fn test_set_active_request_while_replacing() {
