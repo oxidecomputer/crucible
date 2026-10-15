@@ -587,7 +587,10 @@ pub enum Message {
     BeenActivePlease,
 
     /// Reply to `BeenActivePlease`.  A region that has no record of being
-    /// active (including one created by an older downstairs) reports `false`.
+    /// active reports `false`.  Any region created before V14 will initially
+    /// report false until the first time it's activated with an upstairs
+    /// that is running V14 or greater, at that point it will start reporting
+    /// that it has been active.
     BeenActive {
         been_active: bool,
     },
