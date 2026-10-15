@@ -1881,7 +1881,15 @@ impl Upstairs {
             | Message::ExtentRepair { .. }
             | Message::ExtentReopen { .. }
             | Message::ExtentVersionsPlease
-            | Message::PromoteToActive { .. } => {
+            | Message::PromoteToActive { .. }
+            | Message::BeenActivePlease
+            | Message::YouHaveBeenActive { .. } => {
+                panic!("invalid response {m:?}")
+            }
+
+            // TODO/WIP We don't send `BeenActivePlease` yet, so no downstairs
+            // should be replying with this.  Changes coming soon.
+            Message::BeenActive { .. } => {
                 panic!("invalid response {m:?}")
             }
         }
