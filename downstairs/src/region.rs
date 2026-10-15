@@ -115,8 +115,9 @@ pub struct Region {
     /// Has an upstairs ever told this downstairs that it was active?
     ///
     /// Persisted in the region active state file (see [`active_path`]) for
-    /// read-write regions.  Read-only regions always report `true` and never
-    /// touch that file.  Once `true`, this never goes back to `false`.
+    /// read-write regions.  Once `true`, this never goes back to `false`.
+    /// This is not tracked for a read-only region.  The question does not
+    /// apply, so we never touch the file and an upstairs should never ask.
     been_active: bool,
 
     log: Logger,
@@ -322,16 +323,17 @@ impl Region {
         }
 
         let been_active = if read_only {
-            // A read-only region must have been copied from an active
-            // downstairs.  We can safely assume that this region has been
-            // active.
-            true
+            // been_active is not tracked for a read-only region, so leave
+            // the file alone.  The value is never read.
+            false
         } else {
-            Self::read_or_create_active_state(dir.as_ref(), log)?
+            let been_active =
+                Self::read_or_create_active_state(dir.as_ref(), log)?;
+            if verbose {
+                info!(log, "Region been_active: {been_active}");
+            }
+            been_active
         };
-        if verbose {
-            info!(log, "Region been_active: {been_active}");
-        }
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(WORKER_POOL_SIZE)
@@ -380,17 +382,23 @@ impl Region {
     }
 
     /// Returns `true` if an upstairs has ever told this downstairs that it
-    /// was active (always `true` for a read-only region)
-    pub fn been_active(&self) -> bool {
-        self.been_active
+    /// was active
+    ///
+    /// Returns an error for a read-only region, where the question does not
+    /// apply.
+    pub fn been_active(&self) -> Result<bool> {
+        if self.read_only {
+            bail!("been_active is not tracked for a read-only region");
+        }
+        Ok(self.been_active)
     }
 
     /// Record that an upstairs has told this downstairs that it is active
     ///
     /// This only ever moves the flag from `false` to `true`.  It does nothing
-    /// if the flag is already set or if the region is read-only.
+    /// if the flag is already set.  Returns an error for a read-only region.
     pub fn set_been_active(&mut self) -> Result<()> {
-        if self.read_only || self.been_active {
+        if self.been_active()? {
             return Ok(());
         }
         let ap = active_path(&self.dir);
@@ -1574,7 +1582,7 @@ pub(crate) mod test {
     fn region_create_not_been_active() {
         let dir = tempdir().unwrap();
         let region = Region::create(&dir, new_region_options(), csl()).unwrap();
-        assert!(!region.been_active());
+        assert!(!region.been_active().unwrap());
         assert_eq!(
             read_active_state(dir.path()),
             RegionActiveState::new(false)
@@ -1606,7 +1614,7 @@ pub(crate) mod test {
         std::fs::remove_file(active_path(&dir)).unwrap();
 
         let region = Region::open(&dir, true, false, &log).unwrap();
-        assert!(!region.been_active());
+        assert!(!region.been_active().unwrap());
         assert_eq!(
             read_active_state(dir.path()),
             RegionActiveState::new(false)
@@ -1622,23 +1630,23 @@ pub(crate) mod test {
         region.extend(1, Backend::RawFile).unwrap();
 
         region.set_been_active().unwrap();
-        assert!(region.been_active());
+        assert!(region.been_active().unwrap());
         assert_eq!(read_active_state(dir.path()), RegionActiveState::new(true));
 
         // Setting it again is a no-op
         region.set_been_active().unwrap();
-        assert!(region.been_active());
+        assert!(region.been_active().unwrap());
         drop(region);
 
         let region = Region::open(&dir, true, false, &log).unwrap();
-        assert!(region.been_active());
+        assert!(region.been_active().unwrap());
         assert_eq!(read_active_state(dir.path()), RegionActiveState::new(true));
     }
 
     #[test]
     fn region_read_only_been_active() {
-        // A read-only region is always reported as having been active, and
-        // never reads or writes the active file.
+        // been_active is not tracked for a read-only region.  Asking or
+        // setting it is an error.
         let dir = tempdir().unwrap();
         let log = csl();
         let mut region =
@@ -1648,8 +1656,8 @@ pub(crate) mod test {
 
         // With a `false` file present, the file is left alone
         let mut region = Region::open(&dir, true, true, &log).unwrap();
-        assert!(region.been_active());
-        region.set_been_active().unwrap();
+        region.been_active().unwrap_err();
+        region.set_been_active().unwrap_err();
         drop(region);
         assert_eq!(
             read_active_state(dir.path()),
@@ -1659,8 +1667,8 @@ pub(crate) mod test {
         // With no file present, none is created
         std::fs::remove_file(active_path(&dir)).unwrap();
         let mut region = Region::open(&dir, true, true, &log).unwrap();
-        assert!(region.been_active());
-        region.set_been_active().unwrap();
+        region.been_active().unwrap_err();
+        region.set_been_active().unwrap_err();
         drop(region);
         assert!(!active_path(&dir).exists());
 
@@ -1668,14 +1676,14 @@ pub(crate) mod test {
         // not create a file, even if the region is read write.
         let (region, errors) = Region::open_for_dump(&dir, &log).unwrap();
         assert!(errors.is_empty());
-        assert!(region.been_active());
+        region.been_active().unwrap_err();
         drop(region);
         assert!(!active_path(&dir).exists());
 
         // An unparseable file is ignored by a read-only open
         std::fs::write(active_path(&dir), "not json").unwrap();
         let region = Region::open(&dir, true, true, &log).unwrap();
-        assert!(region.been_active());
+        region.been_active().unwrap_err();
     }
 
     #[test]
