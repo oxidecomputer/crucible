@@ -1674,6 +1674,7 @@ dependencies = [
  "crucible-downstairs",
  "crucible-pantry",
  "crucible-pantry-client",
+ "crucible-protocol",
  "crucible-workspace-hack",
  "dropshot",
  "futures",
