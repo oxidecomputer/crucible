@@ -17,9 +17,9 @@ use crucible_common::{
     mkdir_for_file,
 };
 use crucible_protocol::{
-    BlockContext, CRUCIBLE_MESSAGE_VERSION, CrucibleDecoder, JobId, Message,
-    MessageVersion, MessageWriter, ReadBlockContext, ReconciliationId,
-    SnapshotDetails, negotiate_version,
+    BlockContext, CrucibleDecoder, JobId, Message, MessageVersion,
+    MessageWriter, ReadBlockContext, ReconciliationId, SnapshotDetails,
+    negotiate_version,
 };
 use repair_client::Client;
 
@@ -2153,6 +2153,8 @@ pub struct DownstairsBuilder {
     write_errors: Option<bool>, // Test flag
     flush_errors: Option<bool>, // Test flag
     log: Option<Logger>,
+    /// Newest message version to offer; `None` means all supported versions
+    max_message_version: Option<MessageVersion>,
 }
 
 impl DownstairsBuilder {
@@ -2164,6 +2166,7 @@ impl DownstairsBuilder {
             write_errors: Some(false),
             flush_errors: Some(false),
             log: None,
+            max_message_version: None,
         }
     }
 
@@ -2186,12 +2189,38 @@ impl DownstairsBuilder {
         self.log = Some(log);
         self
     }
+    /// Only negotiate message versions at or below `max`
+    ///
+    /// This lets tests run a downstairs that acts like an older build.
+    pub fn set_max_message_version(mut self, max: MessageVersion) -> Self {
+        self.max_message_version = Some(max);
+        self
+    }
 
     pub fn build(self) -> Result<Downstairs> {
         let lossy = self.lossy.unwrap_or(false);
         let read_errors = self.read_errors.unwrap_or(false);
         let write_errors = self.write_errors.unwrap_or(false);
         let flush_errors = self.flush_errors.unwrap_or(false);
+
+        let message_versions = match self.max_message_version {
+            None => MessageVersion::supported().to_vec(),
+            Some(max) => {
+                let versions: Vec<MessageVersion> = MessageVersion::supported()
+                    .iter()
+                    .copied()
+                    .filter(|v| *v <= max)
+                    .collect();
+                if versions.is_empty() {
+                    bail!(
+                        "No supported message version at or below {max}, \
+                         supported versions are {:?}",
+                        MessageVersion::supported()
+                    );
+                }
+                versions
+            }
+        };
 
         let log = match &self.log {
             Some(log) => log.clone(),
@@ -2233,6 +2262,7 @@ impl DownstairsBuilder {
                 flush_errors,
                 read_only,
                 encrypted,
+                message_versions,
             },
             active_upstairs: HashMap::new(),
             connection_state: HashMap::new(),
@@ -2258,6 +2288,8 @@ struct DownstairsFlags {
     flush_errors: bool, // Test flag
     read_only: bool,
     encrypted: bool,
+    /// Message versions we will negotiate, newest first
+    message_versions: Vec<MessageVersion>,
 }
 
 /*
@@ -2301,6 +2333,7 @@ impl Downstairs {
             write_errors: Some(false),
             flush_errors: Some(false),
             log: None,
+            max_message_version: None,
         }
     }
 
@@ -2588,7 +2621,11 @@ impl Downstairs {
         info!(
             log,
             "Upstairs <-> Downstairs Message Version: {}",
-            CRUCIBLE_MESSAGE_VERSION
+            self.flags.message_versions[0]
+        );
+        info!(
+            log,
+            "Supported Message Versions: {:?}", self.flags.message_versions
         );
 
         info!(log, "Connecting to {source} to obtain our extent files.");
@@ -2754,12 +2791,12 @@ impl Downstairs {
 
                 // Verify we can communicate with the upstairs.  Pick the
                 // newest version that we both support.
-                let supported = MessageVersion::supported();
+                let supported = &self.flags.message_versions;
                 let Some(negotiated_version) =
                     negotiate_version(supported, version, &alternate_versions)
                 else {
                     let m = Message::VersionMismatch {
-                        version: CRUCIBLE_MESSAGE_VERSION,
+                        version: u32::from(supported[0]),
                     };
                     if let Err(e) = state.reply(m) {
                         warn!(
@@ -3548,7 +3585,11 @@ impl DownstairsClient {
         info!(
             log,
             "Upstairs <-> Downstairs Message Version: {}",
-            CRUCIBLE_MESSAGE_VERSION
+            ds.flags.message_versions[0]
+        );
+        info!(
+            log,
+            "Supported Message Versions: {:?}", ds.flags.message_versions
         );
 
         let repair_address = SocketAddr::new(settings.address, settings.rport);
@@ -3761,6 +3802,7 @@ impl Default for DownstairsClientSettings {
 mod test {
     use super::*;
     use bytes::Bytes;
+    use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
     use rand_chacha::ChaCha20Rng;
     use std::net::Ipv4Addr;
     use tempfile::{TempDir, tempdir};
@@ -3942,6 +3984,23 @@ mod test {
         extent_count: u32,
         dir: &TempDir,
     ) -> Result<Downstairs> {
+        create_test_downstairs_builder(
+            block_size,
+            extent_size,
+            extent_count,
+            dir,
+        )?
+        .build()
+    }
+
+    // Like create_test_downstairs, but returns the DownstairsBuilder so the
+    // caller can change settings before building.
+    fn create_test_downstairs_builder(
+        block_size: u64,
+        extent_size: u64,
+        extent_count: u32,
+        dir: &TempDir,
+    ) -> Result<DownstairsBuilder> {
         // create region
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
@@ -3957,11 +4016,7 @@ mod test {
         region.extend(extent_count, Backend::default())?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ds = Downstairs::new_builder(&path_dir, false)
-            .set_logger(csl())
-            .build()?;
-
-        Ok(ds)
+        Ok(Downstairs::new_builder(&path_dir, false).set_logger(csl()))
     }
 
     #[tokio::test]
@@ -5930,10 +5985,13 @@ mod test {
      * Test function that will start up a downstairs (at the provided port)
      * then create a tcp connection to that downstairs, returning the tcp
      * connection to the caller.
+     * If max_message_version is set, the downstairs will only negotiate
+     * message versions at or below it.
      */
     async fn start_ds_and_connect(
         listen_port: u16,
         repair_port: u16,
+        max_message_version: Option<MessageVersion>,
     ) -> Result<tokio::net::TcpStream> {
         /*
          * Pick some small enough values for what we need.
@@ -5943,7 +6001,11 @@ mod test {
         let ec = 5;
         let dir = tempdir()?;
 
-        let ds = create_test_downstairs(bs, es, ec, &dir)?;
+        let mut builder = create_test_downstairs_builder(bs, es, ec, &dir)?;
+        if let Some(max) = max_message_version {
+            builder = builder.set_max_message_version(max);
+        }
+        let ds = builder.build()?;
         let _jh = DownstairsClient::spawn(
             ds,
             DownstairsClientSettings {
@@ -5969,7 +6031,7 @@ mod test {
         // A simple test to verify that sending the current crucible
         // message version to the downstairs will trigger a response
         // indicating the version is supported.
-        let tcp = start_ds_and_connect(5555, 5556).await.unwrap();
+        let tcp = start_ds_and_connect(5555, 5556, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
@@ -6007,7 +6069,7 @@ mod test {
     async fn test_version_downrev() -> Result<()> {
         // Test that a newer crucible version will result in a message
         // indicating there is a version mismatch.
-        let tcp = start_ds_and_connect(5557, 5558).await.unwrap();
+        let tcp = start_ds_and_connect(5557, 5558, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
@@ -6041,7 +6103,7 @@ mod test {
     async fn test_version_uprev_only() -> Result<()> {
         // Test sending only the +1 version to the DS, verify it rejects
         // this version as unsupported.
-        let tcp = start_ds_and_connect(5579, 5560).await.unwrap();
+        let tcp = start_ds_and_connect(5579, 5560, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
@@ -6075,7 +6137,7 @@ mod test {
         // Test sending the +1 version to the DS, but also include the
         // current version on the supported list.  The downstairs should
         // see that and respond with the version it does support.
-        let tcp = start_ds_and_connect(5561, 5562).await.unwrap();
+        let tcp = start_ds_and_connect(5561, 5562, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
@@ -6116,7 +6178,7 @@ mod test {
         // Test sending an invalid version to the DS, but also include the
         // current version on the supported list, but with several
         // choices.
-        let tcp = start_ds_and_connect(5563, 5564).await.unwrap();
+        let tcp = start_ds_and_connect(5563, 5564, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
@@ -6149,6 +6211,111 @@ mod test {
             }
             x => {
                 panic!("Invalid answer from downstairs: {:?}", x);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_max_message_version_build() -> Result<()> {
+        let newest = MessageVersion::current();
+
+        // No cap: every supported version is offered.
+        let dir = tempdir()?;
+        let ds = create_test_downstairs(512, 4, 2, &dir)?;
+        assert_eq!(ds.flags.message_versions, MessageVersion::supported());
+
+        // A cap at the newest version changes nothing.
+        let dir = tempdir()?;
+        let ds = create_test_downstairs_builder(512, 4, 2, &dir)?
+            .set_max_message_version(newest)
+            .build()?;
+        assert_eq!(ds.flags.message_versions, MessageVersion::supported());
+
+        // A cap above the newest version also changes nothing.
+        let dir = tempdir()?;
+        let ds = create_test_downstairs_builder(512, 4, 2, &dir)?
+            .set_max_message_version(MessageVersion::V14)
+            .build()?;
+        assert_eq!(ds.flags.message_versions, MessageVersion::supported());
+
+        // A cap below every supported version is an error.
+        let oldest = *MessageVersion::supported().last().unwrap();
+        let below = MessageVersion::try_from(u32::from(oldest) - 1)?;
+        let dir = tempdir()?;
+        let res = create_test_downstairs_builder(512, 4, 2, &dir)?
+            .set_max_message_version(below)
+            .build();
+        assert!(res.is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_version_max_compatible() -> Result<()> {
+        // A downstairs capped at V13 should pick V13 when the upstairs
+        // offers V14 and V13.
+        let tcp = start_ds_and_connect(5565, 5566, Some(MessageVersion::V13))
+            .await
+            .unwrap();
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = MessageWriter::new(write);
+
+        let m = Message::HereIAm {
+            version: u32::from(MessageVersion::V14),
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: vec![u32::from(MessageVersion::V13)],
+        };
+        fw.send(m).await?;
+
+        let f = fr.next().await.unwrap();
+
+        match f {
+            Ok(Message::YesItsMe { version, .. }) => {
+                assert_eq!(version, u32::from(MessageVersion::V13));
+            }
+            x => {
+                panic!("Invalid answer from downstairs: {x:?}");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_version_max_mismatch() -> Result<()> {
+        // A downstairs capped at V13 should reject an upstairs that only
+        // offers V14, and report V13 as its version.
+        let tcp = start_ds_and_connect(5567, 5568, Some(MessageVersion::V13))
+            .await
+            .unwrap();
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = MessageWriter::new(write);
+
+        let m = Message::HereIAm {
+            version: u32::from(MessageVersion::V14),
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: Vec::new(),
+        };
+        fw.send(m).await?;
+
+        let f = fr.next().await.unwrap();
+
+        match f {
+            Ok(Message::VersionMismatch { version }) => {
+                assert_eq!(version, u32::from(MessageVersion::V13));
+            }
+            x => {
+                panic!("Invalid answer from downstairs: {x:?}");
             }
         }
         Ok(())
