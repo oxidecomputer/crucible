@@ -17,6 +17,7 @@ crucible-client-types.workspace = true
 crucible-downstairs = { workspace = true, features = ["integration-tests", "zfs_snapshot"] }
 crucible-pantry-client.workspace = true
 crucible-pantry.workspace = true
+crucible-protocol.workspace = true
 crucible = { workspace = true, features = ["integration-tests"] }
 dropshot.workspace = true
 futures-core.workspace = true
