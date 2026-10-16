@@ -3329,11 +3329,9 @@ pub(crate) mod test {
         region.extend(10, backend).unwrap();
 
         // Write to extents 0 to 9
-        let mut job_id = 1;
-        for ext in (0..10).map(ExtentId) {
+        for (job_id, ext) in (1..).zip((0..10).map(ExtentId)) {
             let writes = create_generic_write(ext, BlockOffset(5));
             region.region_write(&writes, JobId(job_id), true).unwrap();
-            job_id += 1;
         }
 
         // Verify the dirty bit is now set for all extents.

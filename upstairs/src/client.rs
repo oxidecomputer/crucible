@@ -1130,15 +1130,12 @@ impl DownstairsClient {
                     IOop::Read { .. } => {
                         assert!(!read_data.blocks.is_empty());
                         assert!(extent_info.is_none());
-                        if job.data.is_none() {
-                            job.data = Some(read_data);
-                        } else {
+                        if let Some(job_data) = &job.data {
                             // If another job has finished already, we compare
                             // our read hash to that and verify they are the
                             // same.
                             debug!(self.log, "Read already AckReady {ds_id}");
-                            let job_blocks = &job.data.as_ref().unwrap().blocks;
-                            if job_blocks != &read_data.blocks {
+                            if job_data.blocks != read_data.blocks {
                                 // XXX This error needs to go to Nexus
                                 // XXX This will become the "force all
                                 // downstairs to stop and refuse to restart"
@@ -1151,7 +1148,7 @@ impl DownstairsClient {
                                     self.cfg.session_id,
                                     self.client_id,
                                     ds_id,
-                                    job_blocks,
+                                    job_data.blocks,
                                     read_data.blocks,
                                     job,
                                 );
@@ -1161,6 +1158,8 @@ impl DownstairsClient {
                                     panic!("{msg}");
                                 }
                             }
+                        } else {
+                            job.data = Some(read_data);
                         }
                     }
                     IOop::Write { .. }

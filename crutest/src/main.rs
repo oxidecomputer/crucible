@@ -776,13 +776,12 @@ async fn make_a_volume(
 
         let volume = Volume::construct(vcr, pr, volume_logger).await.unwrap();
         Ok((volume, targets))
-    } else if opt.dsc.is_some() {
+    } else if let Some(dsc) = opt.dsc {
         // We were given a dsc endpoint, use that to create a VCR that
         // represents our Volume.
         if !opt.target.is_empty() {
             warn!(test_log, "targets are ignored when dsc option is provided");
         }
-        let dsc = opt.dsc.unwrap();
         let dsc_url = format!("http://{}", dsc);
         let dsc_client = Client::new(&dsc_url);
         let ri = match dsc_client.dsc_get_region_info().await {
