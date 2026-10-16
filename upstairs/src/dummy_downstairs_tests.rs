@@ -1188,7 +1188,6 @@ async fn run_live_repair(mut harness: TestHarness) {
                         job_id: *job_id,
                         result: Ok(()),
                     });
-                    dep_job_id[2] = *job_id;
                 }
                 _ => panic!("saw {m3:?}"),
             }
