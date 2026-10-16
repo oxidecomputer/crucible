@@ -20,6 +20,7 @@ mod integration_tests {
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
+    use crucible_protocol::MessageVersion;
     use httptest::{Expectation, Server, matchers::*, responders::*};
     use repair_client::Client;
     use sha2::Digest;
@@ -351,6 +352,19 @@ mod integration_tests {
         address: IpAddr,
         dataset: T,
         downstairs: Option<DownstairsClient>,
+        /// Kept so a reboot starts the downstairs with the same cap
+        max_message_version: Option<MessageVersion>,
+    }
+
+    // Apply an optional message version cap to a DownstairsBuilder
+    fn with_max_message_version(
+        builder: DownstairsBuilder,
+        max_message_version: Option<MessageVersion>,
+    ) -> DownstairsBuilder {
+        match max_message_version {
+            Some(max) => builder.set_max_message_version(max),
+            None => builder,
+        }
     }
 
     impl<T: TestDownstairsDataset> Drop for TestDownstairs<T> {
@@ -379,6 +393,34 @@ mod integration_tests {
             backend: Backend,
             clone_source: Option<SocketAddr>,
         ) -> Result<Self> {
+            Self::new_with_max_message_version(
+                address,
+                encrypted,
+                read_only,
+                blocks_per_extent,
+                extent_count,
+                problematic,
+                backend,
+                clone_source,
+                None,
+            )
+            .await
+        }
+
+        /// Like `new`, but the downstairs will only negotiate message
+        /// versions at or below `max_message_version`, if it is set.
+        #[allow(clippy::too_many_arguments)]
+        pub async fn new_with_max_message_version(
+            address: IpAddr,
+            encrypted: bool,
+            read_only: bool,
+            blocks_per_extent: u64,
+            extent_count: u32,
+            problematic: bool,
+            backend: Backend,
+            clone_source: Option<SocketAddr>,
+            max_message_version: Option<MessageVersion>,
+        ) -> Result<Self> {
             let dataset =
                 T::new(blocks_per_extent * extent_count as u64 * 512)?;
 
@@ -405,11 +447,12 @@ mod integration_tests {
                 DownstairsBuilder::from_region(region)
             };
 
-            let mut downstairs = builder
-                .set_lossy(problematic)
-                .set_logger(csl())
-                .set_test_errors(problematic, problematic, problematic)
-                .build()?;
+            let mut downstairs =
+                with_max_message_version(builder, max_message_version)
+                    .set_lossy(problematic)
+                    .set_logger(csl())
+                    .set_test_errors(problematic, problematic, problematic)
+                    .build()?;
 
             if let Some(ref clone_source) = clone_source {
                 downstairs.clone_region(*clone_source).await?
@@ -428,6 +471,7 @@ mod integration_tests {
                 address,
                 dataset,
                 downstairs: Some(downstairs),
+                max_message_version,
             })
         }
 
@@ -436,9 +480,12 @@ mod integration_tests {
         }
 
         pub async fn reboot_read_only(&mut self) -> Result<()> {
-            let downstairs = Downstairs::new_builder(&self.path()?, true)
-                .set_logger(csl())
-                .build()?;
+            let downstairs = with_max_message_version(
+                Downstairs::new_builder(&self.path()?, true),
+                self.max_message_version,
+            )
+            .set_logger(csl())
+            .build()?;
 
             self.downstairs = Some(
                 DownstairsClient::spawn(
@@ -455,9 +502,12 @@ mod integration_tests {
         }
 
         pub async fn reboot_read_write(&mut self) -> Result<()> {
-            let downstairs = Downstairs::new_builder(&self.path()?, false)
-                .set_logger(csl())
-                .build()?;
+            let downstairs = with_max_message_version(
+                Downstairs::new_builder(&self.path()?, false),
+                self.max_message_version,
+            )
+            .set_logger(csl())
+            .build()?;
 
             self.downstairs = Some(
                 DownstairsClient::spawn(
@@ -481,9 +531,12 @@ mod integration_tests {
             // Note that we don't start the new Downstairs here, so we'll clear
             // out `self.downstairs`.
             self.downstairs = None;
-            let mut downstairs = Downstairs::new_builder(&self.path()?, true)
-                .set_logger(csl())
-                .build()?;
+            let mut downstairs = with_max_message_version(
+                Downstairs::new_builder(&self.path()?, true),
+                self.max_message_version,
+            )
+            .set_logger(csl())
+            .build()?;
             downstairs.clone_region(source).await
         }
 
@@ -593,7 +646,28 @@ mod integration_tests {
             problematic: bool,
             backend: Backend,
         ) -> Result<Self> {
-            let downstairs1 = TestDownstairs::new(
+            Self::new_with_max_message_versions(
+                read_only,
+                blocks_per_extent,
+                extent_count,
+                problematic,
+                backend,
+                [None; 3],
+            )
+            .await
+        }
+
+        /// Spin off three downstairs, each capped at the matching
+        /// entry of `max_message_versions` (if set).
+        pub async fn new_with_max_message_versions(
+            read_only: bool,
+            blocks_per_extent: u64,
+            extent_count: u32,
+            problematic: bool,
+            backend: Backend,
+            max_message_versions: [Option<MessageVersion>; 3],
+        ) -> Result<Self> {
+            let downstairs1 = TestDownstairs::new_with_max_message_version(
                 "127.0.0.1".parse()?,
                 true,
                 read_only,
@@ -602,9 +676,10 @@ mod integration_tests {
                 problematic,
                 backend,
                 None,
+                max_message_versions[0],
             )
             .await?;
-            let downstairs2 = TestDownstairs::new(
+            let downstairs2 = TestDownstairs::new_with_max_message_version(
                 "127.0.0.1".parse()?,
                 true,
                 read_only,
@@ -613,9 +688,10 @@ mod integration_tests {
                 problematic,
                 backend,
                 None,
+                max_message_versions[1],
             )
             .await?;
-            let downstairs3 = TestDownstairs::new(
+            let downstairs3 = TestDownstairs::new_with_max_message_version(
                 "127.0.0.1".parse()?,
                 true,
                 read_only,
@@ -624,6 +700,7 @@ mod integration_tests {
                 problematic,
                 backend,
                 None,
+                max_message_versions[2],
             )
             .await?;
 
@@ -783,6 +860,57 @@ mod integration_tests {
             .await?;
 
         // Read parent, verify contents
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
+        volume.read(BlockIndex(0), &mut buffer).await?;
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_region_downrev_downstairs() -> Result<()> {
+        // A simple single layer volume with a read, write, read, where one
+        // downstairs only negotiates message versions up to V13.
+        const BLOCK_SIZE: usize = 512;
+
+        let tds = DefaultTestDownstairsSet::new_with_max_message_versions(
+            false,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            [Some(MessageVersion::V13), None, None],
+        )
+        .await?;
+        let opts = tds.opts();
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                generation: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Volume::construct(vcr, None, csl()).await?;
+
+        volume.activate().await?;
+
+        // Write data in
+        volume
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
+            )
+            .await?;
+
+        // Read it back, verify contents
         let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume.read(BlockIndex(0), &mut buffer).await?;
 
