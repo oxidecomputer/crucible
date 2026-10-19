@@ -162,6 +162,17 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Add `BeenActivePlease`, `BeenActive`, and `YouHaveBeenActive`
+    ///
+    /// This is the first version where an upstairs and downstairs may each
+    /// support more than one version, so the new variants are appended to the
+    /// end of `Message` and the tags of all V13 messages are unchanged.
+    ///
+    /// TODO/WIP this is Not yet `current()`: the upstairs and downstairs can't
+    /// yet negotiate between V13 and V14, or handle the new messages.  As work
+    /// continues this comment will be updated.
+    V14 = 14,
+
     /// Remove `LastFlushAck`
     V13 = 13,
 
@@ -213,6 +224,9 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
+        // This stays at V13 until the upstairs and downstairs can negotiate
+        // either V13 or V14 and handle the V14 messages.  Moving to V14
+        // before then would break compatibility with V13 peers.
         Self::V13
     }
 }
@@ -228,6 +242,11 @@ pub const CRUCIBLE_MESSAGE_VERSION: u32 = MessageVersion::current() as u32;
  * If you add or change the Message enum, you must also increment the
  * CRUCIBLE_MESSAGE_VERSION.  It's just a few lines above you, why not
  * go do that right now before you forget.
+ *
+ * bincode encodes each variant by its position in this enum, so new
+ * variants must be added at the end.  Never reorder or remove a variant
+ * while an older protocol version is still supported.  The
+ * `message_wire_tags_are_stable` test checks this.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
@@ -456,9 +475,11 @@ pub enum Message {
         result: Result<(), CrucibleError>,
     },
 
-    /*
-     * Metadata exchange
-     */
+    // Metadata exchange
+    //
+    // `BeenActivePlease` / `BeenActive` (V14) are also part of the
+    // metadata exchange, but are at the end of this enum to keep the wire
+    // tags of older messages unchanged.
     RegionInfoPlease,
     RegionInfo {
         region_def: RegionDefinition,
@@ -554,12 +575,36 @@ pub enum Message {
         job_id: JobId,
         error: CrucibleError,
     },
+
+    // Messages added in V14.
+    //
+    // These belong with the negotiation messages above, but are placed here
+    // so that the wire tags of every V13 message are unchanged.  They must
+    // only be sent on a connection that negotiated V14 or later.
+    /// Ask the downstairs if its region has ever been part of an active
+    /// region set.  Sent after `RegionInfo`.
+    BeenActivePlease,
+
+    /// Reply to `BeenActivePlease`.  A region that has no record of being
+    /// active reports `false`.  Any region created before V14 will initially
+    /// report false until the first time it's activated with an upstairs
+    /// that is running V14 or greater, at that point it will start reporting
+    /// that it has been active.
+    BeenActive {
+        been_active: bool,
+    },
+
+    /// Tell the downstairs that it is now part of an active region set, so
+    /// it should record that it has been active.  The downstairs persists
+    /// this before continuing and never goes back to `false`.
+    YouHaveBeenActive {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+    },
 }
-/*
- * If you just added or changed the Message enum above, you must also
- * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
- * forget.
- */
+// If you just added or changed the Message enum above, you must also
+// increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
+// forget.  New variants go at the end.
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct WriteHeader {
@@ -632,7 +677,10 @@ impl Message {
             | Message::Flush { .. }
             | Message::Barrier { .. }
             | Message::ReadRequest { .. }
-            | Message::WriteUnwritten { .. } => None,
+            | Message::WriteUnwritten { .. }
+            | Message::BeenActivePlease
+            | Message::BeenActive { .. }
+            | Message::YouHaveBeenActive { .. } => None,
 
             Message::ExtentError { error, .. }
             | Message::ErrorReport { error, .. } => Some(error),
@@ -1199,6 +1247,32 @@ mod tests {
     }
 
     #[test]
+    fn rt_been_active_please() -> Result<()> {
+        let input = Message::BeenActivePlease;
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_been_active() -> Result<()> {
+        for been_active in [true, false] {
+            let input = Message::BeenActive { been_active };
+            assert_eq!(input, round_trip(&input)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rt_you_have_been_active() -> Result<()> {
+        let input = Message::YouHaveBeenActive {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+        };
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
     fn correctly_detect_truncated_message() -> Result<()> {
         let mut encoder = CrucibleEncoder::new();
         let mut decoder = CrucibleDecoder::new();
@@ -1422,6 +1496,10 @@ mod tests {
             MessageDiscriminants::WriteUnwritten => 38,
             MessageDiscriminants::WriteUnwrittenAck => 39,
             MessageDiscriminants::ErrorReport => 40,
+            // Added in V14
+            MessageDiscriminants::BeenActivePlease => 41,
+            MessageDiscriminants::BeenActive => 42,
+            MessageDiscriminants::YouHaveBeenActive => 43,
         }
     }
 
@@ -1677,6 +1755,16 @@ mod tests {
                 job_id,
                 error,
             },
+            MessageDiscriminants::BeenActivePlease => Message::BeenActivePlease,
+            MessageDiscriminants::BeenActive => {
+                Message::BeenActive { been_active: true }
+            }
+            MessageDiscriminants::YouHaveBeenActive => {
+                Message::YouHaveBeenActive {
+                    upstairs_id,
+                    session_id,
+                }
+            }
         }
     }
 
