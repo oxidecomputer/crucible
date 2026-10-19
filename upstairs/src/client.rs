@@ -720,21 +720,21 @@ impl DownstairsClient {
 
     /// Indicate that the upstairs has requested that we go active
     pub(crate) fn set_active_request(&mut self) {
-        if let DsStateData::Connecting { state, .. } = &mut self.state {
-            if matches!(state, NegotiationStateData::WaitConnect(..)) {
-                info!(self.log, "sending connect oneshot to client");
-                let mut s = NegotiationStateData::Start;
-                std::mem::swap(state, &mut s);
-                let NegotiationStateData::WaitConnect(t) = s else {
-                    unreachable!();
-                };
-                if let Err(e) = t.send(()) {
-                    error!(
-                        self.log,
-                        "failed to set client as active {e:?};
+        if let DsStateData::Connecting { state, .. } = &mut self.state
+            && matches!(state, NegotiationStateData::WaitConnect(..))
+        {
+            info!(self.log, "sending connect oneshot to client");
+            let mut s = NegotiationStateData::Start;
+            std::mem::swap(state, &mut s);
+            let NegotiationStateData::WaitConnect(t) = s else {
+                unreachable!();
+            };
+            if let Err(e) = t.send(()) {
+                error!(
+                    self.log,
+                    "failed to set client as active {e:?};
                          are we shutting down?"
-                    );
-                }
+                );
             }
         }
     }
@@ -1130,15 +1130,12 @@ impl DownstairsClient {
                     IOop::Read { .. } => {
                         assert!(!read_data.blocks.is_empty());
                         assert!(extent_info.is_none());
-                        if job.data.is_none() {
-                            job.data = Some(read_data);
-                        } else {
+                        if let Some(job_data) = &job.data {
                             // If another job has finished already, we compare
                             // our read hash to that and verify they are the
                             // same.
                             debug!(self.log, "Read already AckReady {ds_id}");
-                            let job_blocks = &job.data.as_ref().unwrap().blocks;
-                            if job_blocks != &read_data.blocks {
+                            if job_data.blocks != read_data.blocks {
                                 // XXX This error needs to go to Nexus
                                 // XXX This will become the "force all
                                 // downstairs to stop and refuse to restart"
@@ -1151,7 +1148,7 @@ impl DownstairsClient {
                                     self.cfg.session_id,
                                     self.client_id,
                                     ds_id,
-                                    job_blocks,
+                                    job_data.blocks,
                                     read_data.blocks,
                                     job,
                                 );
@@ -1161,6 +1158,8 @@ impl DownstairsClient {
                                     panic!("{msg}");
                                 }
                             }
+                        } else {
+                            job.data = Some(read_data);
                         }
                     }
                     IOop::Write { .. }
@@ -1538,25 +1537,21 @@ impl DownstairsClient {
                  * values, the first downstairs to connect sets the expected
                  * values for the other two.
                  */
-                if let Some(prev_def) = ddef.get_def() {
-                    if prev_def.block_size() != region_def.block_size()
+                if let Some(prev_def) = ddef.get_def()
+                    && (prev_def.block_size() != region_def.block_size()
                         || prev_def.extent_size().value
                             != region_def.extent_size().value
                         || prev_def.extent_size().block_size_in_bytes()
                             != region_def.extent_size().block_size_in_bytes()
-                        || prev_def.extent_count() != region_def.extent_count()
-                    {
-                        // TODO(#558) Figure out if we can handle this error.
-                        // Possibly not.
-                        panic!(
-                            "{} [{}] New downstairs region info mismatch: \
+                        || prev_def.extent_count() != region_def.extent_count())
+                {
+                    // TODO(#558) Figure out if we can handle this error.
+                    // Possibly not.
+                    panic!(
+                        "{} [{}] New downstairs region info mismatch: \
                                  {:?} vs. {:?}",
-                            self.cfg.session_id,
-                            self.client_id,
-                            ddef,
-                            region_def
-                        );
-                    }
+                        self.cfg.session_id, self.client_id, ddef, region_def
+                    );
                 }
 
                 *ddef = RegionDefinitionStatus::Received(region_def);

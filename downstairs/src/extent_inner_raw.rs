@@ -831,13 +831,11 @@ impl RawInner {
 
         // Just in case, let's be very sure that the file on disk is what it
         // should be
-        if !read_only {
-            if let Err(e) = file.sync_all() {
-                return Err(CrucibleError::IoError(format!(
-                    "extent {extent_number}: \
+        if !read_only && let Err(e) = file.sync_all() {
+            return Err(CrucibleError::IoError(format!(
+                "extent {extent_number}: \
                      fsync 1 failure during initial rehash: {e}",
-                )));
-            }
+            )));
         }
 
         let layout = RawLayout::new(def.extent_size());
@@ -1564,7 +1562,9 @@ impl RawLayout {
         })?;
 
         for (i, chunk) in buf
-            .chunks_exact(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize)
+            .as_chunks::<{ BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize }>()
+            .0
+            .iter()
             .enumerate()
         {
             let ctx: Option<OnDiskDownstairsBlockContext> =
