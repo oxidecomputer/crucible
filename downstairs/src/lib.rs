@@ -367,7 +367,7 @@ impl RegionWrite {
     ) -> Result<Self, CrucibleError> {
         let blocks_per_extent = ddef.extent_size().value;
         let block_size = ddef.block_size() as usize;
-        if buf.len() % block_size != 0 {
+        if !buf.len().is_multiple_of(block_size) {
             return Err(CrucibleError::DataLenUnaligned);
         } else if buf.len() / block_size != contexts.len() {
             return Err(CrucibleError::InvalidNumberOfBlocks(format!(

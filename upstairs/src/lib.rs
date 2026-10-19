@@ -215,7 +215,7 @@ pub trait BlockIO: Sync {
     ) -> Result<BlockIndex, CrucibleError> {
         let bs = self.get_block_size().await?;
 
-        if (offset % bs) != 0 {
+        if !offset.is_multiple_of(bs) {
             crucible_bail!(OffsetUnaligned);
         }
 
@@ -258,7 +258,7 @@ pub trait BlockIO: Sync {
     /// Returns block size on success, since we have to look it up anyways.
     async fn check_data_size(&self, len: usize) -> Result<u64, CrucibleError> {
         let block_size = self.get_block_size().await?;
-        if len as u64 % block_size == 0 {
+        if (len as u64).is_multiple_of(block_size) {
             Ok(block_size)
         } else {
             Err(CrucibleError::DataLenUnaligned)
