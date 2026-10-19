@@ -105,19 +105,15 @@ pub fn dump_region(
         total_extents = region.def().extent_count();
 
         // Resolve a bare block argument to its extent before checking errors
-        if cmp_extent.is_none() {
-            if let Some(b) = block {
-                let max_block = total_extents as u64 * blocks_per_extent;
-                let ce = (b / blocks_per_extent) as u32;
-                if ce >= total_extents {
-                    bail!(
-                        "Requested block {} > max block {}",
-                        b,
-                        max_block - 1,
-                    );
-                }
-                cmp_extent = Some(ExtentId(ce));
+        if cmp_extent.is_none()
+            && let Some(b) = block
+        {
+            let max_block = total_extents as u64 * blocks_per_extent;
+            let ce = (b / blocks_per_extent) as u32;
+            if ce >= total_extents {
+                bail!("Requested block {} > max block {}", b, max_block - 1,);
             }
+            cmp_extent = Some(ExtentId(ce));
         }
 
         // If any extent failed to open, decide whether to bail or warn.
@@ -148,10 +144,10 @@ pub fn dump_region(
              * If we are looking at one extent in detail, we skip all the
              * others.
              */
-            if let Some(ce) = cmp_extent {
-                if en != ce {
-                    continue;
-                }
+            if let Some(ce) = cmp_extent
+                && en != ce
+            {
+                continue;
             }
 
             let extent_info = e.get_meta_info();
