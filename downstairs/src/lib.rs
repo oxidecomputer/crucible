@@ -882,6 +882,25 @@ enum NegotiationState {
     SentBeenActive,
 }
 
+impl NegotiationState {
+    /// The state a connection must be in to finish negotiation with
+    /// `LastFlush` or `ExtentVersionsPlease`
+    ///
+    /// On V14 or later with a read-write region, the upstairs must ask
+    /// `BeenActivePlease` first.  Otherwise it finishes straight after
+    /// `RegionInfo`.
+    fn ready_to_finish(
+        message_version: MessageVersion,
+        read_only: bool,
+    ) -> Self {
+        if message_version >= MessageVersion::V14 && !read_only {
+            NegotiationState::SentBeenActive
+        } else {
+            NegotiationState::SentRegionInfo
+        }
+    }
+}
+
 /// Immutable data shared by every `ConnectionState`
 #[derive(Debug)]
 struct ConnectionData {
@@ -1012,6 +1031,10 @@ impl ActiveConnection {
                 upstairs_id,
                 session_id,
                 ..
+            }
+            | Message::YouHaveBeenActive {
+                upstairs_id,
+                session_id,
             } => {
                 if self.upstairs_connection.upstairs_id != *upstairs_id {
                     self.data.reply_channel_tx.send(Message::UuidMismatch {
@@ -1452,6 +1475,27 @@ impl ActiveConnection {
             }
             Message::Ruok => {
                 self.reply(Message::Imok)?;
+                WorkResult::Handled
+            }
+            Message::YouHaveBeenActive { .. } => {
+                // Only a V14 or later upstairs sends this, and never to a
+                // read-only downstairs.
+                if self.message_version < MessageVersion::V14 {
+                    bail!(
+                        "Received YouHaveBeenActive on message version {}",
+                        self.message_version
+                    );
+                }
+                if flags.read_only {
+                    bail!("Received YouHaveBeenActive on a read-only region");
+                }
+                // TODO(PR input wanted): If we can't record this, the flag
+                // stays false, and the upstairs will tell us again after its
+                // next negotiation.  So we keep the connection, but should
+                // we drop it instead?
+                if let Err(e) = region.set_been_active() {
+                    warn!(self.log, "Failed to record been active: {e:#}");
+                }
                 WorkResult::Handled
             }
             x => bail!("unexpected frame {:?}", x),
@@ -2768,7 +2812,7 @@ impl Downstairs {
         }
     }
 
-    /// See the comment in the `continue_negotiation()` function (on the
+    /// See the comment on the `NegotiationStateData` enum (on the
     /// upstairs side) that describes how this negotiation takes place.
     ///
     /// The final step in negotiation (as dictated by the upstairs) is
@@ -3033,12 +3077,16 @@ impl Downstairs {
                 else {
                     bail!("Received LastFlush while not negotiating");
                 };
-                if !matches!(
-                    *negotiated,
-                    NegotiationState::SentRegionInfo
-                        | NegotiationState::SentBeenActive
-                ) {
-                    bail!("Received LastFlush out of order {:?}", negotiated);
+                let expected = NegotiationState::ready_to_finish(
+                    *message_version,
+                    self.flags.read_only,
+                );
+                if *negotiated != expected {
+                    bail!(
+                        "Received LastFlush out of order {:?}, expected {:?}",
+                        negotiated,
+                        expected
+                    );
                 }
 
                 let data = std::mem::replace(data, ConnectionData::dummy());
@@ -3069,14 +3117,16 @@ impl Downstairs {
                 else {
                     bail!("Received ExtentVersions while not negotiating");
                 };
-                if !matches!(
-                    *negotiated,
-                    NegotiationState::SentRegionInfo
-                        | NegotiationState::SentBeenActive
-                ) {
+                let expected = NegotiationState::ready_to_finish(
+                    *message_version,
+                    self.flags.read_only,
+                );
+                if *negotiated != expected {
                     bail!(
-                        "Received ExtentVersions out of order {:?}",
-                        negotiated
+                        "Received ExtentVersions out of order {:?}, \
+                         expected {:?}",
+                        negotiated,
+                        expected
                     );
                 }
 
@@ -6540,6 +6590,227 @@ mod test {
         assert!(ask(&mut ds).is_err());
         assert!(rx.try_recv().is_err());
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_finish_negotiation_order() -> Result<()> {
+        // Negotiation from the Upstairs ends with one of LastFlush (an
+        // Offline client reconnecting) or ExtentVersionsPlease (a New,
+        // Faulted, or Replaced client).  Each has its own check so we will
+        // test both here.  When the negotiation includes been_active (V14
+        // or later, read-write), the upstairs must send BeenActivePlease
+        // first.  Otherwise it finishes straight after RegionInfo.
+        use MessageVersion::{V13, V14};
+        let conn_id = ConnectionId(0);
+
+        for last_flush in [true, false] {
+            // V14 downstairs, V14 upstairs, read-write not sending
+            // BeenActivePlease is a failure and should report error.
+            let dir = tempdir()?;
+            drop(create_test_downstairs(512, 4, 2, &dir)?);
+            let mut ds = open_v14_test_downstairs(&dir, false)?;
+            let mut rx =
+                negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+            assert!(finish_negotiation(&mut ds, conn_id, last_flush).is_err());
+            assert!(rx.try_recv().is_err());
+
+            // V13 downstairs, V13 upstairs: Negotiation should finishe after
+            // RegionInfo.
+            let dir = tempdir()?;
+            let mut ds = create_test_downstairs(512, 4, 2, &dir)?;
+            let _rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+
+            // V14 downstairs, V13 upstairs: the connection is V13, so it
+            // finishes after RegionInfo.
+            let dir = tempdir()?;
+            drop(create_test_downstairs(512, 4, 2, &dir)?);
+            let mut ds = open_v14_test_downstairs(&dir, false)?;
+            let _rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+
+            // V14 downstairs, V14 upstairs, read-only: a read-only region
+            // does not track been_active, so it finishes after RegionInfo.
+            let dir = tempdir()?;
+            drop(create_test_downstairs(512, 4, 2, &dir)?);
+            let mut ds = open_v14_test_downstairs(&dir, true)?;
+            let _rx = negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+        }
+        Ok(())
+    }
+
+    /// Add a running, active connection that skips negotiation
+    ///
+    /// The connection uses the newest version the downstairs offers.
+    /// Returns its upstairs connection and the reply channel.
+    fn add_running_connection(
+        ds: &mut Downstairs,
+        conn_id: ConnectionId,
+    ) -> Result<(UpstairsConnection, mpsc::UnboundedReceiver<Message>)> {
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 1,
+        };
+        let (_, rx) = ds.add_fake_connection(upstairs_connection, conn_id);
+        ds.promote_to_active(upstairs_connection, conn_id)?;
+        Ok((upstairs_connection, rx))
+    }
+
+    fn you_have_been_active(uc: UpstairsConnection) -> Message {
+        Message::YouHaveBeenActive {
+            upstairs_id: uc.upstairs_id,
+            session_id: uc.session_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_you_have_been_active() -> Result<()> {
+        // A V14 read-write connection records been_active.  It is written
+        // to disk, sending it again does nothing, and there is no reply.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let conn_id = ConnectionId(0);
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+        assert!(!ds.region.been_active()?);
+
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        assert!(ds.connection_state.contains_key(&conn_id));
+        assert!(ds.region.been_active()?);
+        assert!(rx.try_recv().is_err());
+
+        // Send it again, verify it is still set, connection kept, no reply
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        assert!(ds.connection_state.contains_key(&conn_id));
+        assert!(ds.region.been_active()?);
+        assert!(rx.try_recv().is_err());
+
+        // A reopened downstairs reads it back from disk
+        drop(ds);
+        let ds = open_v14_test_downstairs(&dir, false)?;
+        assert!(ds.region.been_active()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_you_have_been_active_id_mismatch() -> Result<()> {
+        // A wrong upstairs_id or session_id gets UuidMismatch, the same as
+        // other messages that carry them.  The connection is kept and the
+        // flag is not set.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let conn_id = ConnectionId(0);
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+
+        let wrong_upstairs = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            ..uc
+        };
+        let wrong_session = UpstairsConnection {
+            session_id: Uuid::new_v4(),
+            ..uc
+        };
+        for bad in [wrong_upstairs, wrong_session] {
+            ds.on_message_for(
+                conn_id,
+                you_have_been_active(bad),
+                &test_client_state(),
+            )
+            .await;
+            assert!(matches!(rx.try_recv()?, Message::UuidMismatch { .. }));
+            assert!(ds.connection_state.contains_key(&conn_id));
+            assert!(!ds.region.been_active()?);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_you_have_been_active_rejected() -> Result<()> {
+        // On a connection that does not support been_active, receiving
+        // it is an error and results in the connection getting dropped.
+        let conn_id = ConnectionId(0);
+
+        // V13 connection: the flag stays false
+        let dir = tempdir()?;
+        let mut ds = create_test_downstairs(512, 4, 2, &dir)?;
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        assert!(!ds.connection_state.contains_key(&conn_id));
+        assert!(!ds.region.been_active()?);
+        assert!(rx.try_recv().is_err());
+
+        // V14 connection on a read-only region
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, true)?;
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        assert!(!ds.connection_state.contains_key(&conn_id));
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_you_have_been_active_write_fails() -> Result<()> {
+        // If active.json can't be written, the downstairs logs a warning
+        // and keeps the connection.  The flag stays false, so the next
+        // BeenActivePlease reports false and the upstairs sends it again.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let conn_id = ConnectionId(0);
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+
+        // Make the region directory read-only so the write fails.
+        let perms = std::fs::metadata(dir.path())?.permissions();
+        std::fs::set_permissions(
+            dir.path(),
+            std::fs::Permissions::from_mode(0o555),
+        )?;
+        if std::fs::File::create(dir.path().join("probe")).is_ok() {
+            std::fs::set_permissions(dir.path(), perms)?;
+            eprintln!("region dir still writable, skipping");
+            return Ok(());
+        }
+
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        std::fs::set_permissions(dir.path(), perms)?;
+
+        assert!(ds.connection_state.contains_key(&conn_id));
+        assert!(!ds.region.been_active()?);
+        assert!(rx.try_recv().is_err());
         Ok(())
     }
 
