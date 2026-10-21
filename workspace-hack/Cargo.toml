@@ -171,7 +171,7 @@ hyper-util = { version = "0.1", features = ["full"] }
 linux-raw-sys = { version = "0.4", default-features = false, features = ["elf", "errno", "general", "ioctl", "no_std", "system"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.31", default-features = false, features = ["signal", "term"] }
-rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "system"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 
@@ -193,7 +193,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.31", default-features = false, features = ["signal", "term"] }
-rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "system"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 
@@ -216,7 +216,7 @@ hyper-util = { version = "0.1", features = ["full"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.31", default-features = false, features = ["signal", "term"] }
 rand-93f6ce9d446188ac = { package = "rand", version = "0.10" }
-rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "stdio", "system", "termios"] }
+rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["fs", "system"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 toml_edit = { version = "0.19", features = ["serde"] }
