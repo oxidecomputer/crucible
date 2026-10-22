@@ -1946,6 +1946,7 @@ dependencies = [
  "slab",
  "slog",
  "smallvec",
+ "strum 0.28.0",
  "subtle",
  "syn 2.0.117",
  "syn 3.0.5",
