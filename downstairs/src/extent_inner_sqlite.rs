@@ -237,7 +237,10 @@ impl SqliteMoreInner {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='gen_number'",
         )?;
-        let mut gen_number_iter = stmt.query_map([], |row| row.get(0))?;
+        let mut gen_number_iter = stmt.query_map([], |row| {
+            let row_i64: i64 = row.get(0)?;
+            Ok(row_i64 as u64)
+        })?;
         let gen_number = gen_number_iter.next().unwrap()?;
         assert!(gen_number_iter.next().is_none());
 
@@ -248,7 +251,10 @@ impl SqliteMoreInner {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='flush_number'",
         )?;
-        let mut flush_number_iter = stmt.query_map([], |row| row.get(0))?;
+        let mut flush_number_iter = stmt.query_map([], |row| {
+            let row_i64: i64 = row.get(0)?;
+            Ok(row_i64 as u64)
+        })?;
         let flush_number = flush_number_iter.next().unwrap()?;
         assert!(flush_number_iter.next().is_none());
 
@@ -671,16 +677,17 @@ impl SqliteMoreInner {
              WHERE block BETWEEN ?1 AND ?2";
         let mut stmt = self.metadb.prepare_cached(stmt)?;
 
-        let stmt_iter =
-            stmt.query_map(params![block, block + count - 1], |row| {
-                let block_index: u64 = row.get(0)?;
-                let hash: i64 = row.get(1)?;
-                let nonce: Option<[u8; 12]> = row.get(2)?;
-                let tag: Option<[u8; 16]> = row.get(3)?;
-                let on_disk_hash: i64 = row.get(4)?;
+        let bi64: i64 = block.try_into().unwrap();
+        let off: i64 = bi64 + (count as i64) - 1;
+        let stmt_iter = stmt.query_map(params![bi64, off], |row| {
+            let block_index: i64 = row.get(0)?;
+            let hash: i64 = row.get(1)?;
+            let nonce: Option<[u8; 12]> = row.get(2)?;
+            let tag: Option<[u8; 16]> = row.get(3)?;
+            let on_disk_hash: i64 = row.get(4)?;
 
-                Ok((block_index, hash, nonce, tag, on_disk_hash))
-            })?;
+            Ok((block_index, hash, nonce, tag, on_disk_hash))
+        })?;
 
         let mut results: Vec<Option<DownstairsBlockContext>> =
             vec![None; count as usize];
@@ -702,7 +709,7 @@ impl SqliteMoreInner {
                     hash: hash as u64,
                     encryption_context,
                 },
-                block: block_index,
+                block: block_index as u64,
                 on_disk_hash: on_disk_hash as u64,
             };
 
@@ -840,11 +847,11 @@ impl SqliteMoreInner {
             metadb.execute(
                 "INSERT INTO metadata
                 (name, value) VALUES (?1, ?2)",
-                params!["gen_number", meta.gen_number],
+                params!["gen_number", meta.gen_number as i64],
             )?;
             metadb.execute(
                 "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
-                params!["flush_number", meta.flush_number],
+                params!["flush_number", meta.flush_number as i64],
             )?;
             metadb.execute(
                 "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
@@ -1038,7 +1045,7 @@ impl SqliteMoreInner {
 
         let rows_affected =
             self.metadb.prepare_cached(stmt)?.execute(params![
-                block_context.block,
+                block_context.block as i64,
                 block_context.block_context.hash as i64,
                 nonce,
                 tag,
@@ -1089,7 +1096,7 @@ impl SqliteMoreInner {
             let mut stmt = tx.prepare_cached(stmt)?;
             for (block, on_disk_hash) in extent_block_indexes_and_hashes {
                 let _rows_affected =
-                    stmt.execute(params![block, on_disk_hash as i64])?;
+                    stmt.execute(params![block as i64, on_disk_hash as i64])?;
             }
         }
 
@@ -1140,13 +1147,13 @@ impl SqliteMoreInner {
             "UPDATE metadata SET value=?1 WHERE name='flush_number'",
         )?;
 
-        let _rows_affected = stmt.execute([new_flush])?;
+        let _rows_affected = stmt.execute([new_flush as i64])?;
 
         let mut stmt = self.metadb.prepare_cached(
             "UPDATE metadata SET value=?1 WHERE name='gen_number'",
         )?;
 
-        let _rows_affected = stmt.execute([new_gen])?;
+        let _rows_affected = stmt.execute([new_gen as i64])?;
 
         /*
          * When we write out the new flush number, the dirty bit should be
