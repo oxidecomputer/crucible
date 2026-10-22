@@ -406,6 +406,7 @@ impl Downstairs {
             generation: std::sync::atomic::AtomicU64::new(1),
             read_only: false,
             encryption_context: None,
+            message_versions: crucible_protocol::MessageVersion::supported(),
         });
         let stats = DownstairsStatOuter::default();
 
