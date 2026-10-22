@@ -446,6 +446,21 @@
             ]
           },
           {
+            "description": "Waiting to hear `BeenActive` from the client\n\nThis is only used for read-write regions.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_for_been_active"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
             "description": "Waiting to hear `ExtentVersions` from the client",
             "type": "object",
             "properties": {
