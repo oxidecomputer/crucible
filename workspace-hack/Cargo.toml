@@ -71,6 +71,7 @@ serde_with = { version = "3", default-features = false, features = ["hex", "macr
 slab = { version = "0.4" }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
+strum = { version = "0.28", features = ["derive"] }
 subtle = { version = "2" }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "full", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }

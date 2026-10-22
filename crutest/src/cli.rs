@@ -728,6 +728,9 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                     println!("CTRL-C");
                     break;
                 }
+                x => {
+                    println!("Signal {:?} ignored", x);
+                }
             }
         }
         // TODO: Figure out how to handle a disconnect from the crucible
