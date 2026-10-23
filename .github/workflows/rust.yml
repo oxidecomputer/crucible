@@ -33,6 +33,10 @@ jobs:
         fetch-depth: 0
     - name: Install dependencies
       run: sudo apt-get install libsqlite3-dev
+    - name: What
+      run: uname -a
+    - name: The
+      run: cat /etc/lsb-release
     - name: Build
       run: cargo build --verbose
   clippy:
