@@ -1568,15 +1568,20 @@ impl Downstairs {
         //  list of dependencies and remove jobs that we skipped or finished for
         //  that specific downstairs before we send the repair IO over the wire.
 
+        let deps = if close_deps.is_empty() {
+            String::new()
+        } else {
+            format!(" deps:{}", format_job_list(&close_deps))
+        };
         info!(
             self.log,
-            "RE:{} repair extent with ids {},{},{},{} deps:{}",
+            "RE:{} repair extent with ids {},{},{},{}{}",
             extent,
             close_id,
             repair_id,
             noop_id,
             reopen_id,
-            format_job_list(&close_deps),
+            deps,
         );
 
         let repair = self.repair.as_mut().unwrap(); // reborrow
