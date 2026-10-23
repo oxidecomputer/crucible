@@ -90,17 +90,41 @@ pub struct Panic {
     pub message: String,
     /// The crucible upstairs whose session or UUID the panic names.
     pub upstairs_id: Option<String>,
+    /// The IO a crucible upstairs panicked on, if the message names one.
+    pub io: Option<PanicIo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PanicIo {
+    pub session_id: String,
+    /// The client whose reply caused the panic.
+    pub client: u32,
+    pub job_id: u64,
+    pub error: String,
+    pub op: Option<String>,
+    pub start_block: Option<u64>,
+    /// Number of blocks.
+    pub count: Option<u64>,
+    pub block_size: Option<u64>,
+    /// Each client's state for the job, in client order.
+    pub states: Vec<String>,
+}
+
+impl PanicIo {
+    /// The extents the IO covers, given the blocks per extent.
+    pub fn extents(
+        &self,
+        extent_size: u64,
+    ) -> Option<std::ops::RangeInclusive<u64>> {
+        let start = self.start_block?;
+        let end = start + self.count?.max(1) - 1;
+        Some(start / extent_size..=end / extent_size)
+    }
 }
 
 /// Summarize log files, given as (name, contents) pairs in any order.
 pub fn summarize(files: &[(String, String)]) -> Summary {
-    // Rotated logs are each in order, so order the files by their first
-    // record and read them one after the other.
-    let mut files: Vec<&(String, String)> = files.iter().collect();
-    files.sort_by_key(|(_, text)| {
-        text.lines().find_map(Record::parse).map(|r| r.time)
-    });
-
+    let files = ordered(files);
     let mut runs: Vec<RunBuilder> = Vec::new();
     // The run of the most recent record.
     let mut current: Option<usize> = None;
@@ -135,6 +159,16 @@ pub fn summarize(files: &[(String, String)]) -> Summary {
         files: files.iter().map(|(name, _)| name.clone()).collect(),
         runs: runs.into_iter().map(RunBuilder::finish).collect(),
     }
+}
+
+/// Rotated logs are each in order, so order the files by their first
+/// record and read them one after the other.
+pub(crate) fn ordered(files: &[(String, String)]) -> Vec<&(String, String)> {
+    let mut files: Vec<&(String, String)> = files.iter().collect();
+    files.sort_by_key(|(_, text)| {
+        text.lines().find_map(Record::parse).map(|r| r.time)
+    });
+    files
 }
 
 /// Find the run a record belongs to, starting a new one if needed.
@@ -321,6 +355,7 @@ impl RunBuilder {
             location: c["location"].to_string(),
             message: String::new(),
             upstairs_id: None,
+            io: None,
         });
         self.panic_text.clear();
     }
@@ -349,6 +384,7 @@ impl RunBuilder {
                             .is_some_and(|s| self.panic_text.contains(s))
                 })
                 .map(|c| c.upstairs_id.clone());
+            panic.io = panic_io(&panic.message, &self.panic_text);
         }
 
         // Attach each upstairs to the disk it backs.  An upstairs with no
@@ -371,6 +407,28 @@ impl RunBuilder {
 
         self.run
     }
+}
+
+/// Pull the IO out of a crucible panic message.
+fn panic_io(message: &str, text: &str) -> Option<PanicIo> {
+    let c = catalog::captures_text(Id::PanicIoError, message)?;
+    let job = catalog::captures_text(Id::PanicIo, text);
+    let job_field = |name: &str| job.as_ref().map(|j| j[name].to_string());
+    let job_number =
+        |name: &str| job.as_ref().and_then(|j| j[name].parse::<u64>().ok());
+    Some(PanicIo {
+        session_id: c["session_id"].to_string(),
+        client: c["client"].parse().ok()?,
+        job_id: c["job_id"].parse().ok()?,
+        error: c["error"].to_string(),
+        op: job_field("op"),
+        start_block: job_number("start_block"),
+        count: job_number("count"),
+        block_size: job_number("block_size"),
+        states: job_field("states").map_or(Vec::new(), |s| {
+            s.split(", ").map(str::to_string).collect()
+        }),
+    })
 }
 
 fn storage_device(c: &Captures, record: &Record) -> Disk {

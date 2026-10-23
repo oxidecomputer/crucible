@@ -1,0 +1,335 @@
+[
+  {
+    "files": [
+      "system-illumos-propolis-server:default.log.1792707301",
+      "system-illumos-propolis-server:default.log"
+    ],
+    "run": {
+      "pid": 16155,
+      "started": "2026-10-22T22:11:49.515744806Z",
+      "first_record": "2026-10-22T22:11:49.515744806Z",
+      "propolis_version": "v0.1.0-948",
+      "propolis_commit": "3b60af5",
+      "crucible_commit": "bd62980710dd3d6d3524aa7f6617127942b75002",
+      "vmm_id": "5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6",
+      "instance": {
+        "id": "617281d1-669b-4261-a215-3c32bb78a8af",
+        "name": "newallio-11-inst",
+        "silo_id": "7bd7623a-68ed-4636-8ecb-b59e3b068787",
+        "project_id": "759beaf2-517d-4d24-bc17-1eed69bc8801",
+        "sled_id": "db183874-65b5-4263-a1c1-ddb2737ae0e9",
+        "sled_serial": "BRM42220009",
+        "cpus": 8,
+        "memory_mb": 8192
+      },
+      "disks": [
+        {
+          "name": "newallio-11-disk1",
+          "device_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0:device",
+          "kind": "nvme",
+          "pci": "0.17.0",
+          "backend_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0",
+          "crucible": {
+            "upstairs_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0",
+            "session_id": "86ceec0d-72e8-499a-a4f0-40d790c60878",
+            "block_size": 4096,
+            "extent_size": 16384,
+            "extent_count": 800,
+            "size_bytes": 53687091200,
+            "encrypted": true,
+            "read_only": false,
+            "downstairs": [
+              {
+                "client": 0,
+                "ip": "fd00:1122:3344:129::23",
+                "port": 19000,
+                "region_ids": [
+                  "76b3116a-10ed-429e-8df9-183a827f9727"
+                ]
+              },
+              {
+                "client": 1,
+                "ip": "fd00:1122:3344:108::c",
+                "port": 19040,
+                "region_ids": [
+                  "4fa5c4ee-6346-46a1-b0f3-388f019b6279"
+                ]
+              },
+              {
+                "client": 2,
+                "ip": "fd00:1122:3344:104::9",
+                "port": 19037,
+                "region_ids": [
+                  "0bb6ba8d-2fa8-4f66-9bd6-2e98f1bdb828"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "panic": {
+        "after": "2026-10-22T23:03:05.409835109Z",
+        "thread": "tokio-rt-vmm",
+        "location": "/home/build/.cargo/git/checkouts/crucible-0a48bd218bc2bbbc/bd62980/upstairs/src/client.rs:1161:37",
+        "message": "86ceec0d-72e8-499a-a4f0-40d790c60878 [0] 852176 read hash mismatch",
+        "upstairs_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0",
+        "io": {
+          "session_id": "86ceec0d-72e8-499a-a4f0-40d790c60878",
+          "client": 0,
+          "job_id": 852176,
+          "error": "read hash mismatch",
+          "op": "Read",
+          "start_block": 14857,
+          "count": 1,
+          "block_size": 4096,
+          "states": [
+            "InProgress",
+            "InProgress",
+            "Done"
+          ]
+        }
+      }
+    },
+    "extents": [
+      0
+    ],
+    "history": [
+      {
+        "time": "2026-10-22T22:18:35.981788368Z",
+        "count": 1,
+        "until": null,
+        "event": "reconcile_needed",
+        "extent": 0,
+        "clients": [
+          {
+            "generation": 9,
+            "flush": 8132,
+            "dirty": true
+          },
+          {
+            "generation": 9,
+            "flush": 8132,
+            "dirty": true
+          },
+          {
+            "generation": 9,
+            "flush": 8132,
+            "dirty": true
+          }
+        ]
+      },
+      {
+        "time": "2026-10-22T22:18:36.019554358Z",
+        "count": 1,
+        "until": null,
+        "event": "transition",
+        "client": 0,
+        "from": "Connecting { state: WaitQuorum, mode: New }",
+        "to": "Reconcile"
+      },
+      {
+        "time": "2026-10-22T22:18:36.019564357Z",
+        "count": 1,
+        "until": null,
+        "event": "transition",
+        "client": 1,
+        "from": "Connecting { state: WaitQuorum, mode: New }",
+        "to": "Reconcile"
+      },
+      {
+        "time": "2026-10-22T22:18:36.019574647Z",
+        "count": 1,
+        "until": null,
+        "event": "transition",
+        "client": 2,
+        "from": "Connecting { state: WaitQuorum, mode: New }",
+        "to": "Reconcile"
+      },
+      {
+        "time": "2026-10-22T22:18:36.022592935Z",
+        "count": 1,
+        "until": null,
+        "event": "reconcile_repair",
+        "extent": 0,
+        "task_id": 1226,
+        "source": 0,
+        "dests": [
+          1,
+          2
+        ]
+      },
+      {
+        "time": "2026-10-22T22:18:36.022626107Z",
+        "count": 1,
+        "until": null,
+        "event": "reconcile_start",
+        "id": "c772275f-53d2-46cd-a424-79fbc67cbb9f",
+        "tasks": 3200
+      },
+      {
+        "time": "2026-10-22T22:21:17.666199294Z",
+        "count": 1,
+        "until": null,
+        "event": "reconcile_repair_sent",
+        "extent": 0,
+        "task_id": 1226,
+        "clients": [
+          1,
+          2
+        ]
+      },
+      {
+        "time": "2026-10-22T22:25:48.597512110Z",
+        "count": 1,
+        "until": null,
+        "event": "reconcile_done"
+      },
+      {
+        "time": "2026-10-22T22:25:48.597559329Z",
+        "count": 1,
+        "until": null,
+        "event": "transition",
+        "client": 0,
+        "from": "Reconcile",
+        "to": "Active"
+      },
+      {
+        "time": "2026-10-22T22:25:48.597571232Z",
+        "count": 1,
+        "until": null,
+        "event": "transition",
+        "client": 1,
+        "from": "Reconcile",
+        "to": "Active"
+      },
+      {
+        "time": "2026-10-22T22:25:48.597581321Z",
+        "count": 1,
+        "until": null,
+        "event": "transition",
+        "client": 2,
+        "from": "Reconcile",
+        "to": "Active"
+      },
+      {
+        "time": "2026-10-22T22:28:20.358199941Z",
+        "count": 1,
+        "until": null,
+        "event": "client_stopped",
+        "client": 0,
+        "reason": "Timeout"
+      },
+      {
+        "time": "2026-10-22T22:28:40.362138251Z",
+        "count": 20,
+        "until": "2026-10-22T22:35:00.427732730Z",
+        "event": "client_stopped",
+        "client": 0,
+        "reason": "ConnectionTimeout"
+      },
+      {
+        "time": "2026-10-22T22:35:10.443272702Z",
+        "count": 1,
+        "until": null,
+        "event": "transition",
+        "client": 0,
+        "from": "Offline",
+        "to": "Active"
+      },
+      {
+        "time": "2026-10-22T22:41:00.518104051Z",
+        "count": 1,
+        "until": null,
+        "event": "client_stopped",
+        "client": 0,
+        "reason": "Timeout"
+      },
+      {
+        "time": "2026-10-22T22:41:20.521827303Z",
+        "count": 8,
+        "until": "2026-10-22T22:43:40.547077563Z",
+        "event": "client_stopped",
+        "client": 0,
+        "reason": "ConnectionTimeout"
+      },
+      {
+        "time": "2026-10-22T22:43:48.141645262Z",
+        "count": 1,
+        "until": null,
+        "event": "faulted",
+        "client": 0,
+        "reason": "too many outstanding jobs 1001"
+      },
+      {
+        "time": "2026-10-22T22:44:00.549469088Z",
+        "count": 9,
+        "until": "2026-10-22T22:46:40.577866491Z",
+        "event": "client_stopped",
+        "client": 0,
+        "reason": "ConnectionTimeout"
+      },
+      {
+        "time": "2026-10-22T22:46:50.581464910Z",
+        "count": 1,
+        "until": null,
+        "event": "client_stopped",
+        "client": 0,
+        "reason": "ConnectionFailed(Os { code: 146, kind: ConnectionRefused, message: \"Connection refused\" })"
+      },
+      {
+        "time": "2026-10-22T22:47:00.627120670Z",
+        "count": 1,
+        "until": null,
+        "event": "live_repair_ready",
+        "client": 0
+      },
+      {
+        "time": "2026-10-22T22:47:00.627185091Z",
+        "count": 1,
+        "until": null,
+        "event": "live_repair_extent",
+        "extent": 0,
+        "close_id": 166204,
+        "repair_id": 166205,
+        "noop_id": 166206,
+        "reopen_id": 166207
+      },
+      {
+        "time": "2026-10-22T22:47:00.627206392Z",
+        "count": 1,
+        "until": null,
+        "event": "live_repair_start",
+        "id": "5f314278-4c80-45b0-8298-4527541ff14c",
+        "clients": [
+          0
+        ],
+        "source": 2
+      },
+      {
+        "time": "2026-10-22T22:47:01.939610684Z",
+        "count": 1,
+        "until": null,
+        "event": "live_repair_not_needed",
+        "extent": 0,
+        "source": 2
+      },
+      {
+        "time": "2026-10-22T23:03:04.533878937Z",
+        "count": 1,
+        "until": null,
+        "event": "live_repair_progress",
+        "extent": 312,
+        "extent_count": 800
+      },
+      {
+        "time": "2026-10-22T23:03:05.409835109Z",
+        "count": 1,
+        "until": null,
+        "event": "panic",
+        "client": 0,
+        "job_id": 852176,
+        "error": "read hash mismatch"
+      }
+    ]
+  }
+]

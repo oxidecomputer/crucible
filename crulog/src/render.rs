@@ -4,7 +4,8 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use std::fmt::Write;
 
-use crate::summary::{Crucible, Disk, Run, Summary};
+use crate::history::{Event, PanicReport, What};
+use crate::summary::{Crucible, Disk, PanicIo, Run, Summary};
 
 pub fn text(summary: &Summary) -> String {
     let mut out = String::new();
@@ -105,6 +106,260 @@ fn render_run(out: &mut String, run: &Run) {
                 .unwrap_or("?");
             writeln!(out, "    Disk {name}, upstairs {id}").unwrap();
         }
+        if let Some(io) = &p.io {
+            render_panic_io(out, run, io);
+        }
+    }
+}
+
+fn render_panic_io(out: &mut String, run: &Run, io: &PanicIo) {
+    let op = or_unknown(&io.op);
+    let blocks = match (io.start_block, io.count) {
+        (Some(start), Some(1)) => format!("block {start}"),
+        (Some(start), Some(n)) => {
+            format!("blocks {start}-{}", start + n.saturating_sub(1))
+        }
+        _ => "unknown blocks".to_string(),
+    };
+    let extent_size = run
+        .disks
+        .iter()
+        .filter_map(|d| d.crucible.as_ref())
+        .find(|c| c.session_id.as_ref() == Some(&io.session_id))
+        .and_then(|c| c.extent_size);
+    let extents = match extent_size.and_then(|size| io.extents(size)) {
+        Some(range) => format!(" in {}", extents(range)),
+        None => String::new(),
+    };
+    writeln!(
+        out,
+        "    Client {} job {}: {op} of {blocks}{extents}",
+        io.client, io.job_id
+    )
+    .unwrap();
+    if !io.states.is_empty() {
+        let states: Vec<String> = io
+            .states
+            .iter()
+            .enumerate()
+            .map(|(c, s)| format!("[{c}] {s}"))
+            .collect();
+        writeln!(out, "    Job state   {}", states.join(", ")).unwrap();
+    }
+    // The first client to return read data has its data kept in the job,
+    // and each later client's data is compared with it.
+    let done: Vec<u32> = io
+        .states
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| *s == "Done")
+        .map(|(c, _)| c as u32)
+        .collect();
+    if io.error == "read hash mismatch" && !done.is_empty() {
+        let from = match done.as_slice() {
+            [c] => format!("client {c}"),
+            _ => format!("one of {}", clients(&done)),
+        };
+        writeln!(
+            out,
+            "    Client {}'s data did not match the data from {from}",
+            io.client
+        )
+        .unwrap();
+    }
+}
+
+/// Render panic reports as text.
+pub fn panic_report(reports: &[PanicReport]) -> String {
+    let mut out = String::new();
+    let Some(first) = reports.first() else {
+        return "No panic found.\n".to_string();
+    };
+    writeln!(out, "Files, oldest first:").unwrap();
+    for file in &first.files {
+        writeln!(out, "  {file}").unwrap();
+    }
+    for report in reports {
+        writeln!(out).unwrap();
+        render_run(&mut out, &report.run);
+        if report.extents.is_empty() {
+            continue;
+        }
+        let blocks = report
+            .run
+            .disks
+            .first()
+            .and_then(|d| d.crucible.as_ref())
+            .and_then(|c| c.extent_size)
+            .map(|size| {
+                let first = report.extents[0] * size;
+                let last =
+                    (report.extents[report.extents.len() - 1] + 1) * size - 1;
+                format!(" (blocks {first}-{last})")
+            })
+            .unwrap_or_default();
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            "  History of {}{blocks}, oldest first:",
+            extents(
+                report.extents[0]..=report.extents[report.extents.len() - 1]
+            )
+        )
+        .unwrap();
+        let mut date = None;
+        for event in &report.history {
+            let day = event.time.date_naive();
+            if date != Some(day) {
+                writeln!(out, "  {day}").unwrap();
+                date = Some(day);
+            }
+            render_event(&mut out, event);
+        }
+    }
+    out
+}
+
+fn render_event(out: &mut String, event: &Event) {
+    let mut text = describe(&event.what);
+    if event.count > 1
+        && let Some(until) = event.until
+    {
+        write!(
+            text,
+            " ({} times, until {})",
+            event.count,
+            until.format("%H:%M:%S%.3f")
+        )
+        .unwrap();
+    }
+    writeln!(out, "    {}  {text}", event.time.format("%H:%M:%S%.3f")).unwrap();
+}
+
+fn describe(what: &What) -> String {
+    match what {
+        What::ReconcileNeeded { extent, clients } => {
+            let meta: Vec<String> = clients
+                .iter()
+                .enumerate()
+                .map(|(c, m)| match m {
+                    Some(m) => format!(
+                        "[{c}] gen {} flush {}{}",
+                        m.generation,
+                        m.flush,
+                        if m.dirty { " dirty" } else { "" }
+                    ),
+                    None => format!("[{c}] none"),
+                })
+                .collect();
+            format!(
+                "reconcile: extent {extent} needs reconciliation: {}",
+                meta.join(", ")
+            )
+        }
+        What::ReconcileStart { id, tasks } => {
+            format!("reconcile {id} started with {tasks} tasks")
+        }
+        What::ReconcileRepair {
+            extent,
+            task_id,
+            source,
+            dests,
+        } => format!(
+            "reconcile: task {task_id} will repair extent {extent} from \
+             client {source} to {}",
+            clients(dests)
+        ),
+        What::ReconcileRepairSent {
+            extent,
+            task_id,
+            clients: to,
+        } => format!(
+            "reconcile: task {task_id} (extent {extent}) sent to {}",
+            clients(to)
+        ),
+        What::ReconcileDone => "reconcile done".to_string(),
+        What::Transition { client, from, to } => {
+            format!("client {client} {from} -> {to}")
+        }
+        What::ClientStopped { client, reason } => {
+            format!("client {client} stopped: {reason}")
+        }
+        What::Faulted { client, reason } => match reason {
+            Some(r) => format!("client {client} faulted: {r}"),
+            None => format!("client {client} faulted"),
+        },
+        What::LiveRepairReady { client } => {
+            format!("client {client} ready for live repair")
+        }
+        What::LiveRepairStart {
+            id,
+            clients: to,
+            source,
+        } => {
+            let source = source.map_or("an unknown client".to_string(), |s| {
+                format!("client {s}")
+            });
+            format!(
+                "live repair {id} started, repairing {} from {source}",
+                clients(to)
+            )
+        }
+        What::LiveRepairExtent {
+            extent,
+            close_id,
+            repair_id,
+            noop_id,
+            reopen_id,
+        } => format!(
+            "live repair: extent {extent} started, jobs close {close_id} \
+             repair {repair_id} noop {noop_id} reopen {reopen_id}"
+        ),
+        What::LiveRepairNotNeeded { extent, source } => {
+            let source = source
+                .map_or(String::new(), |s| format!(" (source client {s})"));
+            format!("live repair: no repair needed for extent {extent}{source}")
+        }
+        What::LiveRepairCopy {
+            extent,
+            source,
+            dests,
+        } => format!(
+            "live repair: extent {extent} repaired from client {source} to {}",
+            clients(dests)
+        ),
+        What::LiveRepairProgress {
+            extent,
+            extent_count,
+        } => {
+            let of = extent_count.map_or(String::new(), |n| format!(" of {n}"));
+            format!("live repair: last started extent {extent}{of}")
+        }
+        What::LiveRepairEnd { result } => format!("live repair {result}"),
+        What::Panic {
+            client,
+            job_id,
+            error,
+        } => format!(
+            "panic: client {client} job {job_id} {error} \
+             (the panic has no time; this is the last record before it)"
+        ),
+    }
+}
+
+fn clients(list: &[u32]) -> String {
+    let ids: Vec<String> = list.iter().map(u32::to_string).collect();
+    match list {
+        [_] => format!("client {}", ids[0]),
+        _ => format!("clients {}", ids.join(", ")),
+    }
+}
+
+fn extents(range: std::ops::RangeInclusive<u64>) -> String {
+    if range.start() == range.end() {
+        format!("extent {}", range.start())
+    } else {
+        format!("extents {}-{}", range.start(), range.end())
     }
 }
 

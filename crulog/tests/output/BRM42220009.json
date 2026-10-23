@@ -252,7 +252,22 @@
         "thread": "tokio-rt-vmm",
         "location": "/home/build/.cargo/git/checkouts/crucible-0a48bd218bc2bbbc/bd62980/upstairs/src/client.rs:1161:37",
         "message": "86ceec0d-72e8-499a-a4f0-40d790c60878 [0] 852176 read hash mismatch",
-        "upstairs_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0"
+        "upstairs_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0",
+        "io": {
+          "session_id": "86ceec0d-72e8-499a-a4f0-40d790c60878",
+          "client": 0,
+          "job_id": 852176,
+          "error": "read hash mismatch",
+          "op": "Read",
+          "start_block": 14857,
+          "count": 1,
+          "block_size": 4096,
+          "states": [
+            "InProgress",
+            "InProgress",
+            "Done"
+          ]
+        }
       }
     },
     {

@@ -1,0 +1,60 @@
+Files, oldest first:
+  system-illumos-propolis-server:default.log.1792707301
+  system-illumos-propolis-server:default.log
+
+propolis-server pid 16155, started 2026-10-22T22:11:49.515Z
+  Propolis commit  3b60af5 (v0.1.0-948)
+  Crucible commit  bd62980710dd3d6d3524aa7f6617127942b75002
+  VMM ID           5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6
+  Instance ID      617281d1-669b-4261-a215-3c32bb78a8af
+  Name             newallio-11-inst
+  Board            8 vCPUs, 8192 MiB
+  Silo ID          7bd7623a-68ed-4636-8ecb-b59e3b068787
+  Project ID       759beaf2-517d-4d24-bc17-1eed69bc8801
+  Sled ID          db183874-65b5-4263-a1c1-ddb2737ae0e9 (BRM42220009)
+
+  Disk newallio-11-disk1, nvme at PCI 0.17.0
+    Upstairs ID  3c432392-26fe-4e12-94b0-a5c0ac6a25f0
+    Session ID   86ceec0d-72e8-499a-a4f0-40d790c60878
+    Region       50 GiB: 800 extents x 16384 blocks x 4096 bytes, encrypted
+    Read only    false
+    Client  Downstairs                      Region ID
+    0       [fd00:1122:3344:129::23]:19000  76b3116a-10ed-429e-8df9-183a827f9727
+    1       [fd00:1122:3344:108::c]:19040   4fa5c4ee-6346-46a1-b0f3-388f019b6279
+    2       [fd00:1122:3344:104::9]:19037   0bb6ba8d-2fa8-4f66-9bd6-2e98f1bdb828
+
+  Panic in thread 'tokio-rt-vmm' after 2026-10-22T23:03:05.409Z
+    at /home/build/.cargo/git/checkouts/crucible-0a48bd218bc2bbbc/bd62980/upstairs/src/client.rs:1161:37
+    86ceec0d-72e8-499a-a4f0-40d790c60878 [0] 852176 read hash mismatch
+    Disk newallio-11-disk1, upstairs 3c432392-26fe-4e12-94b0-a5c0ac6a25f0
+    Client 0 job 852176: Read of block 14857 in extent 0
+    Job state   [0] InProgress, [1] InProgress, [2] Done
+    Client 0's data did not match the data from client 2
+
+  History of extent 0 (blocks 0-16383), oldest first:
+  2026-10-22
+    22:18:35.981  reconcile: extent 0 needs reconciliation: [0] gen 9 flush 8132 dirty, [1] gen 9 flush 8132 dirty, [2] gen 9 flush 8132 dirty
+    22:18:36.019  client 0 Connecting { state: WaitQuorum, mode: New } -> Reconcile
+    22:18:36.019  client 1 Connecting { state: WaitQuorum, mode: New } -> Reconcile
+    22:18:36.019  client 2 Connecting { state: WaitQuorum, mode: New } -> Reconcile
+    22:18:36.022  reconcile: task 1226 will repair extent 0 from client 0 to clients 1, 2
+    22:18:36.022  reconcile c772275f-53d2-46cd-a424-79fbc67cbb9f started with 3200 tasks
+    22:21:17.666  reconcile: task 1226 (extent 0) sent to clients 1, 2
+    22:25:48.597  reconcile done
+    22:25:48.597  client 0 Reconcile -> Active
+    22:25:48.597  client 1 Reconcile -> Active
+    22:25:48.597  client 2 Reconcile -> Active
+    22:28:20.358  client 0 stopped: Timeout
+    22:28:40.362  client 0 stopped: ConnectionTimeout (20 times, until 22:35:00.427)
+    22:35:10.443  client 0 Offline -> Active
+    22:41:00.518  client 0 stopped: Timeout
+    22:41:20.521  client 0 stopped: ConnectionTimeout (8 times, until 22:43:40.547)
+    22:43:48.141  client 0 faulted: too many outstanding jobs 1001
+    22:44:00.549  client 0 stopped: ConnectionTimeout (9 times, until 22:46:40.577)
+    22:46:50.581  client 0 stopped: ConnectionFailed(Os { code: 146, kind: ConnectionRefused, message: "Connection refused" })
+    22:47:00.627  client 0 ready for live repair
+    22:47:00.627  live repair: extent 0 started, jobs close 166204 repair 166205 noop 166206 reopen 166207
+    22:47:00.627  live repair 5f314278-4c80-45b0-8298-4527541ff14c started, repairing client 0 from client 2
+    22:47:01.939  live repair: no repair needed for extent 0 (source client 2)
+    23:03:04.533  live repair: last started extent 312 of 800
+    23:03:05.409  panic: client 0 job 852176 read hash mismatch (the panic has no time; this is the last record before it)

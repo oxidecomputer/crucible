@@ -40,6 +40,26 @@ pub enum Id {
     Target,
     RegionUuid,
     Panic,
+    PanicIoError,
+    PanicIo,
+    ReconcileNeeded,
+    ExtentMetadata,
+    ReconcileStart,
+    ReconcileTaskList,
+    ReconcileRepairTask,
+    ClientIds,
+    ReconcileSend,
+    ReconcileDone,
+    Transition,
+    ClientStopped,
+    TooManyOutstanding,
+    FaultSkip,
+    LiveRepairReady,
+    LiveRepairStart,
+    LiveRepairExtent,
+    LiveRepairNotNeeded,
+    LiveRepairCopy,
+    LiveRepairEnd,
 }
 
 /// What text an entry's pattern is matched against.
@@ -297,6 +317,287 @@ pub static ENTRIES: &[Entry] = &[
         pattern: r"^thread '(?<thread>[^']*)'(?: \(\d+\))? panicked at (?<location>.+):$",
         sample: "thread 'tokio-rt-vmm' (19) panicked at /home/build/.cargo/git/checkouts/crucible-0a48bd218bc2bbbc/bd62980/upstairs/src/client.rs:1161:37:",
     },
+    Entry {
+        id: Id::PanicIoError,
+        input: Input::RawLine,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/client.rs"),
+            text: "{session_id} [{client_id}] {ds_id} read hash mismatch, \
+                   the first line of the panic message",
+        },
+        pattern: concat!(
+            "^(?<session_id>",
+            uuid!(),
+            r") \[(?<client>\d+)\] (?<job_id>\d+) ",
+            r"(?<error>read hash mismatch)\b",
+        ),
+        sample: "86ceec0d-72e8-499a-a4f0-40d790c60878 [0] 852176 read hash mismatch",
+    },
+    Entry {
+        id: Id::PanicIo,
+        input: Input::Fragment,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/client.rs"),
+            text: "{:?} of the DownstairsIO job, found in the panic message",
+        },
+        pattern: concat!(
+            r"DownstairsIO \{ work: (?<op>\w+) \{ ",
+            r"dependencies: \[[^\]]*\], ",
+            r"start_block: BlockIndex\((?<start_block>\d+)\), ",
+            r"count: (?<count>\d+), block_size: (?<block_size>\d+) \}, ",
+            r"state: ClientData\(\[(?<states>[^\]]*)\]\)",
+        ),
+        // Trimmed after `replay`; the rest is the read data and IO limits.
+        sample: "job: DownstairsIO { work: Read { dependencies: [], start_block: BlockIndex(14857), count: 1, block_size: 4096 }, state: ClientData([InProgress, InProgress, Done]), res: None, acked: true, replay: false,",
+    },
+    Entry {
+        id: Id::ReconcileNeeded,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/mend.rs"),
+            text: "extent {i} needs reconciliation: {:?}",
+        },
+        pattern: r"^extent (?<extent>\d+) needs reconciliation: ClientMap\(ClientData\(\[(?<clients>.*)\]\)\)$",
+        sample: r##"{"msg":"extent 0 needs reconciliation: ClientMap(ClientData([Some(ExtentMetadata { generation: 9, flush: 8132, dirty: true }), Some(ExtentMetadata { generation: 9, flush: 8132, dirty: true }), Some(ExtentMetadata { generation: 9, flush: 8132, dirty: true })]))","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:18:35.981788368Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"mend","":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::ExtentMetadata,
+        input: Input::Fragment,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/mend.rs"),
+            text: "{:?} of each client's Option<ExtentMetadata>, found in \
+                   ReconcileNeeded",
+        },
+        pattern: concat!(
+            r"Some\(ExtentMetadata \{ generation: (?<generation>\d+), ",
+            r"flush: (?<flush>\d+), dirty: (?<dirty>true|false) \}\)",
+            r"|(?<none>None)",
+        ),
+        sample: "Some(ExtentMetadata { generation: 9, flush: 8132, dirty: true }), Some(ExtentMetadata { generation: 9, flush: 8132, dirty: true }), Some(ExtentMetadata { generation: 9, flush: 8132, dirty: true })",
+    },
+    Entry {
+        id: Id::ReconcileStart,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "starting reconciliation {}: found {:?} extents that need \
+                   repair (the count is the length of the task list)",
+        },
+        pattern: concat!(
+            "^starting reconciliation (?<id>",
+            uuid!(),
+            r"): found (?<tasks>\d+) extents that need repair$",
+        ),
+        sample: r##"{"msg":"starting reconciliation c772275f-53d2-46cd-a424-79fbc67cbb9f: found 3200 extents that need repair","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:18:36.022626107Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::ReconcileTaskList,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "Task list: {:?}",
+        },
+        pattern: r"^Task list: \[(?<tasks>.*)\]$",
+        // Trimmed to the tasks for extent 0; the real list has 3200.
+        sample: r##"{"msg":"Task list: [ReconcileIO { id: ReconciliationId(1224), op: ExtentFlush { repair_id: ReconciliationId(1224), extent_id: ExtentId(0), client_id: ClientId(0), flush_number: 8133, gen_number: 10 }, state: ClientData([New, New, New]) }, ReconcileIO { id: ReconciliationId(1225), op: ExtentClose { repair_id: ReconciliationId(1225), extent_id: ExtentId(0) }, state: ClientData([New, New, New]) }, ReconcileIO { id: ReconciliationId(1226), op: ExtentRepair { repair_id: ReconciliationId(1226), extent_id: ExtentId(0), source_client_id: ClientId(0), source_repair_address: [fd00:1122:3344:129::23]:23000, dest_clients: [ClientId(1), ClientId(2)] }, state: ClientData([New, New, New]) }, ReconcileIO { id: ReconciliationId(1227), op: ExtentReopen { repair_id: ReconciliationId(1227), extent_id: ExtentId(0) }, state: ClientData([New, New, New]) }]","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:18:36.022592935Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::ReconcileRepairTask,
+        input: Input::Fragment,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "{:?} of an ExtentRepair ReconcileIO, found in \
+                   ReconcileTaskList",
+        },
+        pattern: concat!(
+            r"ReconcileIO \{ id: ReconciliationId\((?<id>\d+)\), ",
+            r"op: ExtentRepair \{ repair_id: ReconciliationId\(\d+\), ",
+            r"extent_id: ExtentId\((?<extent>\d+)\), ",
+            r"source_client_id: ClientId\((?<source>\d+)\), ",
+            r"source_repair_address: (?<address>[^,]+), ",
+            r"dest_clients: \[(?<dests>[^\]]*)\] \}",
+        ),
+        sample: "ReconcileIO { id: ReconciliationId(1226), op: ExtentRepair { repair_id: ReconciliationId(1226), extent_id: ExtentId(0), source_client_id: ClientId(0), source_repair_address: [fd00:1122:3344:129::23]:23000, dest_clients: [ClientId(1), ClientId(2)] }, state: ClientData([New, New, New]) }",
+    },
+    Entry {
+        id: Id::ClientIds,
+        input: Input::Fragment,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/client.rs"),
+            text: "{:?} of a list of ClientId, found in ReconcileRepairTask \
+                   and LiveRepairCopy",
+        },
+        pattern: r"ClientId\((?<client>\d+)\)",
+        sample: "[ClientId(1), ClientId(2)]",
+    },
+    Entry {
+        id: Id::ReconcileSend,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/client.rs"),
+            text: "sending reconcile request {repair_id:?}, field client; \
+                   only logged for ExtentRepair",
+        },
+        pattern: r"^sending reconcile request ReconciliationId\((?<id>\d+)\)$",
+        sample: r##"{"msg":"sending reconcile request ReconciliationId(1226)","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:21:17.666199294Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"client":"1","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::ReconcileDone,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "done with reconciliation",
+        },
+        pattern: r"^done with reconciliation$",
+        sample: r##"{"msg":"done with reconciliation","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:25:48.59751211Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::Transition,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/client.rs"),
+            text: "Transition from {} to Active, and \
+                   Transition from {:?} to Reconcile, field client",
+        },
+        pattern: r"^Transition from (?<from>.+) to (?<to>\w+)$",
+        sample: r##"{"msg":"Transition from Offline to Active","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:35:10.443272702Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"client":"0","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::ClientStopped,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/upstairs.rs"),
+            text: "downstairs task for {client_id} stopped due to {reason:?}",
+        },
+        pattern: r"^downstairs task for (?<client>\d+) stopped due to (?<reason>.+)$",
+        sample: r##"{"msg":"downstairs task for 0 stopped due to Timeout","v":0,"name":"propolis-server","level":40,"time":"2026-10-22T22:28:20.358199941Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::TooManyOutstanding,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "downstairs failed, too many outstanding jobs {work_count} \
+                   (or bytes {byte_count}); no client is logged, it is \
+                   the one in the FaultSkip that follows",
+        },
+        pattern: r"^downstairs failed, too many outstanding (?<what>jobs|bytes) (?<count>\d+)$",
+        sample: r##"{"msg":"downstairs failed, too many outstanding jobs 1001","v":0,"name":"propolis-server","level":40,"time":"2026-10-22T22:43:48.141589847Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::FaultSkip,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "[{client_id}] client skip {} in process jobs because fault",
+        },
+        pattern: r"^\[(?<client>\d+)\] client skip (?<jobs>\d+) in process jobs because fault$",
+        sample: r##"{"msg":"[0] client skip 1001 in process jobs because fault","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:43:48.141645262Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::LiveRepairReady,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/upstairs.rs"),
+            text: "client {client_id} is ready for live-repair",
+        },
+        pattern: r"^client (?<client>\d+) is ready for live-repair$",
+        sample: r##"{"msg":"client 0 is ready for live-repair","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:47:00.62712067Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::LiveRepairStart,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "started repair {}",
+        },
+        pattern: concat!("^started repair (?<id>", uuid!(), ")$"),
+        sample: r##"{"msg":"started repair 5f314278-4c80-45b0-8298-4527541ff14c","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:47:00.627206392Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::LiveRepairExtent,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "RE:{} repair extent with ids {},{},{},{} deps:{}",
+        },
+        pattern: concat!(
+            r"^RE:(?<extent>\d+) repair extent with ids ",
+            r"(?<close_id>\d+),(?<repair_id>\d+),",
+            r"(?<noop_id>\d+),(?<reopen_id>\d+) deps:",
+        ),
+        sample: r##"{"msg":"RE:0 repair extent with ids 166204,166205,166206,166207 deps:[JobId(161976), ... JobId(164935)] (5 total)","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:47:00.627185091Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::LiveRepairNotNeeded,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "No repair needed for extent {}",
+        },
+        pattern: r"^No repair needed for extent (?<extent>\d+)$",
+        sample: r##"{"msg":"No repair needed for extent 0","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:47:01.939610684Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::LiveRepairCopy,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "Repair for extent {} s:{} d:{:?}",
+        },
+        pattern: r"^Repair for extent (?<extent>\d+) s:(?<source>\d+) d:\[(?<dests>[^\]]*)\]$",
+        sample: r##"{"msg":"Repair for extent 1 s:2 d:[ClientId(0)]","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:47:06.058130503Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##,
+    },
+    Entry {
+        id: Id::LiveRepairEnd,
+        input: Input::Msg,
+        when_msg: None,
+        source: Source {
+            repo: "crucible",
+            file: Some("upstairs/src/downstairs.rs"),
+            text: "live-repair completed successfully, and live-repair aborted",
+        },
+        pattern: r"^live-repair (?<result>completed successfully|aborted)$",
+        sample: r##"{"msg":"live-repair completed successfully","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:57:19.223905683Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"":"downstairs","":"downstairs","session_id":"2f33a3ea-6e8e-4f34-a569-2e8b5719ce8c","component":"crucible-f451fde2-d7bb-49c3-b912-145400ad114c"}"##,
+    },
 ];
 
 static REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -487,5 +788,109 @@ mod test {
         let c = captures_text(Id::Target, "127.0.0.1:44101").unwrap();
         assert_eq!(&c["ip4"], "127.0.0.1");
         assert_eq!(&c["port"], "44101");
+    }
+
+    #[test]
+    fn panic_samples() {
+        assert_eq!(
+            get(Id::PanicIoError, "session_id"),
+            "86ceec0d-72e8-499a-a4f0-40d790c60878"
+        );
+        assert_eq!(get(Id::PanicIoError, "client"), "0");
+        assert_eq!(get(Id::PanicIoError, "job_id"), "852176");
+        assert_eq!(get(Id::PanicIo, "op"), "Read");
+        assert_eq!(get(Id::PanicIo, "start_block"), "14857");
+        assert_eq!(get(Id::PanicIo, "count"), "1");
+        assert_eq!(get(Id::PanicIo, "block_size"), "4096");
+        assert_eq!(get(Id::PanicIo, "states"), "InProgress, InProgress, Done");
+    }
+
+    #[test]
+    fn reconcile_samples() {
+        assert_eq!(get(Id::ReconcileNeeded, "extent"), "0");
+        let clients = get(Id::ReconcileNeeded, "clients");
+        let meta: Vec<(String, String, String)> =
+            captures_iter(Id::ExtentMetadata, &clients)
+                .map(|c| {
+                    (
+                        c["generation"].to_string(),
+                        c["flush"].to_string(),
+                        c["dirty"].to_string(),
+                    )
+                })
+                .collect();
+        assert_eq!(meta.len(), 3);
+        assert_eq!(meta[0], ("9".into(), "8132".into(), "true".into()));
+        let c = captures_text(Id::ExtentMetadata, "None").unwrap();
+        assert!(c.name("none").is_some());
+
+        assert_eq!(
+            get(Id::ReconcileStart, "id"),
+            "c772275f-53d2-46cd-a424-79fbc67cbb9f"
+        );
+        assert_eq!(get(Id::ReconcileStart, "tasks"), "3200");
+
+        // Only the ExtentRepair task in the list matches.
+        let tasks = get(Id::ReconcileTaskList, "tasks");
+        let repairs: Vec<(String, String, String, String)> =
+            captures_iter(Id::ReconcileRepairTask, &tasks)
+                .map(|c| {
+                    (
+                        c["id"].to_string(),
+                        c["extent"].to_string(),
+                        c["source"].to_string(),
+                        c["address"].to_string(),
+                    )
+                })
+                .collect();
+        assert_eq!(
+            repairs,
+            [(
+                "1226".into(),
+                "0".into(),
+                "0".into(),
+                "[fd00:1122:3344:129::23]:23000".into()
+            )]
+        );
+        let dests = get(Id::ReconcileRepairTask, "dests");
+        let ids: Vec<String> = captures_iter(Id::ClientIds, &dests)
+            .map(|c| c["client"].to_string())
+            .collect();
+        assert_eq!(ids, ["1", "2"]);
+        assert_eq!(get(Id::ReconcileSend, "id"), "1226");
+    }
+
+    #[test]
+    fn client_state_samples() {
+        assert_eq!(get(Id::Transition, "from"), "Offline");
+        assert_eq!(get(Id::Transition, "to"), "Active");
+        let line = r##"{"msg":"Transition from Connecting { state: WaitQuorum, mode: New } to Reconcile","v":0,"name":"propolis-server","level":30,"time":"2026-10-22T22:18:36.019554358Z","hostname":"oxz_propolis-server_5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6","pid":16155,"client":"0","":"downstairs","session_id":"86ceec0d-72e8-499a-a4f0-40d790c60878","component":"crucible-3c432392-26fe-4e12-94b0-a5c0ac6a25f0"}"##;
+        let record = Record::parse(line).unwrap();
+        let c = captures(Id::Transition, &record).unwrap();
+        assert_eq!(&c["from"], "Connecting { state: WaitQuorum, mode: New }");
+        assert_eq!(&c["to"], "Reconcile");
+
+        assert_eq!(get(Id::ClientStopped, "client"), "0");
+        assert_eq!(get(Id::ClientStopped, "reason"), "Timeout");
+        assert_eq!(get(Id::TooManyOutstanding, "what"), "jobs");
+        assert_eq!(get(Id::TooManyOutstanding, "count"), "1001");
+        assert_eq!(get(Id::FaultSkip, "client"), "0");
+    }
+
+    #[test]
+    fn live_repair_samples() {
+        assert_eq!(get(Id::LiveRepairReady, "client"), "0");
+        assert_eq!(
+            get(Id::LiveRepairStart, "id"),
+            "5f314278-4c80-45b0-8298-4527541ff14c"
+        );
+        assert_eq!(get(Id::LiveRepairExtent, "extent"), "0");
+        assert_eq!(get(Id::LiveRepairExtent, "close_id"), "166204");
+        assert_eq!(get(Id::LiveRepairExtent, "reopen_id"), "166207");
+        assert_eq!(get(Id::LiveRepairNotNeeded, "extent"), "0");
+        assert_eq!(get(Id::LiveRepairCopy, "extent"), "1");
+        assert_eq!(get(Id::LiveRepairCopy, "source"), "2");
+        assert_eq!(get(Id::LiveRepairCopy, "dests"), "ClientId(0)");
+        assert_eq!(get(Id::LiveRepairEnd, "result"), "completed successfully");
     }
 }

@@ -70,6 +70,9 @@ propolis-server pid 16155, started 2026-10-22T22:11:49.515Z
     at /home/build/.cargo/git/checkouts/crucible-0a48bd218bc2bbbc/bd62980/upstairs/src/client.rs:1161:37
     86ceec0d-72e8-499a-a4f0-40d790c60878 [0] 852176 read hash mismatch
     Disk newallio-11-disk1, upstairs 3c432392-26fe-4e12-94b0-a5c0ac6a25f0
+    Client 0 job 852176: Read of block 14857 in extent 0
+    Job state   [0] InProgress, [1] InProgress, [2] Done
+    Client 0's data did not match the data from client 2
 
 propolis-server pid 25365, started 2026-10-22T23:03:08.270Z
   Propolis commit  3b60af5 (v0.1.0-948)

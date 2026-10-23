@@ -34,7 +34,25 @@ fn check(name: &str) {
     );
 }
 
+fn check_panic(name: &str) {
+    let reports =
+        crulog::history::analyze(&load(&format!("tests/fixtures/{name}")));
+    expectorate::assert_contents(
+        format!("tests/output/{name}-panic.txt"),
+        &crulog::render::panic_report(&reports),
+    );
+    expectorate::assert_contents(
+        format!("tests/output/{name}-panic.json"),
+        &serde_json::to_string_pretty(&reports).unwrap(),
+    );
+}
+
 #[test]
 fn brm42220009() {
     check("BRM42220009");
+}
+
+#[test]
+fn brm42220009_panic() {
+    check_panic("BRM42220009");
 }
