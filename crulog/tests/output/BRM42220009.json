@@ -1,0 +1,271 @@
+{
+  "files": [
+    "system-illumos-propolis-server:default.log.1792707301",
+    "system-illumos-propolis-server:default.log"
+  ],
+  "runs": [
+    {
+      "pid": 16155,
+      "started": "2026-10-22T22:11:49.515744806Z",
+      "first_record": "2026-10-22T22:11:49.515744806Z",
+      "propolis_version": "v0.1.0-948",
+      "propolis_commit": "3b60af5",
+      "crucible_commit": "bd62980710dd3d6d3524aa7f6617127942b75002",
+      "vmm_id": "5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6",
+      "instance": {
+        "id": "617281d1-669b-4261-a215-3c32bb78a8af",
+        "name": "newallio-11-inst",
+        "silo_id": "7bd7623a-68ed-4636-8ecb-b59e3b068787",
+        "project_id": "759beaf2-517d-4d24-bc17-1eed69bc8801",
+        "sled_id": "db183874-65b5-4263-a1c1-ddb2737ae0e9",
+        "sled_serial": "BRM42220009",
+        "cpus": 8,
+        "memory_mb": 8192
+      },
+      "disks": [
+        {
+          "name": "newallio-11-disk",
+          "device_id": "f451fde2-d7bb-49c3-b912-145400ad114c:device",
+          "kind": "nvme",
+          "pci": "0.16.0",
+          "backend_id": "f451fde2-d7bb-49c3-b912-145400ad114c",
+          "crucible": {
+            "upstairs_id": "f451fde2-d7bb-49c3-b912-145400ad114c",
+            "session_id": "2f33a3ea-6e8e-4f34-a569-2e8b5719ce8c",
+            "block_size": 512,
+            "extent_size": 131072,
+            "extent_count": 240,
+            "size_bytes": 16106127360,
+            "encrypted": true,
+            "read_only": false,
+            "downstairs": [
+              {
+                "client": 0,
+                "ip": "fd00:1122:3344:128::27",
+                "port": 19012,
+                "region_ids": [
+                  "fc1efc39-3e6f-4d6d-98c7-85b39744f5ce"
+                ]
+              },
+              {
+                "client": 1,
+                "ip": "fd00:1122:3344:103::a",
+                "port": 19043,
+                "region_ids": [
+                  "1a1525c6-1984-4260-a13f-0357d181efb8"
+                ]
+              },
+              {
+                "client": 2,
+                "ip": "fd00:1122:3344:105::a",
+                "port": 19035,
+                "region_ids": [
+                  "9dff142f-6f1c-4f66-a62f-9192043625c8"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "newallio-11-disk1",
+          "device_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0:device",
+          "kind": "nvme",
+          "pci": "0.17.0",
+          "backend_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0",
+          "crucible": {
+            "upstairs_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0",
+            "session_id": "86ceec0d-72e8-499a-a4f0-40d790c60878",
+            "block_size": 4096,
+            "extent_size": 16384,
+            "extent_count": 800,
+            "size_bytes": 53687091200,
+            "encrypted": true,
+            "read_only": false,
+            "downstairs": [
+              {
+                "client": 0,
+                "ip": "fd00:1122:3344:129::23",
+                "port": 19000,
+                "region_ids": [
+                  "76b3116a-10ed-429e-8df9-183a827f9727"
+                ]
+              },
+              {
+                "client": 1,
+                "ip": "fd00:1122:3344:108::c",
+                "port": 19040,
+                "region_ids": [
+                  "4fa5c4ee-6346-46a1-b0f3-388f019b6279"
+                ]
+              },
+              {
+                "client": 2,
+                "ip": "fd00:1122:3344:104::9",
+                "port": 19037,
+                "region_ids": [
+                  "0bb6ba8d-2fa8-4f66-9bd6-2e98f1bdb828"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "newallio-11-disk2",
+          "device_id": "12fd67c5-ab0f-4f2d-8444-48f24f7675ac:device",
+          "kind": "nvme",
+          "pci": "0.18.0",
+          "backend_id": "12fd67c5-ab0f-4f2d-8444-48f24f7675ac",
+          "crucible": {
+            "upstairs_id": "12fd67c5-ab0f-4f2d-8444-48f24f7675ac",
+            "session_id": "7f9e6996-3713-43c6-8b5a-9d762cdaac5b",
+            "block_size": 4096,
+            "extent_size": 16384,
+            "extent_count": 800,
+            "size_bytes": 53687091200,
+            "encrypted": true,
+            "read_only": false,
+            "downstairs": [
+              {
+                "client": 0,
+                "ip": "fd00:1122:3344:104::d",
+                "port": 19030,
+                "region_ids": [
+                  "7bc98d6d-406e-4254-8b69-58b8f7e1c6b8"
+                ]
+              },
+              {
+                "client": 1,
+                "ip": "fd00:1122:3344:127::2b",
+                "port": 19005,
+                "region_ids": [
+                  "77c74116-9d78-4559-9e26-e784c118d799"
+                ]
+              },
+              {
+                "client": 2,
+                "ip": "fd00:1122:3344:106::8",
+                "port": 19043,
+                "region_ids": [
+                  "e5814eb1-75e2-4946-9117-f28f90994b0d"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "newallio-11-disk3",
+          "device_id": "e8fcf747-a9b5-4c5b-a788-1451ea9ff501:device",
+          "kind": "nvme",
+          "pci": "0.19.0",
+          "backend_id": "e8fcf747-a9b5-4c5b-a788-1451ea9ff501",
+          "crucible": {
+            "upstairs_id": "e8fcf747-a9b5-4c5b-a788-1451ea9ff501",
+            "session_id": "4b39ca12-a42b-4e42-b7d6-6fd26a9964fb",
+            "block_size": 4096,
+            "extent_size": 16384,
+            "extent_count": 800,
+            "size_bytes": 53687091200,
+            "encrypted": true,
+            "read_only": false,
+            "downstairs": [
+              {
+                "client": 0,
+                "ip": "fd00:1122:3344:104::6",
+                "port": 19013,
+                "region_ids": [
+                  "eb0c9381-c9c7-412f-b9fc-a837c041ac64"
+                ]
+              },
+              {
+                "client": 1,
+                "ip": "fd00:1122:3344:127::29",
+                "port": 19037,
+                "region_ids": [
+                  "8edd7ef5-6ff2-43e4-8ef6-2f4c10da2db5"
+                ]
+              },
+              {
+                "client": 2,
+                "ip": "fd00:1122:3344:102::b",
+                "port": 19041,
+                "region_ids": [
+                  "bd5c2ad3-4bd0-4305-ab8d-50907f1fec4b"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "newallio-11-disk4",
+          "device_id": "5c18236e-65b3-4b17-a84d-5fda0661103f:device",
+          "kind": "nvme",
+          "pci": "0.20.0",
+          "backend_id": "5c18236e-65b3-4b17-a84d-5fda0661103f",
+          "crucible": {
+            "upstairs_id": "5c18236e-65b3-4b17-a84d-5fda0661103f",
+            "session_id": "da7fd452-b206-460d-9e23-ded4d6fb0dbc",
+            "block_size": 4096,
+            "extent_size": 16384,
+            "extent_count": 800,
+            "size_bytes": 53687091200,
+            "encrypted": true,
+            "read_only": false,
+            "downstairs": [
+              {
+                "client": 0,
+                "ip": "fd00:1122:3344:102::4",
+                "port": 19035,
+                "region_ids": [
+                  "6a37551d-e497-445d-af57-ec32ae9a09b7"
+                ]
+              },
+              {
+                "client": 1,
+                "ip": "fd00:1122:3344:101::7",
+                "port": 19040,
+                "region_ids": [
+                  "4b01e156-6192-4b17-bef9-996037d6686d"
+                ]
+              },
+              {
+                "client": 2,
+                "ip": "fd00:1122:3344:107::6",
+                "port": 19049,
+                "region_ids": [
+                  "c05c56b0-2fd5-4b47-ad72-9d2510b23371"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": null,
+          "device_id": "cloud-init-dev",
+          "kind": "virtio",
+          "pci": "0.24.0",
+          "backend_id": "cloud-init-backend",
+          "crucible": null
+        }
+      ],
+      "panic": {
+        "after": "2026-10-22T23:03:05.409835109Z",
+        "thread": "tokio-rt-vmm",
+        "location": "/home/build/.cargo/git/checkouts/crucible-0a48bd218bc2bbbc/bd62980/upstairs/src/client.rs:1161:37",
+        "message": "86ceec0d-72e8-499a-a4f0-40d790c60878 [0] 852176 read hash mismatch",
+        "upstairs_id": "3c432392-26fe-4e12-94b0-a5c0ac6a25f0"
+      }
+    },
+    {
+      "pid": 25365,
+      "started": "2026-10-22T23:03:08.270910770Z",
+      "first_record": "2026-10-22T23:03:08.270910770Z",
+      "propolis_version": "v0.1.0-948",
+      "propolis_commit": "3b60af5",
+      "crucible_commit": null,
+      "vmm_id": "5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6",
+      "instance": null,
+      "disks": [],
+      "panic": null
+    }
+  ]
+}

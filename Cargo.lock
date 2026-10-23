@@ -1995,6 +1995,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "crulog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crucible-workspace-hack",
+ "expectorate",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

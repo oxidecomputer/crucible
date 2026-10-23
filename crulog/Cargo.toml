@@ -1,0 +1,17 @@
+[package]
+name = "crulog"
+version = "0.1.0"
+license = "MPL-2.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+crucible-workspace-hack.workspace = true
+
+[dev-dependencies]
+expectorate.workspace = true

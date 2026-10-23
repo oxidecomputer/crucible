@@ -1,0 +1,77 @@
+Files, oldest first:
+  system-illumos-propolis-server:default.log.1792707301
+  system-illumos-propolis-server:default.log
+
+propolis-server pid 16155, started 2026-10-22T22:11:49.515Z
+  Propolis commit  3b60af5 (v0.1.0-948)
+  Crucible commit  bd62980710dd3d6d3524aa7f6617127942b75002
+  VMM ID           5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6
+  Instance ID      617281d1-669b-4261-a215-3c32bb78a8af
+  Name             newallio-11-inst
+  Board            8 vCPUs, 8192 MiB
+  Silo ID          7bd7623a-68ed-4636-8ecb-b59e3b068787
+  Project ID       759beaf2-517d-4d24-bc17-1eed69bc8801
+  Sled ID          db183874-65b5-4263-a1c1-ddb2737ae0e9 (BRM42220009)
+
+  Disk newallio-11-disk, nvme at PCI 0.16.0
+    Upstairs ID  f451fde2-d7bb-49c3-b912-145400ad114c
+    Session ID   2f33a3ea-6e8e-4f34-a569-2e8b5719ce8c
+    Region       15 GiB: 240 extents x 131072 blocks x 512 bytes, encrypted
+    Read only    false
+    Client  Downstairs                      Region ID
+    0       [fd00:1122:3344:128::27]:19012  fc1efc39-3e6f-4d6d-98c7-85b39744f5ce
+    1       [fd00:1122:3344:103::a]:19043   1a1525c6-1984-4260-a13f-0357d181efb8
+    2       [fd00:1122:3344:105::a]:19035   9dff142f-6f1c-4f66-a62f-9192043625c8
+
+  Disk newallio-11-disk1, nvme at PCI 0.17.0
+    Upstairs ID  3c432392-26fe-4e12-94b0-a5c0ac6a25f0
+    Session ID   86ceec0d-72e8-499a-a4f0-40d790c60878
+    Region       50 GiB: 800 extents x 16384 blocks x 4096 bytes, encrypted
+    Read only    false
+    Client  Downstairs                      Region ID
+    0       [fd00:1122:3344:129::23]:19000  76b3116a-10ed-429e-8df9-183a827f9727
+    1       [fd00:1122:3344:108::c]:19040   4fa5c4ee-6346-46a1-b0f3-388f019b6279
+    2       [fd00:1122:3344:104::9]:19037   0bb6ba8d-2fa8-4f66-9bd6-2e98f1bdb828
+
+  Disk newallio-11-disk2, nvme at PCI 0.18.0
+    Upstairs ID  12fd67c5-ab0f-4f2d-8444-48f24f7675ac
+    Session ID   7f9e6996-3713-43c6-8b5a-9d762cdaac5b
+    Region       50 GiB: 800 extents x 16384 blocks x 4096 bytes, encrypted
+    Read only    false
+    Client  Downstairs                      Region ID
+    0       [fd00:1122:3344:104::d]:19030   7bc98d6d-406e-4254-8b69-58b8f7e1c6b8
+    1       [fd00:1122:3344:127::2b]:19005  77c74116-9d78-4559-9e26-e784c118d799
+    2       [fd00:1122:3344:106::8]:19043   e5814eb1-75e2-4946-9117-f28f90994b0d
+
+  Disk newallio-11-disk3, nvme at PCI 0.19.0
+    Upstairs ID  e8fcf747-a9b5-4c5b-a788-1451ea9ff501
+    Session ID   4b39ca12-a42b-4e42-b7d6-6fd26a9964fb
+    Region       50 GiB: 800 extents x 16384 blocks x 4096 bytes, encrypted
+    Read only    false
+    Client  Downstairs                      Region ID
+    0       [fd00:1122:3344:104::6]:19013   eb0c9381-c9c7-412f-b9fc-a837c041ac64
+    1       [fd00:1122:3344:127::29]:19037  8edd7ef5-6ff2-43e4-8ef6-2f4c10da2db5
+    2       [fd00:1122:3344:102::b]:19041   bd5c2ad3-4bd0-4305-ab8d-50907f1fec4b
+
+  Disk newallio-11-disk4, nvme at PCI 0.20.0
+    Upstairs ID  5c18236e-65b3-4b17-a84d-5fda0661103f
+    Session ID   da7fd452-b206-460d-9e23-ded4d6fb0dbc
+    Region       50 GiB: 800 extents x 16384 blocks x 4096 bytes, encrypted
+    Read only    false
+    Client  Downstairs                     Region ID
+    0       [fd00:1122:3344:102::4]:19035  6a37551d-e497-445d-af57-ec32ae9a09b7
+    1       [fd00:1122:3344:101::7]:19040  4b01e156-6192-4b17-bef9-996037d6686d
+    2       [fd00:1122:3344:107::6]:19049  c05c56b0-2fd5-4b47-ad72-9d2510b23371
+
+  Disk cloud-init-dev, virtio at PCI 0.24.0
+    Backend      cloud-init-backend (not Crucible)
+
+  Panic in thread 'tokio-rt-vmm' after 2026-10-22T23:03:05.409Z
+    at /home/build/.cargo/git/checkouts/crucible-0a48bd218bc2bbbc/bd62980/upstairs/src/client.rs:1161:37
+    86ceec0d-72e8-499a-a4f0-40d790c60878 [0] 852176 read hash mismatch
+    Disk newallio-11-disk1, upstairs 3c432392-26fe-4e12-94b0-a5c0ac6a25f0
+
+propolis-server pid 25365, started 2026-10-22T23:03:08.270Z
+  Propolis commit  3b60af5 (v0.1.0-948)
+  VMM ID           5a1cb26d-2b0b-4162-8ffb-3be5bcc4bab6
+  No VM was initialized by this process.
