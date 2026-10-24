@@ -20,8 +20,13 @@
 
   <exec_method type='method' name='start'
     exec='/opt/oxide/pantry/bin/crucible-pantry run -l [%{config/listen_addr}]:%{config/listen_port}'
-    timeout_seconds='30'
-    />
+    timeout_seconds='30'>
+    <method_context>
+      <method_environment>
+        <envvar name='UMEM_OPTIONS' value='backend=mmap' />
+      </method_environment>
+    </method_context>
+  </exec_method>
 
   <exec_method type='method' name='stop' exec=':kill' timeout_seconds='30' />
 
