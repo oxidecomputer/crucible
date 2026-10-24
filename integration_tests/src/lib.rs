@@ -20,6 +20,7 @@ mod integration_tests {
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
+    use futures::TryStreamExt;
     use httptest::{Expectation, Server, matchers::*, responders::*};
     use repair_client::Client;
     use sha2::Digest;
@@ -4873,6 +4874,32 @@ mod integration_tests {
         (pantry, volume_id, client)
     }
 
+    /// Bulk-read `size` bytes at `offset` and collect the response body
+    async fn pantry_bulk_read(
+        client: &crucible_pantry_client::Client,
+        volume_id: &str,
+        offset: u64,
+        size: u32,
+    ) -> Vec<u8> {
+        let mut stream = client
+            .bulk_read(
+                volume_id,
+                &crucible_pantry_client::types::BulkReadRequest {
+                    offset,
+                    size,
+                },
+            )
+            .await
+            .unwrap()
+            .into_inner_stream();
+
+        let mut data = Vec::with_capacity(size as usize);
+        while let Some(chunk) = stream.try_next().await.unwrap() {
+            data.extend_from_slice(&chunk);
+        }
+        data
+    }
+
     #[tokio::test]
     async fn test_pantry_import_from_url_ovmf() {
         const BLOCK_SIZE: usize = 512;
@@ -5301,8 +5328,8 @@ mod integration_tests {
         let (_pantry, volume_id, client) =
             get_pantry_and_client_for_tds(&tds).await;
 
-        // The Pantry should reject the one byte write
-        let e = client
+        // The Pantry should reject the one byte read
+        let Err(e) = client
             .bulk_read(
                 &volume_id.to_string(),
                 &crucible_pantry_client::types::BulkReadRequest {
@@ -5311,7 +5338,9 @@ mod integration_tests {
                 },
             )
             .await
-            .unwrap_err();
+        else {
+            panic!("expected ErrorResponse, got Ok");
+        };
 
         let crucible_pantry_client::Error::ErrorResponse(e) = e else {
             panic!("expected ErrorResponse, got {e}");
@@ -5516,53 +5545,34 @@ mod integration_tests {
         // then bulk_read it out
 
         for i in 0..10 {
-            let data = client
-                .bulk_read(
-                    &volume_id.to_string(),
-                    &crucible_pantry_client::types::BulkReadRequest {
-                        offset: i * 512,
-                        size: 512,
-                    },
-                )
-                .await
-                .unwrap();
+            let data =
+                pantry_bulk_read(&client, &volume_id.to_string(), i * 512, 512)
+                    .await;
 
-            assert_eq!(
-                data.base64_encoded_data,
-                engine::general_purpose::STANDARD.encode(vec![i as u8; 512]),
-            );
+            assert_eq!(data, vec![i as u8; 512]);
         }
 
         // perform one giant bulk_read
 
-        let data = client
-            .bulk_read(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::BulkReadRequest {
-                    offset: 0,
-                    size: 512 * 10,
-                },
-            )
-            .await
-            .unwrap();
+        let data =
+            pantry_bulk_read(&client, &volume_id.to_string(), 0, 512 * 10)
+                .await;
 
         assert_eq!(
-            data.base64_encoded_data,
-            engine::general_purpose::STANDARD.encode(
-                [
-                    vec![0_u8; 512],
-                    vec![1_u8; 512],
-                    vec![2_u8; 512],
-                    vec![3_u8; 512],
-                    vec![4_u8; 512],
-                    vec![5_u8; 512],
-                    vec![6_u8; 512],
-                    vec![7_u8; 512],
-                    vec![8_u8; 512],
-                    vec![9_u8; 512],
-                ]
-                .concat()
-            ),
+            data,
+            [
+                vec![0_u8; 512],
+                vec![1_u8; 512],
+                vec![2_u8; 512],
+                vec![3_u8; 512],
+                vec![4_u8; 512],
+                vec![5_u8; 512],
+                vec![6_u8; 512],
+                vec![7_u8; 512],
+                vec![8_u8; 512],
+                vec![9_u8; 512],
+            ]
+            .concat(),
         );
 
         client.detach(&volume_id.to_string()).await.unwrap();
@@ -5598,24 +5608,17 @@ mod integration_tests {
 
         // then, bulk read it out
 
-        let data = client
-            .bulk_read(
-                &volume_id.to_string(),
-                &crucible_pantry_client::types::BulkReadRequest {
-                    offset: 0,
-                    size: crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE
-                        as u32,
-                },
-            )
-            .await
-            .unwrap();
+        let data = pantry_bulk_read(
+            &client,
+            &volume_id.to_string(),
+            0,
+            crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE as u32,
+        )
+        .await;
 
         assert_eq!(
-            data.base64_encoded_data,
-            engine::general_purpose::STANDARD.encode(vec![
-                    0x99;
-                    crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE
-                ],),
+            data,
+            vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
         );
 
         client.detach(&volume_id.to_string()).await.unwrap();
@@ -5696,20 +5699,13 @@ mod integration_tests {
         let mut buffer = Vec::with_capacity(total_size);
 
         for i in 0..(total_size / CHUNK_SIZE) {
-            let response = client
-                .bulk_read(
-                    &volume_id.to_string(),
-                    &crucible_pantry_client::types::BulkReadRequest {
-                        offset: (i * CHUNK_SIZE) as u64,
-                        size: CHUNK_SIZE as u32,
-                    },
-                )
-                .await
-                .unwrap();
-
-            let mut data = engine::general_purpose::STANDARD
-                .decode(&response.base64_encoded_data)
-                .unwrap();
+            let mut data = pantry_bulk_read(
+                &client,
+                &volume_id.to_string(),
+                (i * CHUNK_SIZE) as u64,
+                CHUNK_SIZE as u32,
+            )
+            .await;
 
             buffer.append(&mut data);
         }
@@ -5826,20 +5822,13 @@ mod integration_tests {
         let mut buffer = Vec::with_capacity(total_size);
 
         for i in 0..(total_size / CHUNK_SIZE) {
-            let response = client
-                .bulk_read(
-                    &volume_id.to_string(),
-                    &crucible_pantry_client::types::BulkReadRequest {
-                        offset: (i * CHUNK_SIZE) as u64,
-                        size: CHUNK_SIZE as u32,
-                    },
-                )
-                .await
-                .unwrap();
-
-            let mut data = engine::general_purpose::STANDARD
-                .decode(&response.base64_encoded_data)
-                .unwrap();
+            let mut data = pantry_bulk_read(
+                &client,
+                &volume_id.to_string(),
+                (i * CHUNK_SIZE) as u64,
+                CHUNK_SIZE as u32,
+            )
+            .await;
 
             buffer.append(&mut data);
         }

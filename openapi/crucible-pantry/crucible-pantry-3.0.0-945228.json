@@ -6,7 +6,7 @@
       "url": "https://oxide.computer",
       "email": "api@oxide.computer"
     },
-    "version": "2.0.0"
+    "version": "3.0.0"
   },
   "paths": {
     "/crucible/pantry/0": {
@@ -244,7 +244,7 @@
     },
     "/crucible/pantry/0/volume/{id}/bulk-read": {
       "post": {
-        "summary": "Bulk read data from a volume at a specified offset",
+        "summary": "Bulk read data from a volume at a specified offset, as raw bytes",
         "operationId": "bulk_read",
         "parameters": [
           {
@@ -270,10 +270,8 @@
           "200": {
             "description": "successful operation",
             "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BulkReadResponse"
-                }
+              "*/*": {
+                "schema": {}
               }
             }
           },
@@ -583,17 +581,6 @@
         "required": [
           "offset",
           "size"
-        ]
-      },
-      "BulkReadResponse": {
-        "type": "object",
-        "properties": {
-          "base64_encoded_data": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "base64_encoded_data"
         ]
       },
       "BulkWriteRequest": {

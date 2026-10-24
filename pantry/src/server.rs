@@ -16,9 +16,10 @@ use crucible_pantry_types::pantry::{
     VolumeStatus,
 };
 use dropshot::{
-    ClientSpecifiesVersionInHeader, HandlerTaskMode, HttpError,
-    HttpResponseDeleted, HttpResponseOk, HttpResponseUpdatedNoContent,
-    Path as TypedPath, RequestContext, TypedBody, VersionPolicy,
+    Body, ClientSpecifiesVersionInHeader, FreeformBody, HandlerTaskMode,
+    HttpError, HttpResponseDeleted, HttpResponseOk,
+    HttpResponseUpdatedNoContent, Path as TypedPath, RequestContext, TypedBody,
+    VersionPolicy,
 };
 use slog::{Logger, info, o};
 use std::result::Result as SResult;
@@ -187,6 +188,22 @@ impl CruciblePantryApi for CruciblePantryImpl {
     }
 
     async fn bulk_read(
+        rqctx: RequestContext<Self::Context>,
+        path: TypedPath<VolumePath>,
+        body: TypedBody<BulkReadRequest>,
+    ) -> SResult<HttpResponseOk<FreeformBody>, HttpError> {
+        let path = path.into_inner();
+        let body = body.into_inner();
+        let pantry = rqctx.context();
+
+        let data = pantry
+            .bulk_read(path.id.clone(), body.offset, body.size)
+            .await?;
+
+        Ok(HttpResponseOk(FreeformBody(Body::with_content(data))))
+    }
+
+    async fn bulk_read_v1(
         rqctx: RequestContext<Self::Context>,
         path: TypedPath<VolumePath>,
         body: TypedBody<BulkReadRequest>,

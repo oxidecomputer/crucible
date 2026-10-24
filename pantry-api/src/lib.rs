@@ -3,7 +3,7 @@
 use crucible_pantry_types_versions::latest;
 use crucible_pantry_types_versions::v1;
 use dropshot::{
-    HttpError, HttpResponseDeleted, HttpResponseOk,
+    FreeformBody, HttpError, HttpResponseDeleted, HttpResponseOk,
     HttpResponseUpdatedNoContent, Path, RequestContext, TypedBody,
 };
 use dropshot_api_manager_types::api_versions;
@@ -20,6 +20,7 @@ api_versions!([
     // |  example for the next person.
     // v
     // (next_int, IDENT),
+    (3, RAW_BULK_READ),
     (2, VOLUME_INFO_ENUM),
     (1, INITIAL),
 ]);
@@ -164,12 +165,26 @@ pub trait CruciblePantryApi {
         body: TypedBody<latest::pantry::BulkWriteRequest>,
     ) -> Result<HttpResponseUpdatedNoContent, HttpError>;
 
-    /// Bulk read data from a volume at a specified offset
+    /// Bulk read data from a volume at a specified offset, as raw bytes
     #[endpoint {
         method = POST,
         path = "/crucible/pantry/0/volume/{id}/bulk-read",
+        versions = VERSION_RAW_BULK_READ..,
     }]
     async fn bulk_read(
+        rqctx: RequestContext<Self::Context>,
+        path: Path<latest::pantry::VolumePath>,
+        body: TypedBody<latest::pantry::BulkReadRequest>,
+    ) -> Result<HttpResponseOk<FreeformBody>, HttpError>;
+
+    /// Bulk read data from a volume at a specified offset, as base64 JSON
+    #[endpoint {
+        method = POST,
+        path = "/crucible/pantry/0/volume/{id}/bulk-read",
+        versions = VERSION_INITIAL..VERSION_RAW_BULK_READ,
+        operation_id = "bulk_read",
+    }]
+    async fn bulk_read_v1(
         rqctx: RequestContext<Self::Context>,
         path: Path<latest::pantry::VolumePath>,
         body: TypedBody<latest::pantry::BulkReadRequest>,
