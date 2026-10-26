@@ -670,16 +670,23 @@ pub fn show_work(ds: &mut Downstairs) {
         "Active Upstairs connections: {:?}", active_upstairs_connections
     );
 
-    for upstairs_connection in active_upstairs_connections {
-        let work = ds.work(upstairs_connection);
+    for connection_id in active_upstairs_connections {
+        let active = ds.active(connection_id);
+        let upstairs = active.upstairs_connection;
+        info!(
+            ds.log,
+            "Upstairs connection: connection_id={} upstairs_id={} session_id={} generation={}",
+            connection_id.0,
+            upstairs.upstairs_id,
+            upstairs.session_id,
+            upstairs.generation
+        );
+        let work = ds.work(connection_id);
         if work.pending_jobs.is_empty() {
             info!(ds.log, "Crucible Downstairs work queue:  Empty");
         } else {
             info!(ds.log, "Crucible Downstairs work queue:");
-            info!(
-                ds.log,
-                "{:8} {:>7} {:>5} {}", "  JOB_ID", "IO_TYPE", "STATE", "DEPS"
-            );
+            info!(ds.log, "{:8} {:>7}  {}", "  JOB_ID", "IO_TYPE", "DEPS");
             for job in work.pending_jobs.iter() {
                 let (dsw_type, dep_list) = match &job.io {
                     IOop::Read { dependencies, .. } => ("Read", dependencies),
