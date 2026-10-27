@@ -16,8 +16,6 @@ pub fn verify_region(
     thread_count: Option<usize>,
     log: Logger,
 ) -> Result<()> {
-    let region = Region::open(region_dir, false, true, &log)?;
-
     // Configure thread pool based on parameter
     let pool = if let Some(count) = thread_count {
         rayon::ThreadPoolBuilder::new()
@@ -30,26 +28,7 @@ pub fn verify_region(
             .expect("Failed to build thread pool")
     };
 
-    let errors: Vec<_> = pool.install(|| {
-        region
-            .extents
-            .par_iter()
-            .filter_map(|e| {
-                let extent = match e {
-                    extent::ExtentState::Opened(extent) => extent,
-                    extent::ExtentState::Closed => {
-                        panic!("dump on closed extent!")
-                    }
-                };
-
-                if let Err(err) = extent.validate() {
-                    Some((extent.number, err))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    });
+    let errors = collect_verification_errors(region_dir, &pool, &log)?;
 
     if !errors.is_empty() {
         for (number, err) in &errors {
@@ -64,6 +43,32 @@ pub fn verify_region(
     }
     Ok(())
 }
+
+fn collect_verification_errors(
+    region_dir: PathBuf,
+    pool: &rayon::ThreadPool,
+    log: &Logger,
+) -> Result<Vec<(ExtentId, CrucibleError)>> {
+    let (region, mut errors) = Region::open_for_dump(region_dir, log)?;
+
+    let validation_errors: Vec<_> = pool.install(|| {
+        region
+            .extents
+            .par_iter()
+            .filter_map(|state| match state {
+                extent::ExtentState::Opened(extent) => {
+                    extent.validate().err().map(|err| (extent.number, err))
+                }
+                // The opening error is already recorded for this extent.
+                extent::ExtentState::Closed => None,
+            })
+            .collect()
+    });
+
+    errors.extend(validation_errors);
+    Ok(errors)
+}
+
 /*
  * Dump the metadata for one or more region directories.
  *
@@ -1191,6 +1196,60 @@ pub fn extent_info(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::region::test::{
+        corrupt_block_zero, make_temp_region_with_corrupt_extent,
+        new_region_options,
+    };
+
+    #[test]
+    fn verify_continues_after_extent_open_failure() {
+        let dir = make_temp_region_with_corrupt_extent();
+        let log = build_logger();
+
+        // Extent 1 cannot open. Extent 2 is clean with empty contexts, so
+        // corrupting its data allows opening but must fail validation.
+        corrupt_block_zero(dir.path(), ExtentId(2));
+        assert!(Region::open(&dir, false, true, &log).is_err());
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let errors =
+            collect_verification_errors(dir.path().to_path_buf(), &pool, &log)
+                .unwrap();
+
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().any(|(eid, err)| {
+            *eid == ExtentId(1)
+                && matches!(
+                    err,
+                    CrucibleError::MissingContextSlot {
+                        block: 0,
+                        extent: 1,
+                    }
+                )
+        }));
+        assert!(errors.iter().any(|(eid, err)| {
+            *eid == ExtentId(2) && err.to_string().contains("empty active slot")
+        }));
+
+        let err =
+            verify_region(dir.path().to_path_buf(), Some(2), log).unwrap_err();
+        assert_eq!(err.to_string(), "Region failed to verify");
+    }
+
+    #[test]
+    fn verify_healthy_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = build_logger();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(3, Backend::RawFile).unwrap();
+        drop(region);
+
+        verify_region(dir.path().to_path_buf(), Some(2), log).unwrap();
+    }
 
     #[test]
     fn color_compare() {
