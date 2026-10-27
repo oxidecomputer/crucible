@@ -1153,6 +1153,8 @@ impl Downstairs {
                         self.log,
                         "Forcing offline downstairs {cid} to faulted"
                     );
+                    // We are faulted, so skip any in progress jobs.
+                    self.skip_all_jobs(cid);
                     self.clients[cid].set_connection_mode_faulted();
                 }
                 _state => {
@@ -9661,6 +9663,54 @@ pub(crate) mod test {
             [JobId(1006), JobId(1008), JobId(1012)]
         );
         assert_eq!(current_deps, &[JobId(1006), JobId(1008), JobId(1012)]);
+    }
+
+    #[test]
+    fn live_repair_start_skips_offline_client_jobs() {
+        // A client that is Offline when live-repair starts is moved to
+        // Faulted.  It can only come back through live-repair.  Jobs held
+        // for it while Offline must now be skipped.
+        let mut ds = Downstairs::repair_test_all_active();
+        let up_state = UpstairsState::Active;
+
+        // Client 2 disconnects and gets partway through reconnecting, in
+        // Offline mode (so it would come back through replay)
+        let offline = ClientId::new(2);
+        for state in [
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+        ] {
+            ds.clients[offline].checked_state_transition(
+                &up_state,
+                DsStateData::Connecting {
+                    state,
+                    mode: ConnectionMode::Offline,
+                },
+            );
+        }
+
+        // A write while it is Offline is held for it
+        let write_id =
+            ds.submit_test_write_block(ExtentId(0), BlockOffset(1), false);
+        assert_eq!(ds.job_state(write_id, 2), IOState::InProgress);
+
+        // Client 1 is faulted and becomes ready for live-repair
+        to_live_repair_ready(&mut ds, ClientId::new(1));
+
+        let r = ds.check_live_repair_start(&up_state);
+        assert_eq!(r, LiveRepairStart::Started);
+
+        // Client 2 must now come back through live-repair, and the write
+        // held for it has been skipped
+        assert_eq!(
+            ds.clients[offline].state(),
+            DsState::Connecting {
+                state: crate::NegotiationState::WaitForRegionInfo,
+                mode: ConnectionMode::Faulted,
+            }
+        );
+        assert_eq!(ds.job_state(write_id, 2), IOState::Skipped);
     }
 
     #[test]
