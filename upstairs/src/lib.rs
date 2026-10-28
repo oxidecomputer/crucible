@@ -74,6 +74,7 @@ pub use client::{
 pub use crucible_common::impacted_blocks::*;
 
 mod deferred;
+mod extent_trace;
 mod live_repair;
 
 #[cfg(test)]
