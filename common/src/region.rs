@@ -413,37 +413,37 @@ pub fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     out
 }
 
-/// Append the region active state file to the end of a provided path.
+/// Append the region private state file to the end of a provided path.
 ///
 /// This file records whether an upstairs has ever activated this region and
 /// is local to each downstairs.  It is never copied by repair or clone.
-pub fn active_path<P: AsRef<Path>>(dir: P) -> PathBuf {
+pub fn private_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     let mut out = dir.as_ref().to_path_buf();
-    out.push("active.json");
+    out.push("private.json");
     out
 }
 
-/// Contents of the region active state file (see [`active_path`])
+/// Contents of the region private state file (see [`private_path`])
 ///
 /// The `version` tag is a string so that a future version can be added as a
 /// new variant without old and new formats being confused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "version", rename_all = "snake_case")]
-pub enum RegionActiveState {
+pub enum RegionPrivateState {
     V1 {
         /// Has an upstairs ever told this downstairs it was active?
         been_active: bool,
     },
 }
 
-impl RegionActiveState {
+impl RegionPrivateState {
     pub fn new(been_active: bool) -> Self {
-        RegionActiveState::V1 { been_active }
+        RegionPrivateState::V1 { been_active }
     }
 
     pub fn been_active(&self) -> bool {
         match self {
-            RegionActiveState::V1 { been_active } => *been_active,
+            RegionPrivateState::V1 { been_active } => *been_active,
         }
     }
 }
