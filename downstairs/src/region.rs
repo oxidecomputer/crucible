@@ -363,11 +363,9 @@ impl Region {
     fn read_or_create_active_state(dir: &Path, log: &Logger) -> Result<bool> {
         let ap = active_path(dir);
 
-        // TODO(PR input wanted): an active state file that exists but cannot
-        // be read or parsed (including an unknown `version`) is currently a
-        // fatal error and the region will not open.  The alternative is to
-        // treat it as `been_active: false` and rewrite it, which would let a
-        // corrupt file silently reset the flag.  Is failing the right policy?
+        // An active state file that exists but cannot be read or parsed
+        // (including an unknown `version`) is an error and the region will
+        // not open and the downstairs then exits.
         let state: Option<RegionActiveState> = read_json_maybe(&ap)
             .with_context(|| format!("reading region active file {ap:?}"))?;
 
@@ -402,10 +400,8 @@ impl Region {
             return Ok(());
         }
         let ap = active_path(&self.dir);
-        // TODO(PR input wanted): If we can't write the active file, we could
-        // continue, but should we?  The creation of this file is not essential
-        // to the function of either upstairs or downstairs, it just allows
-        // 2/3 activation to happen.
+        // Failing to write the active file is an error.  We will then drop
+        // the connection rather than continue.
         write_json(&ap, &RegionActiveState::new(true), true)
             .with_context(|| format!("writing region active file {ap:?}"))?;
         info!(self.log, "Region has been active, updated {ap:?}");
