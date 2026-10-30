@@ -1946,8 +1946,9 @@ pub enum NegotiationStateData {
 
     /// Waiting to hear `BeenActive` from the client
     ///
-    /// This is only used when the negotiated version is V14 or newer and we
-    /// are read-write.
+    /// This is only used for read-write regions.
+    //
+    // It is also only used when the negotiated version is V14 or newer.
     WaitForBeenActive,
 
     /// Waiting to hear `ExtentVersions` from the client
