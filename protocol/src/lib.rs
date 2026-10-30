@@ -233,20 +233,21 @@ pub enum MessageVersion {
     V1 = 1,
 }
 impl MessageVersion {
-    /// Every version this build can speak, newest first
-    ///
-    /// The first entry is [`MessageVersion::current()`]; new versions are
-    /// added at the front and dropped versions are removed from the end.
-    pub const fn supported() -> &'static [MessageVersion] {
-        // V14 is not listed until the upstairs and downstairs handle the
-        // V14 messages.  Listing it before then would break compatibility
-        // with peers that do.
-        &[Self::V13]
-    }
-
     /// The newest version this build can speak
     pub const fn current() -> Self {
-        Self::supported()[0]
+        // This stays at V13 until the upstairs and downstairs can negotiate
+        // either V13 or V14 and handle the V14 messages.  Moving to V14
+        // before then would break compatibility with V13 peers.
+        Self::V13
+    }
+
+    /// Every version this build can speak, newest first
+    ///
+    /// This is [`MessageVersion::current()`] followed by any older versions
+    /// we still support.
+    pub const fn supported() -> &'static [MessageVersion] {
+        const SUPPORTED: &[MessageVersion] = &[MessageVersion::current()];
+        SUPPORTED
     }
 }
 
@@ -278,13 +279,12 @@ pub fn negotiate_version(
         .max()
 }
 
-/// Crucible Upstairs Downstairs message protocol version, as a number.
-/// This is MessageVersion::current(); change the version by updating
-/// MessageVersion::supported() instead.
+/// Crucible Upstairs Downstairs message protocol version.
+/// This is just MessageVersion::current() as a u32.
 pub const CRUCIBLE_MESSAGE_VERSION: u32 = MessageVersion::current() as u32;
 
 /// If you add or change the Message enum, you must also add a new
-/// MessageVersion and put it at the front of MessageVersion::supported().
+/// MessageVersion and make it MessageVersion::current().
 /// They're just above you, why not go do that right now before you forget.
 ///
 /// bincode encodes each variant by its position in this enum, so new
@@ -646,7 +646,7 @@ pub enum Message {
     },
 }
 // If you just added or changed the Message enum above, you must also add a
-// new MessageVersion and put it at the front of MessageVersion::supported().
+// new MessageVersion and make it MessageVersion::current().
 // Go do that right now before you forget.  New variants go at the end.
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]

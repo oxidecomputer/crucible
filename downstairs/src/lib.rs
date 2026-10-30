@@ -2772,15 +2772,6 @@ impl Downstairs {
                          {version} or {alternate_versions:?}",
                     );
                 };
-                if u32::from(negotiated_version) != version {
-                    warn!(
-                        self.log,
-                        "downstairs and upstairs using different \
-                         but compatible versions, Upstairs is {version}, \
-                         but supports {alternate_versions:?}, downstairs \
-                         supports {supported:?}, using {negotiated_version}",
-                    );
-                }
 
                 // Reject an Upstairs negotiation if there is a mismatch
                 // of expectation, and terminate the connection - the
@@ -2830,9 +2821,10 @@ impl Downstairs {
                 };
                 info!(
                     self.log,
-                    "upstairs {:?} connected, version {}",
-                    upstairs_connection,
-                    negotiated_version,
+                    "upstairs {upstairs_connection:?} connected, using version \
+                     {negotiated_version}, upstairs offered {version} or \
+                     {alternate_versions:?}, downstairs supports \
+                     {supported:?}",
                 );
 
                 if let Err(e) = state.reply(Message::YesItsMe {
