@@ -1489,12 +1489,12 @@ impl ActiveConnection {
                 if flags.read_only {
                     bail!("Received YouHaveBeenActive on a read-only region");
                 }
-                // TODO(PR input wanted): If we can't record this, the flag
-                // stays false, and the upstairs will tell us again after its
-                // next negotiation.  So we keep the connection, but should
-                // we drop it instead?
+                // If we can't record this, the flag stays false and we drop
+                // the connection.  The upstairs will tell us again after its
+                // next negotiation.
                 if let Err(e) = region.set_been_active() {
-                    warn!(self.log, "Failed to record been active: {e:#}");
+                    error!(self.log, "Failed to record been active: {e:#}");
+                    return Err(e);
                 }
                 WorkResult::Handled
             }
@@ -6777,8 +6777,8 @@ mod test {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_you_have_been_active_write_fails() -> Result<()> {
-        // If active.json can't be written, the downstairs logs a warning
-        // and keeps the connection.  The flag stays false, so the next
+        // If private.json can't be written, the downstairs logs an error
+        // and drops the connection.  The flag stays false, so the next
         // BeenActivePlease reports false and the upstairs sends it again.
         use std::os::unix::fs::PermissionsExt;
 
@@ -6808,7 +6808,7 @@ mod test {
         .await;
         std::fs::set_permissions(dir.path(), perms)?;
 
-        assert!(ds.connection_state.contains_key(&conn_id));
+        assert!(!ds.connection_state.contains_key(&conn_id));
         assert!(!ds.region.been_active()?);
         assert!(rx.try_recv().is_err());
         Ok(())
