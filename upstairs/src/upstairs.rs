@@ -24,6 +24,7 @@ use crate::{
 use crucible_client_types::RegionExtentInfo;
 use crucible_client_types::VolumeInfo;
 use crucible_common::{BlockIndex, CrucibleError};
+use crucible_protocol::MessageVersion;
 use serde::{Deserialize, Serialize};
 
 use std::{
@@ -302,6 +303,11 @@ pub(crate) struct UpstairsConfig {
     ///
     /// This is `Some(..)` if a key is provided in the `CrucibleOpts`
     pub encryption_context: Option<EncryptionContext>,
+
+    /// Message versions we offer to each downstairs, newest first
+    ///
+    /// This is `MessageVersion::supported()`, except in tests.
+    pub message_versions: &'static [MessageVersion],
 }
 
 impl UpstairsConfig {
@@ -381,6 +387,7 @@ impl Upstairs {
             session_id,
             generation: AtomicU64::new(generation),
             read_only: opt.read_only,
+            message_versions: MessageVersion::supported(),
         });
 
         info!(log, "Crucible stats registered with UUID: {}", uuid);
@@ -1768,6 +1775,7 @@ impl Upstairs {
             | Message::ReadOnlyMismatch { .. }
             | Message::YouAreNowActive { .. }
             | Message::RegionInfo { .. }
+            | Message::BeenActive { .. }
             | Message::ExtentVersions { .. } => {
                 // negotiation and initial reconciliation
                 let r = self.downstairs.clients[client_id]
@@ -1884,12 +1892,6 @@ impl Upstairs {
             | Message::PromoteToActive { .. }
             | Message::BeenActivePlease
             | Message::YouHaveBeenActive { .. } => {
-                panic!("invalid response {m:?}")
-            }
-
-            // TODO/WIP We don't send `BeenActivePlease` yet, so no downstairs
-            // should be replying with this.  Changes coming soon.
-            Message::BeenActive { .. } => {
                 panic!("invalid response {m:?}")
             }
         }
@@ -2332,6 +2334,7 @@ impl Upstairs {
                             NegotiationStateData::Start
                             | NegotiationStateData::WaitForPromote
                             | NegotiationStateData::WaitForRegionInfo
+                            | NegotiationStateData::WaitForBeenActive
                             | NegotiationStateData::GetExtentVersions => {
                                 DownstairsInfoNegotiationStatus::Negotiating
                             }
