@@ -1339,7 +1339,7 @@ dependencies = [
  "crucible-common",
  "crucible-protocol",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.18.0",
  "expectorate",
  "fakedata_generator",
  "futures",
@@ -1397,7 +1397,7 @@ dependencies = [
  "crucible-common",
  "crucible-smf 0.0.0",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.18.0",
  "expectorate",
  "futures",
  "http",
@@ -1421,7 +1421,7 @@ version = "0.1.0"
 dependencies = [
  "crucible-agent-types-versions",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.18.0",
  "dropshot-api-manager-types",
 ]
 
@@ -1493,7 +1493,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.18.0",
  "nix 0.31.3",
  "proptest",
  "rustls-pemfile",
@@ -1547,7 +1547,7 @@ dependencies = [
  "crucible-protocol",
  "crucible-raw-extent",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.18.0",
  "expectorate",
  "futures",
  "futures-core",
@@ -1602,7 +1602,7 @@ dependencies = [
  "crucible-common",
  "crucible-downstairs-types-versions",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.18.0",
  "dropshot-api-manager-types",
  "hyper",
 ]
@@ -1675,7 +1675,7 @@ dependencies = [
  "crucible-pantry",
  "crucible-pantry-client",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.18.0",
  "futures",
  "futures-core",
  "hex",
@@ -1743,7 +1743,7 @@ dependencies = [
  "crucible-pantry-types",
  "crucible-smf 0.0.0",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.18.0",
  "expectorate",
  "futures",
  "hex",
@@ -1769,7 +1769,7 @@ version = "0.1.0"
 dependencies = [
  "crucible-pantry-types-versions",
  "crucible-workspace-hack",
- "dropshot",
+ "dropshot 0.18.0",
  "dropshot-api-manager-types",
 ]
 
@@ -2552,7 +2552,7 @@ dependencies = [
  "camino",
  "chrono",
  "debug-ignore",
- "dropshot_endpoint",
+ "dropshot_endpoint 0.17.1",
  "form_urlencoded",
  "futures",
  "hostname 0.4.2",
@@ -2592,10 +2592,62 @@ dependencies = [
 ]
 
 [[package]]
-name = "dropshot-api-manager"
-version = "0.8.0"
+name = "dropshot"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "717b8725b0ba287944e595d1bd6873f36bd955fc2846ea6f80b1fa649cbbb035"
+checksum = "4a9e64e150bf661306cc9fa32c25996cb37025edebcbe55e80669750aa90b703"
+dependencies = [
+ "async-compression",
+ "async-stream",
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "camino",
+ "chrono",
+ "debug-ignore",
+ "dropshot_endpoint 0.18.0",
+ "form_urlencoded",
+ "futures",
+ "hostname 0.4.2",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "indexmap 2.14.0",
+ "multer",
+ "openapiv3",
+ "paste",
+ "percent-encoding",
+ "rustls",
+ "schemars 0.8.22",
+ "scopeguard",
+ "semver 1.0.28",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
+ "sha1",
+ "slog",
+ "slog-async",
+ "slog-bunyan",
+ "slog-json",
+ "slog-term",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml 1.1.8+spec-1.1.0",
+ "usdt 0.6.0",
+ "uuid",
+ "version_check",
+ "waitgroup",
+]
+
+[[package]]
+name = "dropshot-api-manager"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "638600c0fcc6b8aa0e30576ce7505639f2753474f4b90e222cf19cfd3a897643"
 dependencies = [
  "anyhow",
  "atomicwrites",
@@ -2603,7 +2655,7 @@ dependencies = [
  "clap",
  "debug-ignore",
  "drift",
- "dropshot",
+ "dropshot 0.18.0",
  "dropshot-api-manager-types",
  "fs-err",
  "git-stub",
@@ -2626,9 +2678,9 @@ dependencies = [
 
 [[package]]
 name = "dropshot-api-manager-types"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db49298fe751d1a7e8ecfbe0c94fffe3b99bcafbbc5d182c4e89e750f9c97886"
+checksum = "bfd52348da2ad7f65156bfec30234a723170944046d0411d7f334d7ccd6a63a3"
 dependencies = [
  "anyhow",
  "camino",
@@ -2653,6 +2705,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dropshot_endpoint"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7dfe21674cd808e8b344cc9d3ea107108846effc782c535ddf0bd2753443226"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "semver 1.0.28",
+ "serde",
+ "serde_tokenstream 0.3.0",
+ "syn 3.0.5",
+]
+
+[[package]]
 name = "dsc"
 version = "0.1.0"
 dependencies = [
@@ -2663,7 +2730,7 @@ dependencies = [
  "crucible-common",
  "crucible-workspace-hack",
  "csv",
- "dropshot",
+ "dropshot 0.18.0",
  "dsc-client",
  "expectorate",
  "openapi-lint",
@@ -2812,7 +2879,7 @@ name = "ereport-types"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?rev=5fd53a9c9ff2b0e47bfef3fe842b7516877b0162#5fd53a9c9ff2b0e47bfef3fe842b7516877b0162"
 dependencies = [
- "dropshot",
+ "dropshot 0.17.1",
  "omicron-uuid-kinds",
  "omicron-workspace-hack",
  "schemars 0.8.22",
@@ -3244,7 +3311,7 @@ version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?rev=5fd53a9c9ff2b0e47bfef3fe842b7516877b0162#5fd53a9c9ff2b0e47bfef3fe842b7516877b0162"
 dependencies = [
  "daft",
- "dropshot",
+ "dropshot 0.17.1",
  "gateway-messages",
  "hex",
  "omicron-uuid-kinds",
@@ -4100,7 +4167,7 @@ dependencies = [
  "chrono",
  "crucible-smf 0.0.0 (git+https://github.com/oxidecomputer/crucible?rev=bd9a0e2abe6b6b89aec8c85f4ee57474144ed150)",
  "debug-ignore",
- "dropshot",
+ "dropshot 0.17.1",
  "futures",
  "http",
  "iddqd",
@@ -5020,7 +5087,7 @@ dependencies = [
  "daft",
  "derive-where",
  "derive_more 0.99.20",
- "dropshot",
+ "dropshot 0.17.1",
  "either",
  "ereport-types",
  "futures",
@@ -5086,7 +5153,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "daft",
- "dropshot",
+ "dropshot 0.17.1",
  "http",
  "mg-admin-client",
  "omicron-common",
@@ -5396,7 +5463,7 @@ dependencies = [
  "camino",
  "chrono",
  "daft",
- "dropshot",
+ "dropshot 0.17.1",
  "futures",
  "hex",
  "http",
@@ -5808,7 +5875,7 @@ dependencies = [
  "clickward",
  "const_format",
  "debug-ignore",
- "dropshot",
+ "dropshot 0.17.1",
  "futures",
  "gethostname",
  "highway",
@@ -5862,7 +5929,7 @@ version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?rev=5fd53a9c9ff2b0e47bfef3fe842b7516877b0162#5fd53a9c9ff2b0e47bfef3fe842b7516877b0162"
 dependencies = [
  "chrono",
- "dropshot",
+ "dropshot 0.17.1",
  "either",
  "internal-dns-resolver",
  "internal-dns-types",
@@ -5886,7 +5953,7 @@ name = "oximeter-producer-api"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?rev=5fd53a9c9ff2b0e47bfef3fe842b7516877b0162#5fd53a9c9ff2b0e47bfef3fe842b7516877b0162"
 dependencies = [
- "dropshot",
+ "dropshot 0.17.1",
  "omicron-workspace-hack",
  "oximeter-types-versions",
 ]
