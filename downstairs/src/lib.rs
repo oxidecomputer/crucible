@@ -18,7 +18,8 @@ use crucible_common::{
 };
 use crucible_protocol::{
     BlockContext, CRUCIBLE_MESSAGE_VERSION, CrucibleDecoder, JobId, Message,
-    MessageWriter, ReadBlockContext, ReconciliationId, SnapshotDetails,
+    MessageVersion, MessageWriter, ReadBlockContext, ReconciliationId,
+    SnapshotDetails, negotiate_version,
 };
 use repair_client::Client;
 
@@ -2745,44 +2746,32 @@ impl Downstairs {
                 };
                 info!(
                     self.log,
-                    "Connection request from {} with version {}",
+                    "Connection request from {} version {}, alternates {:?}",
                     upstairs_id,
-                    version
+                    version,
+                    alternate_versions
                 );
 
-                // Verify we can communicate with the upstairs.  First
-                // check our message version.  If that fails,  check
-                // to see if our version is one of the supported
-                // versions the upstairs has told us it can support.
-                if version != CRUCIBLE_MESSAGE_VERSION {
-                    if alternate_versions.contains(&CRUCIBLE_MESSAGE_VERSION) {
+                // Verify we can communicate with the upstairs.  Pick the
+                // newest version that we both support.
+                let supported = MessageVersion::supported();
+                let Some(negotiated_version) =
+                    negotiate_version(supported, version, &alternate_versions)
+                else {
+                    let m = Message::VersionMismatch {
+                        version: CRUCIBLE_MESSAGE_VERSION,
+                    };
+                    if let Err(e) = state.reply(m) {
                         warn!(
                             self.log,
-                            "downstairs and upstairs using different \
-                             but compatible versions, Upstairs is {}, \
-                             but supports {:?}, downstairs is {}",
-                            version,
-                            alternate_versions,
-                            CRUCIBLE_MESSAGE_VERSION,
-                        );
-                    } else {
-                        let m = Message::VersionMismatch {
-                            version: CRUCIBLE_MESSAGE_VERSION,
-                        };
-                        if let Err(e) = state.reply(m) {
-                            warn!(
-                                self.log,
-                                "Failed to send VersionMismatch: {}", e
-                            );
-                        }
-                        bail!(
-                            "Required version {}, Or {:?} got {}",
-                            CRUCIBLE_MESSAGE_VERSION,
-                            alternate_versions,
-                            version,
+                            "Failed to send VersionMismatch: {}", e
                         );
                     }
-                }
+                    bail!(
+                        "Supported versions {supported:?}, upstairs offered \
+                         {version} or {alternate_versions:?}",
+                    );
+                };
 
                 // Reject an Upstairs negotiation if there is a mismatch
                 // of expectation, and terminate the connection - the
@@ -2832,13 +2821,14 @@ impl Downstairs {
                 };
                 info!(
                     self.log,
-                    "upstairs {:?} connected, version {}",
-                    upstairs_connection,
-                    CRUCIBLE_MESSAGE_VERSION
+                    "upstairs {upstairs_connection:?} connected, using version \
+                     {negotiated_version}, upstairs offered {version} or \
+                     {alternate_versions:?}, downstairs supports \
+                     {supported:?}",
                 );
 
                 if let Err(e) = state.reply(Message::YesItsMe {
-                    version: CRUCIBLE_MESSAGE_VERSION,
+                    version: u32::from(negotiated_version),
                     repair_addr: client_state.repair_address,
                 }) {
                     bail!("Failed sending YesItsMe: {}", e);

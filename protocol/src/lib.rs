@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use anyhow::bail;
 use bytes::{BufMut, BytesMut};
-use num_enum::IntoPrimitive;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 use strum_macros::{EnumDiscriminants, EnumIter};
 use tokio_util::codec::{Decoder, Encoder};
@@ -160,7 +160,17 @@ pub struct SnapshotDetails {
  * been introduced in the various Crucible upstairs to downstairs versions.
  */
 #[repr(u32)]
-#[derive(IntoPrimitive)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    IntoPrimitive,
+    TryFromPrimitive,
+)]
 pub enum MessageVersion {
     /// Add `BeenActivePlease`, `BeenActive`, and `YouHaveBeenActive`
     ///
@@ -223,31 +233,64 @@ pub enum MessageVersion {
     V1 = 1,
 }
 impl MessageVersion {
+    /// The newest version this build can speak
     pub const fn current() -> Self {
         // This stays at V13 until the upstairs and downstairs can negotiate
         // either V13 or V14 and handle the V14 messages.  Moving to V14
         // before then would break compatibility with V13 peers.
         Self::V13
     }
+
+    /// Every version this build can speak, newest first
+    ///
+    /// This is [`MessageVersion::current()`] followed by any older versions
+    /// we still support.
+    pub const fn supported() -> &'static [MessageVersion] {
+        const SUPPORTED: &[MessageVersion] = &[MessageVersion::current()];
+        SUPPORTED
+    }
 }
 
-/**
- * Crucible Upstairs Downstairs message protocol version.
- * This, along with the MessageVersion enum above should be updated whenever
- * changes are made to the Message enum below.
- */
+impl std::fmt::Display for MessageVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", u32::from(*self))
+    }
+}
+
+/// Pick the version to use with a peer
+///
+/// `theirs` and `their_alternates` are the versions the peer offered (as in
+/// [`Message::HereIAm`]).  Returns the newest version in `ours` that the peer
+/// also offered, or `None` if there is no version in common.  In the usual
+/// upstairs/downstairs setup, the upstairs sends its supported list to the
+/// downstairs, and the downstairs determines what it can match and responds
+/// with that.
+pub fn negotiate_version(
+    ours: &[MessageVersion],
+    theirs: u32,
+    their_alternates: &[u32],
+) -> Option<MessageVersion> {
+    ours.iter()
+        .copied()
+        .filter(|v| {
+            let v = u32::from(*v);
+            v == theirs || their_alternates.contains(&v)
+        })
+        .max()
+}
+
+/// Crucible Upstairs Downstairs message protocol version.
+/// This is just MessageVersion::current() as a u32.
 pub const CRUCIBLE_MESSAGE_VERSION: u32 = MessageVersion::current() as u32;
 
-/*
- * If you add or change the Message enum, you must also increment the
- * CRUCIBLE_MESSAGE_VERSION.  It's just a few lines above you, why not
- * go do that right now before you forget.
- *
- * bincode encodes each variant by its position in this enum, so new
- * variants must be added at the end.  Never reorder or remove a variant
- * while an older protocol version is still supported.  The
- * `message_wire_tags_are_stable` test checks this.
- */
+/// If you add or change the Message enum, you must also add a new
+/// MessageVersion and make it MessageVersion::current().
+/// They're just above you, why not go do that right now before you forget.
+///
+/// bincode encodes each variant by its position in this enum, so new
+/// variants must be added at the end.  Never reorder or remove a variant
+/// while an older protocol version is still supported.  The
+/// `message_wire_tags_are_stable` test checks this.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
     Debug, PartialEq, Clone, Serialize, Deserialize, EnumDiscriminants,
@@ -602,9 +645,9 @@ pub enum Message {
         session_id: Uuid,
     },
 }
-// If you just added or changed the Message enum above, you must also
-// increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
-// forget.  New variants go at the end.
+// If you just added or changed the Message enum above, you must also add a
+// new MessageVersion and make it MessageVersion::current().
+// Go do that right now before you forget.  New variants go at the end.
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct WriteHeader {
@@ -1313,6 +1356,51 @@ mod tests {
             CRUCIBLE_MESSAGE_VERSION,
             <MessageVersion as Into<u32>>::into(cur)
         );
+    }
+
+    #[test]
+    fn supported_message_versions() {
+        // Verify that the newest version is first, and that the rest of
+        // the versions are listed in descending value.
+        let supported = MessageVersion::supported();
+        assert!(supported.windows(2).all(|w| w[0] > w[1]));
+    }
+
+    #[test]
+    fn message_version_try_from() {
+        // Every supported version converts to its number and back
+        for v in MessageVersion::supported() {
+            assert_eq!(MessageVersion::try_from(u32::from(*v)), Ok(*v));
+        }
+        // Numbers that will never be a version are rejected
+        assert!(MessageVersion::try_from(0).is_err());
+        assert!(MessageVersion::try_from(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn negotiate_message_version() {
+        use MessageVersion::{V12, V13, V14};
+        let both = [V14, V13];
+        let old = [V13];
+
+        // New with new: the newest common version
+        assert_eq!(negotiate_version(&both, 14, &[13]), Some(V14));
+        // New with old, in either direction
+        assert_eq!(negotiate_version(&both, 13, &[]), Some(V13));
+        assert_eq!(negotiate_version(&old, 14, &[13]), Some(V13));
+        // Old with old
+        assert_eq!(negotiate_version(&old, 13, &[]), Some(V13));
+
+        // An alternate newer than the primary still counts
+        assert_eq!(negotiate_version(&both, 13, &[14]), Some(V14));
+        // Unknown versions are ignored
+        assert_eq!(negotiate_version(&both, 99, &[13, 98]), Some(V13));
+
+        // No overlap
+        assert_eq!(negotiate_version(&both, 12, &[]), None);
+        assert_eq!(negotiate_version(&both, 15, &[12, 16]), None);
+        assert_eq!(negotiate_version(&[V12], 13, &[14]), None);
+        assert_eq!(negotiate_version(&[], 13, &[]), None);
     }
 
     #[test]
