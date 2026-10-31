@@ -18,7 +18,8 @@ mod region;
 pub use region::{
     Block, BlockIndex, BlockOffset, DATABASE_READ_VERSION,
     DATABASE_WRITE_VERSION, ExtentId, MAX_BLOCK_SIZE, MAX_SHIFT,
-    MIN_BLOCK_SIZE, MIN_SHIFT, RegionDefinition, RegionOptions, config_path,
+    MIN_BLOCK_SIZE, MIN_SHIFT, RegionDefinition, RegionOptions,
+    RegionPrivateState, config_path, private_path,
 };
 
 pub mod impacted_blocks;
