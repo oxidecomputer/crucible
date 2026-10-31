@@ -879,6 +879,7 @@ enum NegotiationState {
     ConnectedToUpstairs,
     PromotedToActive,
     SentRegionInfo,
+    SentBeenActive,
 }
 
 /// Immutable data shared by every `ConnectionState`
@@ -914,6 +915,8 @@ enum WorkResult {
 struct ActiveConnection {
     data: ConnectionData,
     upstairs_connection: UpstairsConnection,
+    /// Message version negotiated with this upstairs
+    message_version: MessageVersion,
     work: Work,
     log: Logger,
 }
@@ -922,6 +925,7 @@ impl ActiveConnection {
     fn new(
         data: ConnectionData,
         upstairs_connection: UpstairsConnection,
+        message_version: MessageVersion,
         last_flush: Option<JobId>,
         log: &Logger,
     ) -> Self {
@@ -931,6 +935,7 @@ impl ActiveConnection {
         Self {
             data,
             upstairs_connection,
+            message_version,
             work: Work::new(last_flush, log.new(o!("role" => "work"))),
             log,
         }
@@ -1895,6 +1900,8 @@ enum ConnectionState {
     Negotiating {
         negotiated: NegotiationState,
         upstairs_connection: UpstairsConnection,
+        /// Message version negotiated with this upstairs
+        message_version: MessageVersion,
         data: ConnectionData,
     },
     Running(ActiveConnection),
@@ -1924,6 +1931,17 @@ impl ConnectionState {
                 ..
             } => Some(*upstairs_connection),
             ConnectionState::Running(a) => Some(a.upstairs_connection),
+        }
+    }
+
+    /// Returns the negotiated message version, or `None` before `HereIAm`
+    fn message_version(&self) -> Option<MessageVersion> {
+        match self {
+            ConnectionState::Open(..) => None,
+            ConnectionState::Negotiating {
+                message_version, ..
+            } => Some(*message_version),
+            ConnectionState::Running(a) => Some(a.message_version),
         }
     }
 }
@@ -2399,6 +2417,7 @@ impl Downstairs {
             ConnectionState::Running(ActiveConnection::new(
                 data,
                 upstairs_connection,
+                self.flags.message_versions[0],
                 None,
                 &log,
             )),
@@ -2854,6 +2873,7 @@ impl Downstairs {
                 *state = ConnectionState::Negotiating {
                     negotiated: NegotiationState::ConnectedToUpstairs,
                     upstairs_connection,
+                    message_version: negotiated_version,
                     data,
                 };
                 info!(
@@ -2972,16 +2992,52 @@ impl Downstairs {
                     bail!("Failed sending RegionInfo: {}", e);
                 }
             }
+            Message::BeenActivePlease => {
+                let version = state.message_version();
+                let ConnectionState::Negotiating { negotiated, .. } = state
+                else {
+                    bail!("Received BeenActivePlease while not negotiating");
+                };
+                if *negotiated != NegotiationState::SentRegionInfo {
+                    bail!(
+                        "Received BeenActivePlease out of order {:?}",
+                        negotiated
+                    );
+                }
+                // Only a V14 or later upstairs knows to ask, and it never
+                // asks a read-only downstairs.
+                if !version.is_some_and(|v| v >= MessageVersion::V14) {
+                    bail!(
+                        "Received BeenActivePlease on message version \
+                         {version:?}"
+                    );
+                }
+                if self.flags.read_only {
+                    bail!("Received BeenActivePlease on a read-only region");
+                }
+
+                let been_active = self.region.been_active()?;
+                *negotiated = NegotiationState::SentBeenActive;
+                if let Err(e) = state.reply(Message::BeenActive { been_active })
+                {
+                    bail!("Failed sending BeenActive: {e}");
+                }
+            }
             Message::LastFlush { last_flush_number } => {
                 let ConnectionState::Negotiating {
                     negotiated,
                     upstairs_connection,
+                    message_version,
                     data,
                 } = state
                 else {
                     bail!("Received LastFlush while not negotiating");
                 };
-                if *negotiated != NegotiationState::SentRegionInfo {
+                if !matches!(
+                    *negotiated,
+                    NegotiationState::SentRegionInfo
+                        | NegotiationState::SentBeenActive
+                ) {
                     bail!("Received LastFlush out of order {:?}", negotiated);
                 }
 
@@ -2990,6 +3046,7 @@ impl Downstairs {
                 *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
+                    *message_version,
                     last_flush_number,
                     &self.log,
                 ));
@@ -3007,11 +3064,16 @@ impl Downstairs {
                     negotiated,
                     data,
                     upstairs_connection,
+                    message_version,
                 } = state
                 else {
                     bail!("Received ExtentVersions while not negotiating");
                 };
-                if *negotiated != NegotiationState::SentRegionInfo {
+                if !matches!(
+                    *negotiated,
+                    NegotiationState::SentRegionInfo
+                        | NegotiationState::SentBeenActive
+                ) {
                     bail!(
                         "Received ExtentVersions out of order {:?}",
                         negotiated
@@ -3023,6 +3085,7 @@ impl Downstairs {
                 *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
+                    *message_version,
                     None,
                     &self.log,
                 ));
@@ -6239,6 +6302,243 @@ mod test {
             .set_max_message_version(below)
             .build();
         assert!(res.is_err());
+
+        Ok(())
+    }
+
+    fn test_client_state() -> DownstairsClientState {
+        DownstairsClientState {
+            address: "127.0.0.1:5555".parse().unwrap(),
+            repair_address: "127.0.0.1:5556".parse().unwrap(),
+        }
+    }
+
+    /// Open a test downstairs on `dir` that negotiates V14 and V13
+    ///
+    /// V14 is not in `MessageVersion::supported()` yet, so this sets the
+    /// downstairs list directly.  The region must already exist.
+    fn open_v14_test_downstairs(
+        dir: &TempDir,
+        read_only: bool,
+    ) -> Result<Downstairs> {
+        let mut ds = Downstairs::new_builder(dir.path(), read_only)
+            .set_logger(csl())
+            .build()?;
+        ds.flags.message_versions =
+            vec![MessageVersion::V14, MessageVersion::V13];
+        Ok(ds)
+    }
+
+    /// Start negotiation on a new connection through `PromoteToActive`
+    ///
+    /// The upstairs offers `upstairs_versions`, newest first.  Returns the
+    /// reply channel.
+    fn start_negotiation(
+        ds: &mut Downstairs,
+        conn_id: ConnectionId,
+        upstairs_versions: &[MessageVersion],
+    ) -> Result<mpsc::UnboundedReceiver<Message>> {
+        let client_state = test_client_state();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let _ = ds.new_connection(conn_id, tx);
+        assert_eq!(ds.connection_state[&conn_id].message_version(), None);
+
+        let upstairs_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let read_only = ds.flags.read_only;
+        ds.on_negotiation_step(
+            Message::HereIAm {
+                version: u32::from(upstairs_versions[0]),
+                upstairs_id,
+                session_id,
+                generation: 1,
+                read_only,
+                encrypted: false,
+                alternate_versions: upstairs_versions[1..]
+                    .iter()
+                    .map(|v| u32::from(*v))
+                    .collect(),
+            },
+            conn_id,
+            &client_state,
+        )?;
+        assert!(matches!(rx.try_recv()?, Message::YesItsMe { .. }));
+
+        ds.on_negotiation_step(
+            Message::PromoteToActive {
+                upstairs_id,
+                session_id,
+                generation: 1,
+            },
+            conn_id,
+            &client_state,
+        )?;
+        assert!(matches!(rx.try_recv()?, Message::YouAreNowActive { .. }));
+        Ok(rx)
+    }
+
+    /// Run negotiation on a new connection up to `RegionInfo`, and return
+    /// the reply channel
+    fn negotiate_to_region_info(
+        ds: &mut Downstairs,
+        conn_id: ConnectionId,
+        upstairs_versions: &[MessageVersion],
+    ) -> Result<mpsc::UnboundedReceiver<Message>> {
+        let mut rx = start_negotiation(ds, conn_id, upstairs_versions)?;
+        ds.on_negotiation_step(
+            Message::RegionInfoPlease,
+            conn_id,
+            &test_client_state(),
+        )?;
+        assert!(matches!(rx.try_recv()?, Message::RegionInfo { .. }));
+        Ok(rx)
+    }
+
+    /// Finish negotiation with `LastFlush` or `ExtentVersionsPlease`, and
+    /// check that the connection is running
+    fn finish_negotiation(
+        ds: &mut Downstairs,
+        conn_id: ConnectionId,
+        last_flush: bool,
+    ) -> Result<()> {
+        let m = if last_flush {
+            Message::LastFlush {
+                last_flush_number: None,
+            }
+        } else {
+            Message::ExtentVersionsPlease
+        };
+        ds.on_negotiation_step(m, conn_id, &test_client_state())?;
+        assert!(matches!(
+            ds.connection_state[&conn_id],
+            ConnectionState::Running(..)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_been_active_please() -> Result<()> {
+        // A V14 read-write connection gets the value on disk, and can then
+        // finish negotiation either way.
+        use MessageVersion::{V13, V14};
+        for last_flush in [true, false] {
+            let dir = tempdir()?;
+            drop(create_test_downstairs(512, 4, 2, &dir)?);
+
+            // A new region has not been active
+            let mut ds = open_v14_test_downstairs(&dir, false)?;
+            let conn_id = ConnectionId(0);
+            let mut rx =
+                negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+            ds.on_negotiation_step(
+                Message::BeenActivePlease,
+                conn_id,
+                &test_client_state(),
+            )?;
+            assert!(matches!(
+                rx.try_recv()?,
+                Message::BeenActive { been_active: false }
+            ));
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+
+            // Once set, a reopened downstairs reports it
+            ds.region.set_been_active()?;
+            drop(ds);
+            let mut ds = open_v14_test_downstairs(&dir, false)?;
+            let mut rx =
+                negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+            ds.on_negotiation_step(
+                Message::BeenActivePlease,
+                conn_id,
+                &test_client_state(),
+            )?;
+            assert!(matches!(
+                rx.try_recv()?,
+                Message::BeenActive { been_active: true }
+            ));
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_been_active_please_rejected() -> Result<()> {
+        // Cases where the downstairs must refuse BeenActivePlease.  In each
+        // one the test plays the upstairs, sending negotiation messages
+        // directly.  A refusal is an error from on_negotiation_step.
+        //
+        // The upstairs version list is newest first: `&[V13]` is an old
+        // upstairs (HereIAm version 13, no alternates), `&[V14, V13]` is a
+        // new one (HereIAm version 14, alternate 13).
+        //
+        // create_test_downstairs gives a downstairs that offers only V13,
+        // as things sit today.  The open_v14_test_downstairs reopens the
+        // region offering both V14 and V13.  This will be what a downstairs
+        // built once V14 is supported will offer.
+        use MessageVersion::{V13, V14};
+        let conn_id = ConnectionId(0);
+        let ask = |ds: &mut Downstairs| {
+            ds.on_negotiation_step(
+                Message::BeenActivePlease,
+                conn_id,
+                &test_client_state(),
+            )
+        };
+
+        // 1. V13 downstairs, V13 upstairs: the connection is V13.
+        // A misbehaving old upstairs asks anyway, after RegionInfo.
+        // Rejected by the version check.
+        let dir = tempdir()?;
+        let mut ds = create_test_downstairs(512, 4, 2, &dir)?;
+        let mut rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
+
+        // 2. V14 downstairs, V13 upstairs: the connection is V13, even
+        // though this downstairs could do V14.  Asked after RegionInfo.
+        // Rejected by the version check, which must look at the
+        // negotiated version, not at what the downstairs supports.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let mut rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
+
+        // 3. V14 downstairs, V14 upstairs, read-only region: the connection
+        // is V14 and the ask comes after RegionInfo, so only the
+        // read-only check can reject it.  A read-only downstairs does
+        // not track been_active.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, true)?;
+        let mut rx = negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
+
+        // 4. V14 downstairs, V14 upstairs, read-write, asked out of order:
+        // after PromoteToActive but before RegionInfoPlease.  Version
+        // and region are fine, so only the negotiation state check can
+        // reject it.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let mut rx = start_negotiation(&mut ds, conn_id, &[V14, V13])?;
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
+
+        // 5. V14 downstairs, V14 upstairs, read-write, asked twice after
+        // RegionInfo.  The first ask is valid and gets BeenActive.  The
+        // second is out of order, since the state is now SentBeenActive,
+        // so it is rejected.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let mut rx = negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+        ask(&mut ds)?;
+        assert!(matches!(rx.try_recv()?, Message::BeenActive { .. }));
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
 
         Ok(())
     }
