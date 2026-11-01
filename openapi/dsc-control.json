@@ -169,11 +169,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "nullable": true,
-                  "title": "Nullable_uint32",
-                  "type": "integer",
-                  "format": "uint32",
-                  "minimum": 0
+                  "$ref": "#/components/schemas/DownstairsPid"
                 }
               }
             }
@@ -597,6 +593,17 @@
   },
   "components": {
     "schemas": {
+      "DownstairsPid": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "nullable": true,
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        }
+      },
       "DownstairsState": {
         "description": "State of a downstairs.",
         "type": "string",
