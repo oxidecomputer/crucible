@@ -145,7 +145,7 @@ omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", rev = "
 oximeter = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
 
-openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", rev = "ef442ee4343e97b6d9c217d3e7533962fe7d7236" }
+openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", rev = "619147ca8203e3f287695a3ff89050c8b7346be4" }
 
 # local path
 cmon-common = { path = "./cmon-common" }
