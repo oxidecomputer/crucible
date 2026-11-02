@@ -166,6 +166,8 @@ pub(crate) struct DownstairsClient {
     ///
     /// This is `None` if we haven't asked the downstairs.  We only ask when
     /// the negotiated version is V14 or newer and we are read-write.
+    /// If been_active is `None` or `false`, we will set it to `true` when we
+    /// tell this downstairs it has been active.
     /// It's cleared on reconnect.
     been_active: Option<bool>,
 
@@ -1692,6 +1694,9 @@ impl DownstairsClient {
                     last_flush_number: lf,
                 });
                 self.set_active();
+                // This downstairs was already active in this session.  Tell
+                // it again, in case it didn't record that before it left.
+                self.send_you_have_been_active();
                 NegotiationResult::Replay
             }
             ConnectionMode::New
@@ -1867,6 +1872,30 @@ impl DownstairsClient {
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn been_active(&self) -> Option<bool> {
         self.been_active
+    }
+
+    /// Tells the downstairs that its region has been active
+    ///
+    /// We only send this when the negotiated version is V14 or newer and we
+    /// are read-write.  Otherwise, this does nothing.
+    pub(crate) fn send_you_have_been_active(&mut self) {
+        if self.message_version < Some(MessageVersion::V14)
+            || self.cfg.read_only
+        {
+            return;
+        }
+        info!(self.log, "sending YouHaveBeenActive");
+        self.send(Message::YouHaveBeenActive {
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+        });
+        self.been_active = Some(true);
+    }
+
+    /// Sets the negotiated message version without negotiating
+    #[cfg(test)]
+    pub(crate) fn set_message_version(&mut self, version: MessageVersion) {
+        self.message_version = Some(version);
     }
 }
 
@@ -2181,11 +2210,25 @@ mod test {
     #[test]
     fn test_been_active_asked() {
         // On V14, a read-write upstairs asks for BeenActive after
-        // RegionInfo and stores the answer.  It then sends
-        // ExtentVersionsPlease (New) or LastFlush (Offline) as before.
+        // RegionInfo.  For each connection mode, we pretend to be a
+        // downstairs that answers `false` (never been active) or `true`.
+        //
+        // ConnectionMode::New: the upstairs stores the answer as is, then
+        // moves on to GetExtentVersions.
+        //
+        // ConnectionMode::Offline: the downstairs was already active in
+        // this session, so the upstairs goes straight to Active and sends
+        // YouHaveBeenActive.  That sets the stored value to `true`,
+        // whatever the answer was.  The `false` case is a downstairs that
+        // didn't record being active before it disconnected, and this is
+        // how it gets told again.
+        //
+        // The test client can't see sent messages, so the stored value is
+        // how we check that YouHaveBeenActive was sent.
         for (mode, answer) in [
             (ConnectionMode::New, false),
             (ConnectionMode::New, true),
+            (ConnectionMode::Offline, false),
             (ConnectionMode::Offline, true),
         ] {
             let mut client = test_client_with(false, V14_V13);
@@ -2201,9 +2244,9 @@ mod test {
             assert_eq!(client.been_active(), None);
 
             let r = send_been_active(&mut client, answer);
-            assert_eq!(client.been_active(), Some(answer));
             match mode {
                 ConnectionMode::New => {
+                    assert_eq!(client.been_active(), Some(answer));
                     assert!(matches!(r, Ok(NegotiationResult::NotDone)));
                     assert_eq!(
                         client.state(),
@@ -2214,6 +2257,7 @@ mod test {
                     );
                 }
                 ConnectionMode::Offline => {
+                    assert_eq!(client.been_active(), Some(true));
                     assert!(matches!(r, Ok(NegotiationResult::Replay)));
                     assert_eq!(client.state(), DsState::Active);
                 }
@@ -2248,6 +2292,26 @@ mod test {
                 Err(NegotiationError::OutOfOrder)
             ));
             assert_eq!(client.been_active(), None);
+        }
+    }
+
+    #[test]
+    fn test_send_you_have_been_active() {
+        // We only tell a downstairs it has been active on V14 when we are
+        // read-write.  Telling it also records that it has been active.
+        for (read_only, version, expected) in [
+            (false, MessageVersion::V14, Some(true)),
+            (false, MessageVersion::V13, None),
+            (true, MessageVersion::V14, None),
+        ] {
+            let mut client = test_client_with(read_only, V14_V13);
+            client.set_message_version(version);
+            client.send_you_have_been_active();
+            assert_eq!(
+                client.been_active(),
+                expected,
+                "read_only {read_only}, version {version}"
+            );
         }
     }
 

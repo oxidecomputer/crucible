@@ -1373,6 +1373,7 @@ impl Downstairs {
                     info!(self.log, "live-repair completed successfully");
                     for c in &repair.repair_downstairs {
                         self.clients[*c].finish_repair(up_state);
+                        self.clients[*c].send_you_have_been_active();
                     }
                 }
 
@@ -2058,8 +2059,11 @@ impl Downstairs {
     pub(crate) fn on_reconciliation_done(&mut self, did_work: bool) {
         assert!(self.ds_active.is_empty());
 
+        // Every downstairs that took part in reconciliation has now been
+        // active.
         for c in self.clients.iter_mut() {
             c.set_active();
+            c.send_you_have_been_active();
         }
 
         if did_work {
@@ -4047,7 +4051,7 @@ pub(crate) mod test {
 
     use bytes::BytesMut;
     use crucible_common::{BlockIndex, BlockOffset, ExtentId};
-    use crucible_protocol::{Message, ReadBlockContext};
+    use crucible_protocol::{Message, MessageVersion, ReadBlockContext};
     use ringbuffer::RingBuffer;
 
     use std::{
@@ -5521,6 +5525,24 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
+    }
+
+    #[test]
+    fn reconciliation_done_sends_been_active() {
+        // When reconciliation is done, every downstairs that negotiated V14
+        // is told that it has been active.
+        let mut ds = Downstairs::test_default();
+        ds.clients[ClientId::new(0)].set_message_version(MessageVersion::V14);
+        ds.clients[ClientId::new(1)].set_message_version(MessageVersion::V14);
+        ds.clients[ClientId::new(2)].set_message_version(MessageVersion::V13);
+
+        ds.on_reconciliation_done(false);
+
+        for (cid, expected) in [(0, Some(true)), (1, Some(true)), (2, None)] {
+            let c = &ds.clients[ClientId::new(cid)];
+            assert_eq!(c.state(), DsState::Active);
+            assert_eq!(c.been_active(), expected, "client {cid}");
+        }
     }
 
     #[test]
