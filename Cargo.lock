@@ -5603,10 +5603,10 @@ checksum = "624a8340c38c1b80fd549087862da4ba43e08858af025b236e509b6649fc13d5"
 
 [[package]]
 name = "openapi-lint"
-version = "0.4.0"
-source = "git+https://github.com/oxidecomputer/openapi-lint?rev=ef442ee4343e97b6d9c217d3e7533962fe7d7236#ef442ee4343e97b6d9c217d3e7533962fe7d7236"
+version = "0.5.0"
+source = "git+https://github.com/oxidecomputer/openapi-lint?rev=619147ca8203e3f287695a3ff89050c8b7346be4#619147ca8203e3f287695a3ff89050c8b7346be4"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "indexmap 2.14.0",
  "lazy_static",
  "openapiv3",
