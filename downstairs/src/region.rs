@@ -116,8 +116,9 @@ pub struct Region {
     ///
     /// Persisted in the region private state file (see [`private_path`]) for
     /// read-write regions.  Once `true`, this never goes back to `false`.
-    /// This is not tracked for a read-only region.  The question does not
-    /// apply, so we never touch the file and an upstairs should never ask.
+    /// This is not updated for a read-only region.  The question does not
+    /// apply for a read-only region, so we never touch the file and an
+    /// upstairs should never ask.
     been_active: bool,
 
     log: Logger,
@@ -393,8 +394,9 @@ impl Region {
 
     /// Record that an upstairs has told this downstairs that it is active
     ///
-    /// This only ever moves the flag from `false` to `true`.  It does nothing
-    /// if the flag is already set.  Returns an error for a read-only region.
+    /// This only ever moves the flag from `false` to `true`.  We call
+    /// been_active() to see if the flag is already set (and return error
+    /// if the region is read-only).
     pub fn set_been_active(&mut self) -> Result<()> {
         if self.been_active()? {
             return Ok(());
