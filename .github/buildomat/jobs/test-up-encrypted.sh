@@ -2,7 +2,7 @@
 #:
 #: name = "test-up-encrypted"
 #: variety = "basic"
-#: target = "helios-2.0"
+#: target = "helios-3.0"
 #: output_rules = [
 #:	"%/tmp/test_up*/*.txt",
 #:	"%/tmp/test_up*/dsc/*.txt",

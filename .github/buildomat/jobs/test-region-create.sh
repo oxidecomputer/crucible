@@ -2,7 +2,7 @@
 #:
 #: name = "test-region-create"
 #: variety = "basic"
-#: target = "helios-2.0"
+#: target = "helios-3.0"
 #: output_rules = [
 #:	"/tmp/region.csv",
 #:	"/tmp/core.*",
