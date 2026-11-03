@@ -95,6 +95,7 @@ pub mod repair_test {
             },
         },
     };
+    use crucible_protocol::MessageVersion;
 
     const STOP_IO_ERROR: DsState =
         DsState::Stopping(ClientStopReason::Fault(ClientFaultReason::IOError));
@@ -160,6 +161,12 @@ pub mod repair_test {
                     }
                 }
             }
+            IOop::Flush { .. } => Message::FlushAck {
+                job_id,
+                session_id,
+                upstairs_id,
+                result,
+            },
             m => panic!("don't know how to complete {m:?}"),
         };
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
@@ -1524,6 +1531,44 @@ pub mod repair_test {
         // Verify that the future final repair job were added to our IOs
         // dependency list.  We will also see the final repair jobs
         assert_eq!(job.work.deps(), &[JobId(1003), JobId(1007), JobId(1011)]);
+    }
+
+    #[test]
+    fn test_live_repair_done_sends_been_active() {
+        // When live-repair finishes, only the repaired downstairs is told
+        // that it has been active.  The others were already active.
+        let or_ds = ClientId::new(1);
+        let mut up = start_up_and_repair(or_ds);
+        for c in up.downstairs.clients.iter_mut() {
+            c.set_message_version(MessageVersion::V14);
+        }
+
+        // Each of the four extents has close, repair, noop, and reopen jobs,
+        // followed by the final flush.  Job IDs start at 1000.
+        let ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: false,
+        };
+        for job_id in 1000..1017 {
+            for cid in ClientId::iter() {
+                reply_to_repair_job(
+                    &mut up,
+                    JobId(job_id),
+                    cid,
+                    Ok(()),
+                    Some(ei),
+                );
+            }
+        }
+
+        assert!(!up.downstairs.live_repair_in_progress());
+        for cid in ClientId::iter() {
+            let c = &up.downstairs.clients[cid];
+            assert_eq!(c.state(), DsState::Active);
+            let expected = if cid == or_ds { Some(true) } else { None };
+            assert_eq!(c.been_active(), expected, "client {cid}");
+        }
     }
 
     #[test]
