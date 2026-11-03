@@ -2264,7 +2264,7 @@ pub(crate) mod test {
 
     /// Overwrite block 0 of `eid` on disk with 0xFF bytes so that neither
     /// stored context slot hash can match the actual block data.
-    fn corrupt_block_zero(dir: &Path, eid: ExtentId) {
+    pub(crate) fn corrupt_block_zero(dir: &Path, eid: ExtentId) {
         let path = extent_path(dir, eid);
         let mut file = OpenOptions::new().write(true).open(path).unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
@@ -2275,6 +2275,11 @@ pub(crate) mod test {
     /// corrupted block 0: both context slots are populated but neither
     /// matches the on-disk data.  Returns the persisted directory path.
     fn make_region_with_corrupt_extent() -> PathBuf {
+        make_temp_region_with_corrupt_extent().keep()
+    }
+
+    /// Like the persisted fixture, but remove the region when the guard drops.
+    pub(crate) fn make_temp_region_with_corrupt_extent() -> tempfile::TempDir {
         let dir = tempdir().unwrap();
         let mut region =
             Region::create(&dir, new_region_options(), csl()).unwrap();
@@ -2288,8 +2293,7 @@ pub(crate) mod test {
 
         corrupt_block_zero(&dir_path, ExtentId(1));
 
-        // keep() persists the directory past the end of the test.
-        dir.keep()
+        dir
     }
 
     /// open_for_dump succeeds on a region with a corrupted extent, returning
