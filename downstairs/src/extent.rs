@@ -115,6 +115,15 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         &mut self,
         block_context: &DownstairsBlockContext,
     ) -> Result<(), CrucibleError>;
+
+    /// Return whether a specific block is dirty or not (note this is distinct
+    /// from the dirty bit that is set for the entire extent!).
+    ///
+    /// This should only be called from test functions, where we want to
+    /// assert if the Downstairs considers a block dirty after various
+    /// operations.
+    #[cfg(test)]
+    fn block_dirty(&self, block: u64) -> bool;
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash
@@ -715,6 +724,11 @@ impl Extent {
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
         self.inner.get_block_contexts(block, count)
+    }
+
+    #[cfg(test)]
+    pub fn block_dirty(&self, block: u64) -> bool {
+        self.inner.block_dirty(block)
     }
 }
 

@@ -185,6 +185,13 @@ impl BlockBitArray {
     fn reset(&mut self) {
         self.data.fill(0);
     }
+
+    #[cfg(test)]
+    fn get(&self, block: u64) -> bool {
+        let (index, mask) = self.decode(block);
+        let target = &self.data[index];
+        *target & mask > 0
+    }
 }
 
 impl std::ops::Index<u64> for BlockBitArray {
@@ -562,7 +569,6 @@ impl ExtentInner for RawInner {
                 self.extent_number,
             )));
         }
-        self.block_dirty.reset();
         cdt::extent__flush__file__done!(|| {
             (job_id.get(), self.extent_number.0)
         });
@@ -575,6 +581,9 @@ impl ExtentInner for RawInner {
         _new_gen: u64,
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError> {
+        // Clear block_dirty, we did a flush!
+        self.block_dirty.reset();
+
         // Check for fragmentation in the context slots leading to worse
         // performance, and defragment if that's the case.
         let extra_syscalls_per_rw = self
@@ -686,6 +695,11 @@ impl ExtentInner for RawInner {
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
         RawInner::get_block_contexts(self, block, count)
+    }
+
+    #[cfg(test)]
+    fn block_dirty(&self, block: u64) -> bool {
+        self.block_dirty.get(block)
     }
 }
 
