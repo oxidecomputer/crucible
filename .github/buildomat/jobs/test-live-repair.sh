@@ -2,7 +2,7 @@
 #:
 #: name = "test-live-repair"
 #: variety = "basic"
-#: target = "helios-2.0"
+#: target = "helios-3.0"
 #: output_rules = [
 #:	"/tmp/*.txt",
 #:	"/tmp/*.log",
