@@ -2445,6 +2445,131 @@ pub(crate) mod test {
         buffer
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_default_sized_extent_over_http() -> Result<()> {
+        // Omicron's DataStore::EXTENT_SIZE is 64 MiB.
+        const EXTENT_BYTES: u64 = 64 * 1024 * 1024;
+        const BLOCK_SIZE: u64 = 512;
+        const BLOCKS_PER_EXTENT: u64 = EXTENT_BYTES / BLOCK_SIZE;
+
+        let source_dir = tempdir()?;
+        let target_dir = tempdir()?;
+        let log = csl();
+
+        let mut source = create_region_with_backend(
+            source_dir.path().to_path_buf(),
+            Block::new_512(BLOCKS_PER_EXTENT),
+            1,
+            Uuid::new_v4(),
+            false,
+            Backend::RawFile,
+            log.clone(),
+        )?;
+
+        let mut target = create_region_with_backend(
+            target_dir.path().to_path_buf(),
+            Block::new_512(BLOCKS_PER_EXTENT),
+            1,
+            Uuid::new_v4(),
+            false,
+            Backend::RawFile,
+            log.clone(),
+        )?;
+
+        let source_def = source.def();
+        let target_def = target.def();
+
+        for def in [source_def, target_def] {
+            assert_eq!(
+                def.block_size() * def.extent_size().value,
+                EXTENT_BYTES,
+            );
+            assert_eq!(def.extent_count(), 1);
+        }
+
+        let expected = region_write_all(&mut source, &source_def, false);
+        assert_eq!(expected.len() as u64, EXTENT_BYTES);
+
+        {
+            let request = RegionReadRequest::new(
+                BlockIndex(0),
+                BLOCKS_PER_EXTENT,
+                &target_def,
+            );
+            let original = target.region_read(&request, JobId(1))?;
+
+            assert_eq!(original.data.len(), expected.len());
+            assert_ne!(original.data, expected);
+        }
+
+        let eid = ExtentId(0);
+        source.close_extent(eid)?;
+        drop(source);
+
+        let source_downstairs =
+            Downstairs::new_builder(source_dir.path(), true)
+                .set_logger(log.clone())
+                .build()?;
+
+        let (repair_task, repair_address) = crate::repair::repair_main(
+            &source_downstairs,
+            "127.0.0.1:0".parse()?,
+            &log,
+        )
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        target.close_extent(eid)?;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            target.repair_extent(
+                reqwest::Client::new(),
+                eid,
+                repair_address,
+                false,
+            ),
+        )
+        .await??;
+
+        target.reopen_extent(eid)?;
+
+        {
+            let request = RegionReadRequest::new(
+                BlockIndex(0),
+                BLOCKS_PER_EXTENT,
+                &target_def,
+            );
+            let repaired = target.region_read(&request, JobId(2))?;
+
+            assert_eq!(repaired.data.len(), expected.len());
+            assert_eq!(repaired.data, expected);
+        }
+
+        drop(target);
+
+        let mut target = Region::open(target_dir.path(), false, false, &log)?;
+
+        {
+            let request = RegionReadRequest::new(
+                BlockIndex(0),
+                BLOCKS_PER_EXTENT,
+                &target_def,
+            );
+            let reopened = target.region_read(&request, JobId(3))?;
+
+            assert_eq!(reopened.data.len(), expected.len());
+            assert_eq!(reopened.data, expected);
+        }
+
+        repair_task.abort();
+        let shutdown = repair_task.await;
+        assert!(
+            matches!(shutdown, Err(error) if error.is_cancelled()),
+            "repair server should stop when aborted",
+        );
+        Ok(())
+    }
+
     fn test_big_write(backend: Backend) {
         let dir = tempdir().unwrap();
         let mut region =
