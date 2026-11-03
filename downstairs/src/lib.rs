@@ -6186,15 +6186,19 @@ mod test {
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
 
-        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
+        // Send the version just below the oldest one our downstairs
+        // supports.  The downstairs should reject it and reply with its
+        // own version, CRUCIBLE_MESSAGE_VERSION.
+        let oldest = *MessageVersion::supported().last().unwrap();
+        let downrev = u32::from(oldest) - 1;
         let m = Message::HereIAm {
-            version: CRUCIBLE_MESSAGE_VERSION - 1,
+            version: downrev,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             generation: 1,
             read_only: false,
             encrypted: false,
-            alternate_versions: vec![CRUCIBLE_MESSAGE_VERSION - 1],
+            alternate_versions: vec![downrev],
         };
         fw.send(m).await?;
 
@@ -6344,12 +6348,12 @@ mod test {
             .build()?;
         assert_eq!(ds.flags.message_versions, MessageVersion::supported());
 
-        // A cap above the newest version also changes nothing.
+        // A cap at V13 offers only V13.
         let dir = tempdir()?;
         let ds = create_test_downstairs_builder(512, 4, 2, &dir)?
-            .set_max_message_version(MessageVersion::V14)
+            .set_max_message_version(MessageVersion::V13)
             .build()?;
-        assert_eq!(ds.flags.message_versions, MessageVersion::supported());
+        assert_eq!(ds.flags.message_versions, [MessageVersion::V13]);
 
         // A cap below every supported version is an error.
         let oldest = *MessageVersion::supported().last().unwrap();
@@ -6372,18 +6376,26 @@ mod test {
 
     /// Open a test downstairs on `dir` that negotiates V14 and V13
     ///
-    /// V14 is not in `MessageVersion::supported()` yet, so this sets the
-    /// downstairs list directly.  The region must already exist.
+    /// The region must already exist.
     fn open_v14_test_downstairs(
         dir: &TempDir,
         read_only: bool,
     ) -> Result<Downstairs> {
-        let mut ds = Downstairs::new_builder(dir.path(), read_only)
+        let ds = Downstairs::new_builder(dir.path(), read_only)
             .set_logger(csl())
             .build()?;
-        ds.flags.message_versions =
-            vec![MessageVersion::V14, MessageVersion::V13];
+        assert_eq!(
+            ds.flags.message_versions,
+            [MessageVersion::V14, MessageVersion::V13]
+        );
         Ok(ds)
+    }
+
+    /// Create a test downstairs on `dir` that only negotiates V13
+    fn create_v13_test_downstairs(dir: &TempDir) -> Result<Downstairs> {
+        create_test_downstairs_builder(512, 4, 2, dir)?
+            .set_max_message_version(MessageVersion::V13)
+            .build()
     }
 
     /// Start negotiation on a new connection through `PromoteToActive`
@@ -6528,10 +6540,9 @@ mod test {
         // upstairs (HereIAm version 13, no alternates), `&[V14, V13]` is a
         // new one (HereIAm version 14, alternate 13).
         //
-        // create_test_downstairs gives a downstairs that offers only V13,
-        // as things sit today.  The open_v14_test_downstairs reopens the
-        // region offering both V14 and V13.  This will be what a downstairs
-        // built once V14 is supported will offer.
+        // create_v13_test_downstairs makes a downstairs that offers only
+        // V13.  The open_v14_test_downstairs reopens the region offering
+        // both V14 and V13.  This is what a downstairs offers by default.
         use MessageVersion::{V13, V14};
         let conn_id = ConnectionId(0);
         let ask = |ds: &mut Downstairs| {
@@ -6546,7 +6557,7 @@ mod test {
         // A misbehaving old upstairs asks anyway, after RegionInfo.
         // Rejected by the version check.
         let dir = tempdir()?;
-        let mut ds = create_test_downstairs(512, 4, 2, &dir)?;
+        let mut ds = create_v13_test_downstairs(&dir)?;
         let mut rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
         assert!(ask(&mut ds).is_err());
         assert!(rx.try_recv().is_err());
@@ -6625,7 +6636,7 @@ mod test {
             // V13 downstairs, V13 upstairs: Negotiation should finishe after
             // RegionInfo.
             let dir = tempdir()?;
-            let mut ds = create_test_downstairs(512, 4, 2, &dir)?;
+            let mut ds = create_v13_test_downstairs(&dir)?;
             let _rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
             finish_negotiation(&mut ds, conn_id, last_flush)?;
 
@@ -6753,7 +6764,7 @@ mod test {
 
         // V13 connection: the flag stays false
         let dir = tempdir()?;
-        let mut ds = create_test_downstairs(512, 4, 2, &dir)?;
+        let mut ds = create_v13_test_downstairs(&dir)?;
         let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
         ds.on_message_for(
             conn_id,

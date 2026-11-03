@@ -177,10 +177,6 @@ pub enum MessageVersion {
     /// This is the first version where an upstairs and downstairs may each
     /// support more than one version, so the new variants are appended to the
     /// end of `Message` and the tags of all V13 messages are unchanged.
-    ///
-    /// TODO/WIP this is Not yet `current()`: the upstairs and downstairs can't
-    /// yet negotiate between V13 and V14, or handle the new messages.  As work
-    /// continues this comment will be updated.
     V14 = 14,
 
     /// Remove `LastFlushAck`
@@ -235,10 +231,7 @@ pub enum MessageVersion {
 impl MessageVersion {
     /// The newest version this build can speak
     pub const fn current() -> Self {
-        // This stays at V13 until the upstairs and downstairs can negotiate
-        // either V13 or V14 and handle the V14 messages.  Moving to V14
-        // before then would break compatibility with V13 peers.
-        Self::V13
+        Self::V14
     }
 
     /// Every version this build can speak, newest first
@@ -246,7 +239,8 @@ impl MessageVersion {
     /// This is [`MessageVersion::current()`] followed by any older versions
     /// we still support.
     pub const fn supported() -> &'static [MessageVersion] {
-        const SUPPORTED: &[MessageVersion] = &[MessageVersion::current()];
+        const SUPPORTED: &[MessageVersion] =
+            &[MessageVersion::current(), MessageVersion::V13];
         SUPPORTED
     }
 }
