@@ -639,7 +639,8 @@ pub enum Message {
 
     /// Tell the downstairs that it is now part of an active region set, so
     /// it should record that it has been active.  The downstairs persists
-    /// this before continuing and never goes back to `false`.
+    /// this and never goes back to `false`.  If it can't, it logs an error,
+    /// drops the connection, and the flag stays `false`.
     YouHaveBeenActive {
         upstairs_id: Uuid,
         session_id: Uuid,
