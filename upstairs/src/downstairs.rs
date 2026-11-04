@@ -5626,6 +5626,37 @@ pub(crate) mod test {
     }
 
     #[test]
+    fn min_quorum_reconciliation_done_sends_been_active() {
+        // With min-quorum, a downstairs that has not reached WaitQuorum
+        // when reconciliation is done did not take part.  Because of this
+        // we move the outlier to faulted and be sure that we don't
+        // count it as having been active.
+        let mut ds = Downstairs::test_default();
+        for cid in ClientId::iter() {
+            ds.clients[cid].set_message_version(MessageVersion::V14);
+        }
+        move_to_wait_quorum(&mut ds, ClientId::new(0));
+        move_to_wait_quorum(&mut ds, ClientId::new(1));
+
+        ds.on_reconciliation_done(false);
+
+        for cid in [0, 1] {
+            let c = &ds.clients[ClientId::new(cid)];
+            assert_eq!(c.state(), DsState::Active);
+            assert_eq!(c.been_active(), Some(true), "client {cid}");
+        }
+        let c = &ds.clients[ClientId::new(2)];
+        assert!(matches!(
+            c.state(),
+            DsState::Connecting {
+                mode: ConnectionMode::Faulted,
+                ..
+            }
+        ));
+        assert_eq!(c.been_active(), None);
+    }
+
+    #[test]
     fn reconcile_rc_to_message() {
         // Convert an extent fix to the crucible repair messages that
         // are sent to the downstairs.  Verify that the resulting
