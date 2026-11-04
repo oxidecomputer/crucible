@@ -33,6 +33,7 @@ use crucible_protocol::CrucibleDecoder;
 use crucible_protocol::CrucibleEncoder;
 use crucible_protocol::JobId;
 use crucible_protocol::Message;
+use crucible_protocol::MessageVersion;
 use crucible_protocol::ReadBlockContext;
 use crucible_protocol::ReadResponseHeader;
 use crucible_protocol::SnapshotDetails;
@@ -86,17 +87,24 @@ pub struct DownstairsHandle {
     repair_addr: SocketAddr,
     cfg: DownstairsConfig,
     upstairs_session_id: Option<Uuid>,
+
+    /// What we report in reply to `BeenActivePlease`
+    ///
+    /// Set to `true` when the upstairs sends `YouHaveBeenActive`.
+    been_active: bool,
 }
 
 impl DownstairsHandle {
     /// Returns the next non-ping packet
     ///
-    /// (pings are answered inline)
+    /// (pings and `YouHaveBeenActive` are handled inline)
     async fn recv(&mut self) -> Option<Message> {
         loop {
             let packet = self.rx.recv().await?;
             if packet == Message::Ruok {
                 self.handle_ping()
+            } else if let Message::YouHaveBeenActive { .. } = packet {
+                self.handle_you_have_been_active()
             } else {
                 break Some(packet);
             }
@@ -105,16 +113,24 @@ impl DownstairsHandle {
 
     /// Tries to return the next non-ping packet
     ///
-    /// (pings are answered automatically)
+    /// (pings are answered automatically, and `YouHaveBeenActive` is
+    /// recorded)
     fn try_recv(&mut self) -> Result<Message, mpsc::error::TryRecvError> {
         loop {
             let packet = self.rx.try_recv();
             if packet == Ok(Message::Ruok) {
                 self.handle_ping();
+            } else if let Ok(Message::YouHaveBeenActive { .. }) = packet {
+                self.handle_you_have_been_active()
             } else {
                 break packet;
             }
         }
+    }
+
+    fn handle_you_have_been_active(&mut self) {
+        info!(self.log, "upstairs says we have been active");
+        self.been_active = true;
     }
 
     fn handle_ping(&mut self) {
@@ -153,6 +169,7 @@ impl DownstairsHandle {
             if *read_only != self.cfg.read_only {
                 panic!("read only mismatch!");
             }
+            assert!(*version >= u32::from(MessageVersion::V14));
 
             self.send(Message::YesItsMe {
                 version: *version,
@@ -197,6 +214,22 @@ impl DownstairsHandle {
             .unwrap();
         } else {
             panic!("wrong packet: {packet:?}, expected RegionInfoPlease");
+        }
+
+        // We reply to HereIAm with the upstairs' version, which is V14 or
+        // later.  A read-write upstairs asks if we have been active next.
+        if !self.cfg.read_only {
+            let packet = self.recv().await.unwrap();
+            if let Message::BeenActivePlease = &packet {
+                info!(self.log, "negotiate packet {:?}", packet);
+
+                self.send(Message::BeenActive {
+                    been_active: self.been_active,
+                })
+                .unwrap();
+            } else {
+                panic!("wrong packet: {packet:?}, expected BeenActivePlease");
+            }
         }
     }
 
@@ -535,6 +568,7 @@ impl DownstairsConfig {
             upstairs_session_id: None,
             local_addr,
             repair_addr,
+            been_active: false,
         }
     }
 }
@@ -1188,7 +1222,6 @@ async fn run_live_repair(mut harness: TestHarness) {
                         job_id: *job_id,
                         result: Ok(()),
                     });
-                    dep_job_id[2] = *job_id;
                 }
                 _ => panic!("saw {m3:?}"),
             }

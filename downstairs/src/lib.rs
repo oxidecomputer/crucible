@@ -17,8 +17,9 @@ use crucible_common::{
     mkdir_for_file,
 };
 use crucible_protocol::{
-    BlockContext, CRUCIBLE_MESSAGE_VERSION, CrucibleDecoder, JobId, Message,
+    BlockContext, CrucibleDecoder, JobId, Message, MessageVersion,
     MessageWriter, ReadBlockContext, ReconciliationId, SnapshotDetails,
+    negotiate_version,
 };
 use repair_client::Client;
 
@@ -367,7 +368,7 @@ impl RegionWrite {
     ) -> Result<Self, CrucibleError> {
         let blocks_per_extent = ddef.extent_size().value;
         let block_size = ddef.block_size() as usize;
-        if buf.len() % block_size != 0 {
+        if !buf.len().is_multiple_of(block_size) {
             return Err(CrucibleError::DataLenUnaligned);
         } else if buf.len() / block_size != contexts.len() {
             return Err(CrucibleError::InvalidNumberOfBlocks(format!(
@@ -670,16 +671,23 @@ pub fn show_work(ds: &mut Downstairs) {
         "Active Upstairs connections: {:?}", active_upstairs_connections
     );
 
-    for upstairs_connection in active_upstairs_connections {
-        let work = ds.work(upstairs_connection);
+    for connection_id in active_upstairs_connections {
+        let active = ds.active(connection_id);
+        let upstairs = active.upstairs_connection;
+        info!(
+            ds.log,
+            "Upstairs connection: connection_id={} upstairs_id={} session_id={} generation={}",
+            connection_id.0,
+            upstairs.upstairs_id,
+            upstairs.session_id,
+            upstairs.generation
+        );
+        let work = ds.work(connection_id);
         if work.pending_jobs.is_empty() {
             info!(ds.log, "Crucible Downstairs work queue:  Empty");
         } else {
             info!(ds.log, "Crucible Downstairs work queue:");
-            info!(
-                ds.log,
-                "{:8} {:>7} {:>5} {}", "  JOB_ID", "IO_TYPE", "STATE", "DEPS"
-            );
+            info!(ds.log, "{:8} {:>7}  {}", "  JOB_ID", "IO_TYPE", "DEPS");
             for job in work.pending_jobs.iter() {
                 let (dsw_type, dep_list) = match &job.io {
                     IOop::Read { dependencies, .. } => ("Read", dependencies),
@@ -878,6 +886,26 @@ enum NegotiationState {
     ConnectedToUpstairs,
     PromotedToActive,
     SentRegionInfo,
+    SentBeenActive,
+}
+
+impl NegotiationState {
+    /// The state a connection must be in to finish negotiation with
+    /// `LastFlush` or `ExtentVersionsPlease`
+    ///
+    /// On V14 or later with a read-write region, the upstairs must ask
+    /// `BeenActivePlease` first.  Otherwise it finishes straight after
+    /// `RegionInfo`.
+    fn ready_to_finish(
+        message_version: MessageVersion,
+        read_only: bool,
+    ) -> Self {
+        if message_version >= MessageVersion::V14 && !read_only {
+            NegotiationState::SentBeenActive
+        } else {
+            NegotiationState::SentRegionInfo
+        }
+    }
 }
 
 /// Immutable data shared by every `ConnectionState`
@@ -913,6 +941,8 @@ enum WorkResult {
 struct ActiveConnection {
     data: ConnectionData,
     upstairs_connection: UpstairsConnection,
+    /// Message version negotiated with this upstairs
+    message_version: MessageVersion,
     work: Work,
     log: Logger,
 }
@@ -921,6 +951,7 @@ impl ActiveConnection {
     fn new(
         data: ConnectionData,
         upstairs_connection: UpstairsConnection,
+        message_version: MessageVersion,
         last_flush: Option<JobId>,
         log: &Logger,
     ) -> Self {
@@ -930,6 +961,7 @@ impl ActiveConnection {
         Self {
             data,
             upstairs_connection,
+            message_version,
             work: Work::new(last_flush, log.new(o!("role" => "work"))),
             log,
         }
@@ -1006,6 +1038,10 @@ impl ActiveConnection {
                 upstairs_id,
                 session_id,
                 ..
+            }
+            | Message::YouHaveBeenActive {
+                upstairs_id,
+                session_id,
             } => {
                 if self.upstairs_connection.upstairs_id != *upstairs_id {
                     self.data.reply_channel_tx.send(Message::UuidMismatch {
@@ -1446,6 +1482,27 @@ impl ActiveConnection {
             }
             Message::Ruok => {
                 self.reply(Message::Imok)?;
+                WorkResult::Handled
+            }
+            Message::YouHaveBeenActive { .. } => {
+                // Only a V14 or later upstairs sends this, and never to a
+                // read-only downstairs.
+                if self.message_version < MessageVersion::V14 {
+                    bail!(
+                        "Received YouHaveBeenActive on message version {}",
+                        self.message_version
+                    );
+                }
+                if flags.read_only {
+                    bail!("Received YouHaveBeenActive on a read-only region");
+                }
+                // If we can't record this, the flag stays false and we drop
+                // the connection.  The upstairs will tell us again after its
+                // next negotiation.
+                if let Err(e) = region.set_been_active() {
+                    error!(self.log, "Failed to record been active: {e:#}");
+                    return Err(e);
+                }
                 WorkResult::Handled
             }
             x => bail!("unexpected frame {:?}", x),
@@ -1894,6 +1951,8 @@ enum ConnectionState {
     Negotiating {
         negotiated: NegotiationState,
         upstairs_connection: UpstairsConnection,
+        /// Message version negotiated with this upstairs
+        message_version: MessageVersion,
         data: ConnectionData,
     },
     Running(ActiveConnection),
@@ -1923,6 +1982,17 @@ impl ConnectionState {
                 ..
             } => Some(*upstairs_connection),
             ConnectionState::Running(a) => Some(a.upstairs_connection),
+        }
+    }
+
+    /// Returns the negotiated message version, or `None` before `HereIAm`
+    fn message_version(&self) -> Option<MessageVersion> {
+        match self {
+            ConnectionState::Open(..) => None,
+            ConnectionState::Negotiating {
+                message_version, ..
+            } => Some(*message_version),
+            ConnectionState::Running(a) => Some(a.message_version),
         }
     }
 }
@@ -2152,6 +2222,8 @@ pub struct DownstairsBuilder {
     write_errors: Option<bool>, // Test flag
     flush_errors: Option<bool>, // Test flag
     log: Option<Logger>,
+    /// Newest message version to offer; `None` means all supported versions
+    max_message_version: Option<MessageVersion>,
 }
 
 impl DownstairsBuilder {
@@ -2163,6 +2235,7 @@ impl DownstairsBuilder {
             write_errors: Some(false),
             flush_errors: Some(false),
             log: None,
+            max_message_version: None,
         }
     }
 
@@ -2185,12 +2258,38 @@ impl DownstairsBuilder {
         self.log = Some(log);
         self
     }
+    /// Only negotiate message versions at or below `max`
+    ///
+    /// This lets tests run a downstairs that acts like an older build.
+    pub fn set_max_message_version(mut self, max: MessageVersion) -> Self {
+        self.max_message_version = Some(max);
+        self
+    }
 
     pub fn build(self) -> Result<Downstairs> {
         let lossy = self.lossy.unwrap_or(false);
         let read_errors = self.read_errors.unwrap_or(false);
         let write_errors = self.write_errors.unwrap_or(false);
         let flush_errors = self.flush_errors.unwrap_or(false);
+
+        let message_versions = match self.max_message_version {
+            None => MessageVersion::supported().to_vec(),
+            Some(max) => {
+                let versions: Vec<MessageVersion> = MessageVersion::supported()
+                    .iter()
+                    .copied()
+                    .filter(|v| *v <= max)
+                    .collect();
+                if versions.is_empty() {
+                    bail!(
+                        "No supported message version at or below {max}, \
+                         supported versions are {:?}",
+                        MessageVersion::supported()
+                    );
+                }
+                versions
+            }
+        };
 
         let log = match &self.log {
             Some(log) => log.clone(),
@@ -2232,6 +2331,7 @@ impl DownstairsBuilder {
                 flush_errors,
                 read_only,
                 encrypted,
+                message_versions,
             },
             active_upstairs: HashMap::new(),
             connection_state: HashMap::new(),
@@ -2257,6 +2357,8 @@ struct DownstairsFlags {
     flush_errors: bool, // Test flag
     read_only: bool,
     encrypted: bool,
+    /// Message versions we will negotiate, newest first
+    message_versions: Vec<MessageVersion>,
 }
 
 /*
@@ -2300,6 +2402,7 @@ impl Downstairs {
             write_errors: Some(false),
             flush_errors: Some(false),
             log: None,
+            max_message_version: None,
         }
     }
 
@@ -2365,6 +2468,7 @@ impl Downstairs {
             ConnectionState::Running(ActiveConnection::new(
                 data,
                 upstairs_connection,
+                self.flags.message_versions[0],
                 None,
                 &log,
             )),
@@ -2587,7 +2691,11 @@ impl Downstairs {
         info!(
             log,
             "Upstairs <-> Downstairs Message Version: {}",
-            CRUCIBLE_MESSAGE_VERSION
+            self.flags.message_versions[0]
+        );
+        info!(
+            log,
+            "Supported Message Versions: {:?}", self.flags.message_versions
         );
 
         info!(log, "Connecting to {source} to obtain our extent files.");
@@ -2711,7 +2819,7 @@ impl Downstairs {
         }
     }
 
-    /// See the comment in the `continue_negotiation()` function (on the
+    /// See the comment on the `NegotiationStateData` enum (on the
     /// upstairs side) that describes how this negotiation takes place.
     ///
     /// The final step in negotiation (as dictated by the upstairs) is
@@ -2745,44 +2853,32 @@ impl Downstairs {
                 };
                 info!(
                     self.log,
-                    "Connection request from {} with version {}",
+                    "Connection request from {} version {}, alternates {:?}",
                     upstairs_id,
-                    version
+                    version,
+                    alternate_versions
                 );
 
-                // Verify we can communicate with the upstairs.  First
-                // check our message version.  If that fails,  check
-                // to see if our version is one of the supported
-                // versions the upstairs has told us it can support.
-                if version != CRUCIBLE_MESSAGE_VERSION {
-                    if alternate_versions.contains(&CRUCIBLE_MESSAGE_VERSION) {
+                // Verify we can communicate with the upstairs.  Pick the
+                // newest version that we both support.
+                let supported = &self.flags.message_versions;
+                let Some(negotiated_version) =
+                    negotiate_version(supported, version, &alternate_versions)
+                else {
+                    let m = Message::VersionMismatch {
+                        version: u32::from(supported[0]),
+                    };
+                    if let Err(e) = state.reply(m) {
                         warn!(
                             self.log,
-                            "downstairs and upstairs using different \
-                             but compatible versions, Upstairs is {}, \
-                             but supports {:?}, downstairs is {}",
-                            version,
-                            alternate_versions,
-                            CRUCIBLE_MESSAGE_VERSION,
-                        );
-                    } else {
-                        let m = Message::VersionMismatch {
-                            version: CRUCIBLE_MESSAGE_VERSION,
-                        };
-                        if let Err(e) = state.reply(m) {
-                            warn!(
-                                self.log,
-                                "Failed to send VersionMismatch: {}", e
-                            );
-                        }
-                        bail!(
-                            "Required version {}, Or {:?} got {}",
-                            CRUCIBLE_MESSAGE_VERSION,
-                            alternate_versions,
-                            version,
+                            "Failed to send VersionMismatch: {}", e
                         );
                     }
-                }
+                    bail!(
+                        "Supported versions {supported:?}, upstairs offered \
+                         {version} or {alternate_versions:?}",
+                    );
+                };
 
                 // Reject an Upstairs negotiation if there is a mismatch
                 // of expectation, and terminate the connection - the
@@ -2828,17 +2924,19 @@ impl Downstairs {
                 *state = ConnectionState::Negotiating {
                     negotiated: NegotiationState::ConnectedToUpstairs,
                     upstairs_connection,
+                    message_version: negotiated_version,
                     data,
                 };
                 info!(
                     self.log,
-                    "upstairs {:?} connected, version {}",
-                    upstairs_connection,
-                    CRUCIBLE_MESSAGE_VERSION
+                    "upstairs {upstairs_connection:?} connected, using version \
+                     {negotiated_version}, upstairs offered {version} or \
+                     {alternate_versions:?}, downstairs supports \
+                     {supported:?}",
                 );
 
                 if let Err(e) = state.reply(Message::YesItsMe {
-                    version: CRUCIBLE_MESSAGE_VERSION,
+                    version: u32::from(negotiated_version),
                     repair_addr: client_state.repair_address,
                 }) {
                     bail!("Failed sending YesItsMe: {}", e);
@@ -2945,17 +3043,57 @@ impl Downstairs {
                     bail!("Failed sending RegionInfo: {}", e);
                 }
             }
+            Message::BeenActivePlease => {
+                let version = state.message_version();
+                let ConnectionState::Negotiating { negotiated, .. } = state
+                else {
+                    bail!("Received BeenActivePlease while not negotiating");
+                };
+                if *negotiated != NegotiationState::SentRegionInfo {
+                    bail!(
+                        "Received BeenActivePlease out of order {:?}",
+                        negotiated
+                    );
+                }
+                // Only a V14 or later upstairs knows to ask, and it never
+                // asks a read-only downstairs.
+                if !version.is_some_and(|v| v >= MessageVersion::V14) {
+                    bail!(
+                        "Received BeenActivePlease on message version \
+                         {version:?}"
+                    );
+                }
+                if self.flags.read_only {
+                    bail!("Received BeenActivePlease on a read-only region");
+                }
+
+                let been_active = self.region.been_active()?;
+                *negotiated = NegotiationState::SentBeenActive;
+                if let Err(e) = state.reply(Message::BeenActive { been_active })
+                {
+                    bail!("Failed sending BeenActive: {e}");
+                }
+            }
             Message::LastFlush { last_flush_number } => {
                 let ConnectionState::Negotiating {
                     negotiated,
                     upstairs_connection,
+                    message_version,
                     data,
                 } = state
                 else {
                     bail!("Received LastFlush while not negotiating");
                 };
-                if *negotiated != NegotiationState::SentRegionInfo {
-                    bail!("Received LastFlush out of order {:?}", negotiated);
+                let expected = NegotiationState::ready_to_finish(
+                    *message_version,
+                    self.flags.read_only,
+                );
+                if *negotiated != expected {
+                    bail!(
+                        "Received LastFlush out of order {:?}, expected {:?}",
+                        negotiated,
+                        expected
+                    );
                 }
 
                 let data = std::mem::replace(data, ConnectionData::dummy());
@@ -2963,6 +3101,7 @@ impl Downstairs {
                 *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
+                    *message_version,
                     last_flush_number,
                     &self.log,
                 ));
@@ -2980,14 +3119,21 @@ impl Downstairs {
                     negotiated,
                     data,
                     upstairs_connection,
+                    message_version,
                 } = state
                 else {
                     bail!("Received ExtentVersions while not negotiating");
                 };
-                if *negotiated != NegotiationState::SentRegionInfo {
+                let expected = NegotiationState::ready_to_finish(
+                    *message_version,
+                    self.flags.read_only,
+                );
+                if *negotiated != expected {
                     bail!(
-                        "Received ExtentVersions out of order {:?}",
-                        negotiated
+                        "Received ExtentVersions out of order {:?}, \
+                         expected {:?}",
+                        negotiated,
+                        expected
                     );
                 }
 
@@ -2996,6 +3142,7 @@ impl Downstairs {
                 *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
+                    *message_version,
                     None,
                     &self.log,
                 ));
@@ -3550,7 +3697,11 @@ impl DownstairsClient {
         info!(
             log,
             "Upstairs <-> Downstairs Message Version: {}",
-            CRUCIBLE_MESSAGE_VERSION
+            ds.flags.message_versions[0]
+        );
+        info!(
+            log,
+            "Supported Message Versions: {:?}", ds.flags.message_versions
         );
 
         let repair_address = SocketAddr::new(settings.address, settings.rport);
@@ -3763,6 +3914,7 @@ impl Default for DownstairsClientSettings {
 mod test {
     use super::*;
     use bytes::Bytes;
+    use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
     use rand_chacha::ChaCha20Rng;
     use std::net::Ipv4Addr;
     use tempfile::{TempDir, tempdir};
@@ -3944,6 +4096,23 @@ mod test {
         extent_count: u32,
         dir: &TempDir,
     ) -> Result<Downstairs> {
+        create_test_downstairs_builder(
+            block_size,
+            extent_size,
+            extent_count,
+            dir,
+        )?
+        .build()
+    }
+
+    // Like create_test_downstairs, but returns the DownstairsBuilder so the
+    // caller can change settings before building.
+    fn create_test_downstairs_builder(
+        block_size: u64,
+        extent_size: u64,
+        extent_count: u32,
+        dir: &TempDir,
+    ) -> Result<DownstairsBuilder> {
         // create region
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
@@ -3959,11 +4128,7 @@ mod test {
         region.extend(extent_count, Backend::default())?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ds = Downstairs::new_builder(&path_dir, false)
-            .set_logger(csl())
-            .build()?;
-
-        Ok(ds)
+        Ok(Downstairs::new_builder(&path_dir, false).set_logger(csl()))
     }
 
     #[tokio::test]
@@ -5932,10 +6097,13 @@ mod test {
      * Test function that will start up a downstairs (at the provided port)
      * then create a tcp connection to that downstairs, returning the tcp
      * connection to the caller.
+     * If max_message_version is set, the downstairs will only negotiate
+     * message versions at or below it.
      */
     async fn start_ds_and_connect(
         listen_port: u16,
         repair_port: u16,
+        max_message_version: Option<MessageVersion>,
     ) -> Result<tokio::net::TcpStream> {
         /*
          * Pick some small enough values for what we need.
@@ -5945,7 +6113,11 @@ mod test {
         let ec = 5;
         let dir = tempdir()?;
 
-        let ds = create_test_downstairs(bs, es, ec, &dir)?;
+        let mut builder = create_test_downstairs_builder(bs, es, ec, &dir)?;
+        if let Some(max) = max_message_version {
+            builder = builder.set_max_message_version(max);
+        }
+        let ds = builder.build()?;
         let _jh = DownstairsClient::spawn(
             ds,
             DownstairsClientSettings {
@@ -5971,7 +6143,7 @@ mod test {
         // A simple test to verify that sending the current crucible
         // message version to the downstairs will trigger a response
         // indicating the version is supported.
-        let tcp = start_ds_and_connect(5555, 5556).await.unwrap();
+        let tcp = start_ds_and_connect(5555, 5556, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
@@ -6009,20 +6181,24 @@ mod test {
     async fn test_version_downrev() -> Result<()> {
         // Test that a newer crucible version will result in a message
         // indicating there is a version mismatch.
-        let tcp = start_ds_and_connect(5557, 5558).await.unwrap();
+        let tcp = start_ds_and_connect(5557, 5558, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
 
-        // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
+        // Send the version just below the oldest one our downstairs
+        // supports.  The downstairs should reject it and reply with its
+        // own version, CRUCIBLE_MESSAGE_VERSION.
+        let oldest = *MessageVersion::supported().last().unwrap();
+        let downrev = u32::from(oldest) - 1;
         let m = Message::HereIAm {
-            version: CRUCIBLE_MESSAGE_VERSION - 1,
+            version: downrev,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             generation: 1,
             read_only: false,
             encrypted: false,
-            alternate_versions: vec![CRUCIBLE_MESSAGE_VERSION - 1],
+            alternate_versions: vec![downrev],
         };
         fw.send(m).await?;
 
@@ -6043,7 +6219,7 @@ mod test {
     async fn test_version_uprev_only() -> Result<()> {
         // Test sending only the +1 version to the DS, verify it rejects
         // this version as unsupported.
-        let tcp = start_ds_and_connect(5579, 5560).await.unwrap();
+        let tcp = start_ds_and_connect(5579, 5560, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
@@ -6077,7 +6253,7 @@ mod test {
         // Test sending the +1 version to the DS, but also include the
         // current version on the supported list.  The downstairs should
         // see that and respond with the version it does support.
-        let tcp = start_ds_and_connect(5561, 5562).await.unwrap();
+        let tcp = start_ds_and_connect(5561, 5562, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
@@ -6118,7 +6294,7 @@ mod test {
         // Test sending an invalid version to the DS, but also include the
         // current version on the supported list, but with several
         // choices.
-        let tcp = start_ds_and_connect(5563, 5564).await.unwrap();
+        let tcp = start_ds_and_connect(5563, 5564, None).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
         let mut fw = MessageWriter::new(write);
@@ -6151,6 +6327,576 @@ mod test {
             }
             x => {
                 panic!("Invalid answer from downstairs: {:?}", x);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_max_message_version_build() -> Result<()> {
+        let newest = MessageVersion::current();
+
+        // No cap: every supported version is offered.
+        let dir = tempdir()?;
+        let ds = create_test_downstairs(512, 4, 2, &dir)?;
+        assert_eq!(ds.flags.message_versions, MessageVersion::supported());
+
+        // A cap at the newest version changes nothing.
+        let dir = tempdir()?;
+        let ds = create_test_downstairs_builder(512, 4, 2, &dir)?
+            .set_max_message_version(newest)
+            .build()?;
+        assert_eq!(ds.flags.message_versions, MessageVersion::supported());
+
+        // A cap at V13 offers only V13.
+        let dir = tempdir()?;
+        let ds = create_test_downstairs_builder(512, 4, 2, &dir)?
+            .set_max_message_version(MessageVersion::V13)
+            .build()?;
+        assert_eq!(ds.flags.message_versions, [MessageVersion::V13]);
+
+        // A cap below every supported version is an error.
+        let oldest = *MessageVersion::supported().last().unwrap();
+        let below = MessageVersion::try_from(u32::from(oldest) - 1)?;
+        let dir = tempdir()?;
+        let res = create_test_downstairs_builder(512, 4, 2, &dir)?
+            .set_max_message_version(below)
+            .build();
+        assert!(res.is_err());
+
+        Ok(())
+    }
+
+    fn test_client_state() -> DownstairsClientState {
+        DownstairsClientState {
+            address: "127.0.0.1:5555".parse().unwrap(),
+            repair_address: "127.0.0.1:5556".parse().unwrap(),
+        }
+    }
+
+    /// Open a test downstairs on `dir` that negotiates V14 and V13
+    ///
+    /// The region must already exist.
+    fn open_v14_test_downstairs(
+        dir: &TempDir,
+        read_only: bool,
+    ) -> Result<Downstairs> {
+        let ds = Downstairs::new_builder(dir.path(), read_only)
+            .set_logger(csl())
+            .build()?;
+        assert_eq!(
+            ds.flags.message_versions,
+            [MessageVersion::V14, MessageVersion::V13]
+        );
+        Ok(ds)
+    }
+
+    /// Create a test downstairs on `dir` that only negotiates V13
+    fn create_v13_test_downstairs(dir: &TempDir) -> Result<Downstairs> {
+        create_test_downstairs_builder(512, 4, 2, dir)?
+            .set_max_message_version(MessageVersion::V13)
+            .build()
+    }
+
+    /// Start negotiation on a new connection through `PromoteToActive`
+    ///
+    /// The upstairs offers `upstairs_versions`, newest first.  Returns the
+    /// reply channel.
+    fn start_negotiation(
+        ds: &mut Downstairs,
+        conn_id: ConnectionId,
+        upstairs_versions: &[MessageVersion],
+    ) -> Result<mpsc::UnboundedReceiver<Message>> {
+        let client_state = test_client_state();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let _ = ds.new_connection(conn_id, tx);
+        assert_eq!(ds.connection_state[&conn_id].message_version(), None);
+
+        let upstairs_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let read_only = ds.flags.read_only;
+        ds.on_negotiation_step(
+            Message::HereIAm {
+                version: u32::from(upstairs_versions[0]),
+                upstairs_id,
+                session_id,
+                generation: 1,
+                read_only,
+                encrypted: false,
+                alternate_versions: upstairs_versions[1..]
+                    .iter()
+                    .map(|v| u32::from(*v))
+                    .collect(),
+            },
+            conn_id,
+            &client_state,
+        )?;
+        assert!(matches!(rx.try_recv()?, Message::YesItsMe { .. }));
+
+        ds.on_negotiation_step(
+            Message::PromoteToActive {
+                upstairs_id,
+                session_id,
+                generation: 1,
+            },
+            conn_id,
+            &client_state,
+        )?;
+        assert!(matches!(rx.try_recv()?, Message::YouAreNowActive { .. }));
+        Ok(rx)
+    }
+
+    /// Run negotiation on a new connection up to `RegionInfo`, and return
+    /// the reply channel
+    fn negotiate_to_region_info(
+        ds: &mut Downstairs,
+        conn_id: ConnectionId,
+        upstairs_versions: &[MessageVersion],
+    ) -> Result<mpsc::UnboundedReceiver<Message>> {
+        let mut rx = start_negotiation(ds, conn_id, upstairs_versions)?;
+        ds.on_negotiation_step(
+            Message::RegionInfoPlease,
+            conn_id,
+            &test_client_state(),
+        )?;
+        assert!(matches!(rx.try_recv()?, Message::RegionInfo { .. }));
+        Ok(rx)
+    }
+
+    /// Finish negotiation with `LastFlush` or `ExtentVersionsPlease`, and
+    /// check that the connection is running
+    fn finish_negotiation(
+        ds: &mut Downstairs,
+        conn_id: ConnectionId,
+        last_flush: bool,
+    ) -> Result<()> {
+        let m = if last_flush {
+            Message::LastFlush {
+                last_flush_number: None,
+            }
+        } else {
+            Message::ExtentVersionsPlease
+        };
+        ds.on_negotiation_step(m, conn_id, &test_client_state())?;
+        assert!(matches!(
+            ds.connection_state[&conn_id],
+            ConnectionState::Running(..)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_been_active_please() -> Result<()> {
+        // A V14 read-write connection gets the value on disk, and can then
+        // finish negotiation either way.
+        use MessageVersion::{V13, V14};
+        for last_flush in [true, false] {
+            let dir = tempdir()?;
+            drop(create_test_downstairs(512, 4, 2, &dir)?);
+
+            // A new region has not been active
+            let mut ds = open_v14_test_downstairs(&dir, false)?;
+            let conn_id = ConnectionId(0);
+            let mut rx =
+                negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+            ds.on_negotiation_step(
+                Message::BeenActivePlease,
+                conn_id,
+                &test_client_state(),
+            )?;
+            assert!(matches!(
+                rx.try_recv()?,
+                Message::BeenActive { been_active: false }
+            ));
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+
+            // Once set, a reopened downstairs reports it
+            ds.region.set_been_active()?;
+            drop(ds);
+            let mut ds = open_v14_test_downstairs(&dir, false)?;
+            let mut rx =
+                negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+            ds.on_negotiation_step(
+                Message::BeenActivePlease,
+                conn_id,
+                &test_client_state(),
+            )?;
+            assert!(matches!(
+                rx.try_recv()?,
+                Message::BeenActive { been_active: true }
+            ));
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_been_active_please_rejected() -> Result<()> {
+        // Cases where the downstairs must refuse BeenActivePlease.  In each
+        // one the test plays the upstairs, sending negotiation messages
+        // directly.  A refusal is an error from on_negotiation_step.
+        //
+        // The upstairs version list is newest first: `&[V13]` is an old
+        // upstairs (HereIAm version 13, no alternates), `&[V14, V13]` is a
+        // new one (HereIAm version 14, alternate 13).
+        //
+        // create_v13_test_downstairs makes a downstairs that offers only
+        // V13.  The open_v14_test_downstairs reopens the region offering
+        // both V14 and V13.  This is what a downstairs offers by default.
+        use MessageVersion::{V13, V14};
+        let conn_id = ConnectionId(0);
+        let ask = |ds: &mut Downstairs| {
+            ds.on_negotiation_step(
+                Message::BeenActivePlease,
+                conn_id,
+                &test_client_state(),
+            )
+        };
+
+        // 1. V13 downstairs, V13 upstairs: the connection is V13.
+        // A misbehaving old upstairs asks anyway, after RegionInfo.
+        // Rejected by the version check.
+        let dir = tempdir()?;
+        let mut ds = create_v13_test_downstairs(&dir)?;
+        let mut rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
+
+        // 2. V14 downstairs, V13 upstairs: the connection is V13, even
+        // though this downstairs could do V14.  Asked after RegionInfo.
+        // Rejected by the version check, which must look at the
+        // negotiated version, not at what the downstairs supports.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let mut rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
+
+        // 3. V14 downstairs, V14 upstairs, read-only region: the connection
+        // is V14 and the ask comes after RegionInfo, so only the
+        // read-only check can reject it.  A read-only downstairs does
+        // not track been_active.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, true)?;
+        let mut rx = negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
+
+        // 4. V14 downstairs, V14 upstairs, read-write, asked out of order:
+        // after PromoteToActive but before RegionInfoPlease.  Version
+        // and region are fine, so only the negotiation state check can
+        // reject it.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let mut rx = start_negotiation(&mut ds, conn_id, &[V14, V13])?;
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
+
+        // 5. V14 downstairs, V14 upstairs, read-write, asked twice after
+        // RegionInfo.  The first ask is valid and gets BeenActive.  The
+        // second is out of order, since the state is now SentBeenActive,
+        // so it is rejected.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let mut rx = negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+        ask(&mut ds)?;
+        assert!(matches!(rx.try_recv()?, Message::BeenActive { .. }));
+        assert!(ask(&mut ds).is_err());
+        assert!(rx.try_recv().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_finish_negotiation_order() -> Result<()> {
+        // Negotiation from the Upstairs ends with one of LastFlush (an
+        // Offline client reconnecting) or ExtentVersionsPlease (a New,
+        // Faulted, or Replaced client).  Each has its own check so we will
+        // test both here.  When the negotiation includes been_active (V14
+        // or later, read-write), the upstairs must send BeenActivePlease
+        // first.  Otherwise it finishes straight after RegionInfo.
+        use MessageVersion::{V13, V14};
+        let conn_id = ConnectionId(0);
+
+        for last_flush in [true, false] {
+            // V14 downstairs, V14 upstairs, read-write not sending
+            // BeenActivePlease is a failure and should report error.
+            let dir = tempdir()?;
+            drop(create_test_downstairs(512, 4, 2, &dir)?);
+            let mut ds = open_v14_test_downstairs(&dir, false)?;
+            let mut rx =
+                negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+            assert!(finish_negotiation(&mut ds, conn_id, last_flush).is_err());
+            assert!(rx.try_recv().is_err());
+
+            // V13 downstairs, V13 upstairs: Negotiation should finishe after
+            // RegionInfo.
+            let dir = tempdir()?;
+            let mut ds = create_v13_test_downstairs(&dir)?;
+            let _rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+
+            // V14 downstairs, V13 upstairs: the connection is V13, so it
+            // finishes after RegionInfo.
+            let dir = tempdir()?;
+            drop(create_test_downstairs(512, 4, 2, &dir)?);
+            let mut ds = open_v14_test_downstairs(&dir, false)?;
+            let _rx = negotiate_to_region_info(&mut ds, conn_id, &[V13])?;
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+
+            // V14 downstairs, V14 upstairs, read-only: a read-only region
+            // does not track been_active, so it finishes after RegionInfo.
+            let dir = tempdir()?;
+            drop(create_test_downstairs(512, 4, 2, &dir)?);
+            let mut ds = open_v14_test_downstairs(&dir, true)?;
+            let _rx = negotiate_to_region_info(&mut ds, conn_id, &[V14, V13])?;
+            finish_negotiation(&mut ds, conn_id, last_flush)?;
+        }
+        Ok(())
+    }
+
+    /// Add a running, active connection that skips negotiation
+    ///
+    /// The connection uses the newest version the downstairs offers.
+    /// Returns its upstairs connection and the reply channel.
+    fn add_running_connection(
+        ds: &mut Downstairs,
+        conn_id: ConnectionId,
+    ) -> Result<(UpstairsConnection, mpsc::UnboundedReceiver<Message>)> {
+        let upstairs_connection = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 1,
+        };
+        let (_, rx) = ds.add_fake_connection(upstairs_connection, conn_id);
+        ds.promote_to_active(upstairs_connection, conn_id)?;
+        Ok((upstairs_connection, rx))
+    }
+
+    fn you_have_been_active(uc: UpstairsConnection) -> Message {
+        Message::YouHaveBeenActive {
+            upstairs_id: uc.upstairs_id,
+            session_id: uc.session_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_you_have_been_active() -> Result<()> {
+        // A V14 read-write connection records been_active.  It is written
+        // to disk, sending it again does nothing, and there is no reply.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let conn_id = ConnectionId(0);
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+        assert!(!ds.region.been_active()?);
+
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        assert!(ds.connection_state.contains_key(&conn_id));
+        assert!(ds.region.been_active()?);
+        assert!(rx.try_recv().is_err());
+
+        // Send it again, verify it is still set, connection kept, no reply
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        assert!(ds.connection_state.contains_key(&conn_id));
+        assert!(ds.region.been_active()?);
+        assert!(rx.try_recv().is_err());
+
+        // A reopened downstairs reads it back from disk
+        drop(ds);
+        let ds = open_v14_test_downstairs(&dir, false)?;
+        assert!(ds.region.been_active()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_you_have_been_active_id_mismatch() -> Result<()> {
+        // A wrong upstairs_id or session_id gets UuidMismatch, the same as
+        // other messages that carry them.  The connection is kept and the
+        // flag is not set.
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let conn_id = ConnectionId(0);
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+
+        let wrong_upstairs = UpstairsConnection {
+            upstairs_id: Uuid::new_v4(),
+            ..uc
+        };
+        let wrong_session = UpstairsConnection {
+            session_id: Uuid::new_v4(),
+            ..uc
+        };
+        for bad in [wrong_upstairs, wrong_session] {
+            ds.on_message_for(
+                conn_id,
+                you_have_been_active(bad),
+                &test_client_state(),
+            )
+            .await;
+            assert!(matches!(rx.try_recv()?, Message::UuidMismatch { .. }));
+            assert!(ds.connection_state.contains_key(&conn_id));
+            assert!(!ds.region.been_active()?);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_you_have_been_active_rejected() -> Result<()> {
+        // On a connection that does not support been_active, receiving
+        // it is an error and results in the connection getting dropped.
+        let conn_id = ConnectionId(0);
+
+        // V13 connection: the flag stays false
+        let dir = tempdir()?;
+        let mut ds = create_v13_test_downstairs(&dir)?;
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        assert!(!ds.connection_state.contains_key(&conn_id));
+        assert!(!ds.region.been_active()?);
+        assert!(rx.try_recv().is_err());
+
+        // V14 connection on a read-only region
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, true)?;
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        assert!(!ds.connection_state.contains_key(&conn_id));
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_you_have_been_active_write_fails() -> Result<()> {
+        // If private.json can't be written, the downstairs logs an error
+        // and drops the connection.  The flag stays false, so the next
+        // BeenActivePlease reports false and the upstairs sends it again.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir()?;
+        drop(create_test_downstairs(512, 4, 2, &dir)?);
+        let mut ds = open_v14_test_downstairs(&dir, false)?;
+        let conn_id = ConnectionId(0);
+        let (uc, mut rx) = add_running_connection(&mut ds, conn_id)?;
+
+        // Make the region directory read-only so the write fails.
+        let perms = std::fs::metadata(dir.path())?.permissions();
+        std::fs::set_permissions(
+            dir.path(),
+            std::fs::Permissions::from_mode(0o555),
+        )?;
+        if std::fs::File::create(dir.path().join("probe")).is_ok() {
+            std::fs::set_permissions(dir.path(), perms)?;
+            eprintln!("region dir still writable, skipping");
+            return Ok(());
+        }
+
+        ds.on_message_for(
+            conn_id,
+            you_have_been_active(uc),
+            &test_client_state(),
+        )
+        .await;
+        std::fs::set_permissions(dir.path(), perms)?;
+
+        assert!(!ds.connection_state.contains_key(&conn_id));
+        assert!(!ds.region.been_active()?);
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_version_max_compatible() -> Result<()> {
+        // A downstairs capped at V13 should pick V13 when the upstairs
+        // offers V14 and V13.
+        let tcp = start_ds_and_connect(5565, 5566, Some(MessageVersion::V13))
+            .await
+            .unwrap();
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = MessageWriter::new(write);
+
+        let m = Message::HereIAm {
+            version: u32::from(MessageVersion::V14),
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: vec![u32::from(MessageVersion::V13)],
+        };
+        fw.send(m).await?;
+
+        let f = fr.next().await.unwrap();
+
+        match f {
+            Ok(Message::YesItsMe { version, .. }) => {
+                assert_eq!(version, u32::from(MessageVersion::V13));
+            }
+            x => {
+                panic!("Invalid answer from downstairs: {x:?}");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_version_max_mismatch() -> Result<()> {
+        // A downstairs capped at V13 should reject an upstairs that only
+        // offers V14, and report V13 as its version.
+        let tcp = start_ds_and_connect(5567, 5568, Some(MessageVersion::V13))
+            .await
+            .unwrap();
+        let (read, write) = tcp.into_split();
+        let mut fr = FramedRead::new(read, CrucibleDecoder::new());
+        let mut fw = MessageWriter::new(write);
+
+        let m = Message::HereIAm {
+            version: u32::from(MessageVersion::V14),
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: 1,
+            read_only: false,
+            encrypted: false,
+            alternate_versions: Vec::new(),
+        };
+        fw.send(m).await?;
+
+        let f = fr.next().await.unwrap();
+
+        match f {
+            Ok(Message::VersionMismatch { version }) => {
+                assert_eq!(version, u32::from(MessageVersion::V13));
+            }
+            x => {
+                panic!("Invalid answer from downstairs: {x:?}");
             }
         }
         Ok(())

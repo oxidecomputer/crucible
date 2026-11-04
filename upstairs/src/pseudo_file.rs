@@ -46,8 +46,8 @@ impl IOSpan {
     }
 
     pub fn is_block_regular(&self) -> bool {
-        let is_block_aligned = (self.offset % self.block_size) == 0;
-        let is_block_sized = (self.sz % self.block_size) == 0;
+        let is_block_aligned = self.offset.is_multiple_of(self.block_size);
+        let is_block_sized = self.sz.is_multiple_of(self.block_size);
 
         is_block_aligned && is_block_sized
     }
@@ -96,15 +96,15 @@ impl IOSpan {
     pub fn read_from_blocks_into_buffer(&self, mut data: &mut [u8]) {
         assert_eq!(data.len(), self.sz as usize);
 
-        if self.phase % self.block_size == 0
-            && data.len() % self.block_size as usize == 0
+        if self.phase.is_multiple_of(self.block_size)
+            && data.len().is_multiple_of(self.block_size as usize)
         {
             self.buffer.read(self.phase as usize, data);
         } else {
             let mut pos = self.phase as usize;
             let bs = self.block_size as usize;
             while !data.is_empty() {
-                if pos % bs == 0 && data.len() >= bs {
+                if pos.is_multiple_of(bs) && data.len() >= bs {
                     // Read as many integral blocks as we can get
                     let n = (data.len() / bs) * bs;
                     let (chunk, next) = data.split_at_mut(n);
@@ -130,15 +130,15 @@ impl IOSpan {
     #[instrument]
     pub fn write_from_buffer_into_blocks(&mut self, mut data: &[u8]) {
         assert_eq!(data.len(), self.sz as usize);
-        if self.phase % self.block_size == 0
-            && data.len() % self.block_size as usize == 0
+        if self.phase.is_multiple_of(self.block_size)
+            && data.len().is_multiple_of(self.block_size as usize)
         {
             self.buffer.write(self.phase as usize, data);
         } else {
             let mut pos = self.phase as usize;
             let bs = self.block_size as usize;
             while !data.is_empty() {
-                if pos % bs == 0 && data.len() >= bs {
+                if pos.is_multiple_of(bs) && data.len() >= bs {
                     // Write as many integral blocks as we can get
                     let n = (data.len() / bs) * bs;
                     let (chunk, next) = data.split_at(n);

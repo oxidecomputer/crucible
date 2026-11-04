@@ -24,6 +24,7 @@ use crate::{
 use crucible_client_types::RegionExtentInfo;
 use crucible_client_types::VolumeInfo;
 use crucible_common::{BlockIndex, CrucibleError};
+use crucible_protocol::MessageVersion;
 use serde::{Deserialize, Serialize};
 
 use std::{
@@ -313,6 +314,11 @@ pub(crate) struct UpstairsConfig {
     ///
     /// This is `Some(..)` if a key is provided in the `CrucibleOpts`
     pub encryption_context: Option<EncryptionContext>,
+
+    /// Message versions we offer to each downstairs, newest first
+    ///
+    /// This is `MessageVersion::supported()`, except in tests.
+    pub message_versions: &'static [MessageVersion],
 }
 
 impl UpstairsConfig {
@@ -392,6 +398,7 @@ impl Upstairs {
             session_id,
             generation: AtomicU64::new(generation),
             read_only: opt.read_only,
+            message_versions: MessageVersion::supported(),
         });
 
         info!(log, "Crucible stats registered with UUID: {}", uuid);
@@ -1805,6 +1812,7 @@ impl Upstairs {
             | Message::ReadOnlyMismatch { .. }
             | Message::YouAreNowActive { .. }
             | Message::RegionInfo { .. }
+            | Message::BeenActive { .. }
             | Message::ExtentVersions { .. } => {
                 // negotiation and initial reconciliation
                 let r = self.downstairs.clients[client_id]
@@ -1919,7 +1927,8 @@ impl Upstairs {
             | Message::ExtentReopen { .. }
             | Message::ExtentVersionsPlease
             | Message::PromoteToActive { .. }
-            | Message::Unknown(..) => {
+            | Message::BeenActivePlease
+            | Message::YouHaveBeenActive { .. } => {
                 panic!("invalid response {m:?}")
             }
         }
@@ -2452,6 +2461,7 @@ impl Upstairs {
                             NegotiationStateData::Start
                             | NegotiationStateData::WaitForPromote
                             | NegotiationStateData::WaitForRegionInfo
+                            | NegotiationStateData::WaitForBeenActive
                             | NegotiationStateData::GetExtentVersions => {
                                 DownstairsInfoNegotiationStatus::Negotiating
                             }
@@ -5127,6 +5137,108 @@ pub(crate) mod test {
             * ddef.extent_size().value as usize
             * 4;
         assert_eq!(up.downstairs.reconcile_repair_needed(), expected_repairs);
+    }
+
+    #[test]
+    fn test_downstairs_three_live_repair_failed_reconcile() {
+        // Regression test for crucible#1980.  Start with all three downstairs
+        // active, put all three into live-repair so that we fall back to
+        // reconciliation while the upstairs is active, then abort that
+        // reconciliation.  The downstairs should restart and come back
+        // through reconciliation, instead of panicking on an invalid state
+        // transition.
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), false);
+        up.force_active().unwrap();
+
+        for id in ClientId::iter() {
+            active_to_faulted(&mut up, id);
+        }
+
+        for id in ClientId::iter() {
+            faulted_to_live_repair_ready_with(
+                &mut up,
+                id,
+                RegionMetadata::new(
+                    &[1; 12],                      // generation
+                    &[1; 12],                      // flush
+                    &[id == ClientId::new(0); 12], // dirty
+                ),
+            );
+            up.downstairs.clients[id].repair_addr =
+                Some("0.0.0.0:1".parse().unwrap());
+        }
+
+        // Start reconciliation, because all three downstairs need live-repair
+        up.apply(UpstairsAction::NoOp);
+        for id in ClientId::iter() {
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    state: NegotiationState::Reconcile,
+                }
+            );
+        }
+
+        // Reconciliation fails, which stops all three clients
+        up.downstairs.abort_reconciliation(&up.state);
+        assert!(matches!(up.state, UpstairsState::Active));
+        for id in ClientId::iter() {
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Stopping(ClientStopReason::NegotiationFailed(
+                    ClientNegotiationFailed::FailedReconcile
+                ))
+            );
+        }
+
+        // When the client tasks stop, each client should restart in the
+        // Faulted mode (because the upstairs is active).
+        for id in ClientId::iter() {
+            up.apply_client_action(
+                id,
+                ClientAction::TaskStopped(ClientRunResult::RequestedStop),
+            );
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Connecting {
+                    mode: ConnectionMode::Faulted,
+                    state: NegotiationState::Start,
+                }
+            );
+        }
+
+        // Bring all three clients back to live-repair ready.  Since all three
+        // still need repair, we should fall back to reconciliation again.
+        for id in ClientId::iter() {
+            faulted_to_live_repair_ready_with(
+                &mut up,
+                id,
+                RegionMetadata::new(
+                    &[1; 12],                      // generation
+                    &[1; 12],                      // flush
+                    &[id == ClientId::new(0); 12], // dirty
+                ),
+            );
+            up.downstairs.clients[id].repair_addr =
+                Some("0.0.0.0:1".parse().unwrap());
+        }
+        up.apply(UpstairsAction::NoOp);
+        for id in ClientId::iter() {
+            assert_eq!(
+                up.ds_state(id),
+                DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    state: NegotiationState::Reconcile,
+                }
+            );
+        }
     }
 
     #[tokio::test]

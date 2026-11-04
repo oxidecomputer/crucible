@@ -413,6 +413,7 @@ impl Downstairs {
             generation: std::sync::atomic::AtomicU64::new(1),
             read_only: false,
             encryption_context: None,
+            message_versions: crucible_protocol::MessageVersion::supported(),
         });
         let stats = DownstairsStatOuter::default();
 
@@ -1389,6 +1390,7 @@ impl Downstairs {
                     info!(self.log, "live-repair completed successfully");
                     for c in &repair.repair_downstairs {
                         self.clients[*c].finish_repair(up_state);
+                        self.clients[*c].send_you_have_been_active();
                     }
                 }
 
@@ -1585,15 +1587,20 @@ impl Downstairs {
         //  list of dependencies and remove jobs that we skipped or finished for
         //  that specific downstairs before we send the repair IO over the wire.
 
+        let deps = if close_deps.is_empty() {
+            String::new()
+        } else {
+            format!(" deps:{}", format_job_list(&close_deps))
+        };
         info!(
             self.log,
-            "RE:{} repair extent with ids {},{},{},{} deps:{}",
+            "RE:{} repair extent with ids {},{},{},{}{}",
             extent,
             close_id,
             repair_id,
             noop_id,
             reopen_id,
-            format_job_list(&close_deps),
+            deps,
         );
 
         let repair = self.repair.as_mut().unwrap(); // reborrow
@@ -2078,6 +2085,8 @@ impl Downstairs {
     pub(crate) fn on_reconciliation_done(&mut self, did_work: bool) {
         assert!(self.ds_active.is_empty());
 
+        // Every downstairs that took part in reconciliation has now been
+        // active.
         for (i, c) in self.clients.iter_mut().enumerate() {
             match c.state() {
                 DsState::Connecting {
@@ -2086,6 +2095,7 @@ impl Downstairs {
                 } => {
                     assert!(!did_work);
                     c.set_active();
+                    c.send_you_have_been_active();
                 }
                 DsState::Connecting {
                     state: NegotiationState::Reconcile,
@@ -2093,6 +2103,7 @@ impl Downstairs {
                 } => {
                     assert!(did_work);
                     c.set_active();
+                    c.send_you_have_been_active();
                 }
                 DsState::Connecting { .. } => c.set_connection_mode_faulted(),
                 s => panic!(
@@ -4093,7 +4104,7 @@ pub(crate) mod test {
 
     use bytes::BytesMut;
     use crucible_common::{BlockIndex, BlockOffset, ExtentId};
-    use crucible_protocol::{Message, ReadBlockContext};
+    use crucible_protocol::{Message, MessageVersion, ReadBlockContext};
     use ringbuffer::RingBuffer;
 
     use std::{
@@ -4173,6 +4184,27 @@ pub(crate) mod test {
             &UpstairsState::Active,
             DsStateData::LiveRepair,
         );
+    }
+
+    /// Moves one client through negotiation to `WaitQuorum`
+    fn move_to_wait_quorum(ds: &mut Downstairs, cid: ClientId) {
+        let mode = ConnectionMode::New;
+        let up_state = UpstairsState::GoActive {
+            res: BlockRes::dummy(),
+            min_quorum_deadline: None,
+        };
+        for state in [
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+            NegotiationStateData::WaitQuorum(RegionMetadata::default()),
+        ] {
+            ds.clients[cid].checked_state_transition(
+                &up_state,
+                DsStateData::Connecting { state, mode },
+            );
+        }
     }
 
     fn set_all_reconcile(ds: &mut Downstairs) {
@@ -5570,6 +5602,27 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
+    }
+
+    #[test]
+    fn reconciliation_done_sends_been_active() {
+        // When reconciliation is done, every downstairs that negotiated V14
+        // is told that it has been active.
+        let mut ds = Downstairs::test_default();
+        ds.clients[ClientId::new(0)].set_message_version(MessageVersion::V14);
+        ds.clients[ClientId::new(1)].set_message_version(MessageVersion::V14);
+        ds.clients[ClientId::new(2)].set_message_version(MessageVersion::V13);
+        for cid in ClientId::iter() {
+            move_to_wait_quorum(&mut ds, cid);
+        }
+
+        ds.on_reconciliation_done(false);
+
+        for (cid, expected) in [(0, Some(true)), (1, Some(true)), (2, None)] {
+            let c = &ds.clients[ClientId::new(cid)];
+            assert_eq!(c.state(), DsState::Active);
+            assert_eq!(c.been_active(), expected, "client {cid}");
+        }
     }
 
     #[test]

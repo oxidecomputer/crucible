@@ -124,7 +124,10 @@ pub async fn run_dropshot(
         ClientSpecifiesVersionInHeader::new(
             omicron_common::api::VERSION_HEADER,
             crucible_downstairs_api::latest_version(),
-        ),
+        )
+        // Reject requests for versions older than the oldest one that this
+        // server still supports.
+        .min_version(crucible_downstairs_api::oldest_version()),
     )))
     .build_starter()
     .map_err(|e| anyhow!("Error from HttpServerStarter::new: {:?}", e))?;

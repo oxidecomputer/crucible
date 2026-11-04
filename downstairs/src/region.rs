@@ -5,7 +5,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use futures::TryStreamExt;
 
 use tracing::instrument;
@@ -111,6 +111,16 @@ pub struct Region {
     dirty_extents: HashSet<ExtentId>,
 
     read_only: bool,
+
+    /// Has an upstairs ever told this downstairs that it was active?
+    ///
+    /// Persisted in the region private state file (see [`private_path`]) for
+    /// read-write regions.  Once `true`, this never goes back to `false`.
+    /// This is not updated for a read-only region.  The question does not
+    /// apply for a read-only region, so we never touch the file and an
+    /// upstairs should never ask.
+    been_active: bool,
+
     log: Logger,
 
     /// Thread pool for doing long-running CPU work outside the Tokio runtime
@@ -226,10 +236,19 @@ impl Region {
         if Path::new(&cp).exists() {
             bail!("Config file already exists {:?}", cp);
         }
+        // The same not existing rules apply to the private file as well.
+        let pp = private_path(dir.as_ref());
+        if pp.exists() {
+            bail!("Region private file already exists {pp:?}");
+        }
         mkdir_for_file(&cp)?;
 
         write_json(&cp, &def, false)?;
         info!(log, "Created new region file {:?}", cp);
+
+        // A new region has never been active.
+        write_json(&pp, &RegionPrivateState::new(false), false)?;
+        info!(log, "Created new region private file {pp:?}");
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(WORKER_POOL_SIZE)
@@ -241,6 +260,7 @@ impl Region {
             extents: Vec::new(),
             dirty_extents: HashSet::new(),
             read_only: false,
+            been_active: false,
             log,
             pool,
         };
@@ -248,10 +268,10 @@ impl Region {
         Ok(region)
     }
 
-    /**
-     * Open an existing region file
-     */
-    pub fn open<P: AsRef<Path>>(
+    /// Read region config and validate versions, returning a `Region` with
+    /// every extent in the [`ExtentState::Closed`] state.  Callers must open
+    /// extents separately.
+    fn setup<P: AsRef<Path>>(
         dir: P,
         verbose: bool,
         read_only: bool,
@@ -303,26 +323,125 @@ impl Region {
             );
         }
 
+        let been_active = if read_only {
+            // been_active is not tracked for a read-only region, so leave
+            // the file alone.  The value is never read.
+            false
+        } else {
+            let been_active =
+                Self::read_or_create_private_state(dir.as_ref(), log)?;
+            if verbose {
+                info!(log, "Region been_active: {been_active}");
+            }
+            been_active
+        };
+
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(WORKER_POOL_SIZE)
             .build()?;
 
-        /*
-         * Open every extent that presently exists.
-         */
-        let mut region = Region {
+        let extents = (0..def.extent_count())
+            .map(|_| ExtentState::Closed)
+            .collect();
+
+        Ok(Region {
             dir: dir.as_ref().to_path_buf(),
             def,
-            extents: Vec::new(),
+            extents,
             dirty_extents: HashSet::new(),
             read_only,
+            been_active,
             log: log.clone(),
             pool,
-        };
+        })
+    }
 
+    /// Read the region private state file for a read-write region
+    ///
+    /// If the file does not exist (e.g. the region was created by a
+    /// downstairs that predates this file), we create it and  record that
+    /// the region has not been active.
+    fn read_or_create_private_state(dir: &Path, log: &Logger) -> Result<bool> {
+        let pp = private_path(dir);
+
+        // A private state file that exists but cannot be read or parsed
+        // (including an unknown `version`) is an error and the region will
+        // not open and the downstairs then exits.
+        let state: Option<RegionPrivateState> = read_json_maybe(&pp)
+            .with_context(|| format!("reading region private file {pp:?}"))?;
+
+        match state {
+            Some(state) => Ok(state.been_active()),
+            None => {
+                write_json(&pp, &RegionPrivateState::new(false), false)?;
+                info!(log, "Created missing region private file {pp:?}");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Returns `true` if an upstairs has ever told this downstairs that it
+    /// was active
+    ///
+    /// Returns an error for a read-only region, where the question does not
+    /// apply.
+    pub fn been_active(&self) -> Result<bool> {
+        if self.read_only {
+            bail!("been_active is not tracked for a read-only region");
+        }
+        Ok(self.been_active)
+    }
+
+    /// Record that an upstairs has told this downstairs that it is active
+    ///
+    /// This only ever moves the flag from `false` to `true`.  We call
+    /// been_active() to see if the flag is already set (and return error
+    /// if the region is read-only).
+    pub fn set_been_active(&mut self) -> Result<()> {
+        if self.been_active()? {
+            return Ok(());
+        }
+        let pp = private_path(&self.dir);
+        // Failing to write the private file is an error.  We will then drop
+        // the connection rather than continue.
+        write_json(&pp, &RegionPrivateState::new(true), true)
+            .with_context(|| format!("writing region private file {pp:?}"))?;
+        info!(self.log, "Region has been active, updated {pp:?}");
+        self.been_active = true;
+        Ok(())
+    }
+
+    /**
+     * Open an existing region file
+     */
+    pub fn open<P: AsRef<Path>>(
+        dir: P,
+        verbose: bool,
+        read_only: bool,
+        log: &Logger,
+    ) -> Result<Region> {
+        let mut region = Self::setup(dir, verbose, read_only, log)?;
         region.open_extents()?;
-
         Ok(region)
+    }
+
+    /// Open an existing region read-only, tolerating
+    /// [`CrucibleError::MissingContextSlot`] errors on individual extents.
+    ///
+    /// Returns the opened region along with a Vec of `(ExtentId, error)` for
+    /// any extents that could not be opened.  Those extents are left as
+    /// [`ExtentState::Closed`] in the region; callers must check the error
+    /// Vec before accessing them.
+    ///
+    /// Any error other than `MissingContextSlot` (e.g. missing files, I/O
+    /// errors, version mismatches) is still fatal.
+    pub(crate) fn open_for_dump<P: AsRef<Path>>(
+        dir: P,
+        log: &Logger,
+    ) -> Result<(Region, Vec<(ExtentId, CrucibleError)>)> {
+        let mut region = Self::setup(dir, false, true, log)?;
+        let errors = region.try_open_extents()?;
+        Ok((region, errors))
     }
 
     pub fn encrypted(&self) -> bool {
@@ -347,16 +466,18 @@ impl Region {
         }
     }
 
-    /// If our `extent_count` is higher than the number of populated entries
-    /// we have in our extents Vec, then open all the new extent files and
-    /// load their content into the extent Vec.
+    /// Open every extent file, replacing each [`ExtentState::Closed`] entry
+    /// in the extents Vec with the opened extent.
     ///
     /// Returns an error if extent files are missing.
     fn open_extents(&mut self) -> Result<()> {
-        let next_eid = self.extents.len() as u32;
+        assert_eq!(self.def.extent_count() as usize, self.extents.len());
 
-        let eid_range = next_eid..self.def.extent_count();
-        for eid in eid_range.map(ExtentId) {
+        for eid in (0..self.def.extent_count()).map(ExtentId) {
+            assert!(matches!(
+                self.extents[eid.0 as usize],
+                ExtentState::Closed
+            ));
             let extent = Extent::open(
                 &self.dir,
                 &self.def,
@@ -368,11 +489,51 @@ impl Region {
             if extent.dirty() {
                 self.dirty_extents.insert(eid);
             }
-            self.extents.push(ExtentState::Opened(extent));
+            self.extents[eid.0 as usize] = ExtentState::Opened(extent);
         }
         self.check_extents();
 
         Ok(())
+    }
+
+    /// Like [`open_extents`], but tolerates
+    /// [`CrucibleError::MissingContextSlot`] on individual extents.
+    ///
+    /// Extents that fail with that error are left as [`ExtentState::Closed`]
+    /// and the error is collected into the returned Vec.  Any other error
+    /// causes an immediate failure.
+    fn try_open_extents(&mut self) -> Result<Vec<(ExtentId, CrucibleError)>> {
+        assert_eq!(self.def.extent_count() as usize, self.extents.len());
+        let mut errors: Vec<(ExtentId, CrucibleError)> = Vec::new();
+
+        for eid in (0..self.def.extent_count()).map(ExtentId) {
+            assert!(matches!(
+                self.extents[eid.0 as usize],
+                ExtentState::Closed
+            ));
+            match Extent::open(
+                &self.dir,
+                &self.def,
+                eid,
+                self.read_only,
+                &self.log,
+            ) {
+                Ok(extent) => {
+                    if extent.dirty() {
+                        self.dirty_extents.insert(eid);
+                    }
+                    self.extents[eid.0 as usize] = ExtentState::Opened(extent);
+                }
+                Err(e) => match e.downcast::<CrucibleError>() {
+                    Ok(ce @ CrucibleError::MissingContextSlot { .. }) => {
+                        errors.push((eid, ce));
+                    }
+                    Ok(other) => return Err(other.into()),
+                    Err(e) => return Err(e),
+                },
+            }
+        }
+        Ok(errors)
     }
 
     /// Creates `self.extent_count` extent files and opens them
@@ -1263,7 +1424,8 @@ pub async fn save_stream_to_file(
 pub(crate) mod test {
     use bytes::Bytes;
     use itertools::Itertools;
-    use std::fs::rename;
+    use std::fs::{OpenOptions, rename};
+    use std::io::{Seek, SeekFrom};
     use std::path::PathBuf;
 
     use rand::RngCore;
@@ -1392,6 +1554,171 @@ pub(crate) mod test {
         Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
+    }
+
+    fn read_private_state(dir: &Path) -> RegionPrivateState {
+        read_json(private_path(dir)).unwrap()
+    }
+
+    #[test]
+    fn region_private_file_format() {
+        // The on-disk format is shared with other downstairs versions, so pin
+        // it down exactly in both directions.
+        let v = serde_json::to_value(RegionPrivateState::new(false)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"version": "v1", "been_active": false})
+        );
+
+        let state: RegionPrivateState =
+            serde_json::from_str(r#"{"version": "v1", "been_active": true}"#)
+                .unwrap();
+        assert_eq!(state, RegionPrivateState::new(true));
+    }
+
+    #[test]
+    fn region_create_not_been_active() {
+        let dir = tempdir().unwrap();
+        let region = Region::create(&dir, new_region_options(), csl()).unwrap();
+        assert!(!region.been_active().unwrap());
+        assert_eq!(
+            read_private_state(dir.path()),
+            RegionPrivateState::new(false)
+        );
+    }
+
+    #[test]
+    fn region_create_existing_private_file() {
+        // Creating a region fails if a private file is already present.
+        let dir = tempdir().unwrap();
+        write_json(private_path(&dir), &RegionPrivateState::new(true), false)
+            .unwrap();
+        Region::create(&dir, new_region_options(), csl()).unwrap_err();
+        assert!(!config_path(&dir).exists());
+        assert_eq!(
+            read_private_state(dir.path()),
+            RegionPrivateState::new(true)
+        );
+    }
+
+    #[test]
+    fn region_open_missing_private_file() {
+        // A region created before the private file existed has no such file.
+        // Opening it read-write creates the file with `been_active: false`.
+        let dir = tempdir().unwrap();
+        let log = csl();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(1, Backend::RawFile).unwrap();
+        drop(region);
+
+        std::fs::remove_file(private_path(&dir)).unwrap();
+
+        let region = Region::open(&dir, true, false, &log).unwrap();
+        assert!(!region.been_active().unwrap());
+        assert_eq!(
+            read_private_state(dir.path()),
+            RegionPrivateState::new(false)
+        );
+    }
+
+    #[test]
+    fn region_set_been_active_persists() {
+        let dir = tempdir().unwrap();
+        let log = csl();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(1, Backend::RawFile).unwrap();
+
+        region.set_been_active().unwrap();
+        assert!(region.been_active().unwrap());
+        assert_eq!(
+            read_private_state(dir.path()),
+            RegionPrivateState::new(true)
+        );
+
+        // Setting it again is a no-op
+        region.set_been_active().unwrap();
+        assert!(region.been_active().unwrap());
+        drop(region);
+
+        let region = Region::open(&dir, true, false, &log).unwrap();
+        assert!(region.been_active().unwrap());
+        assert_eq!(
+            read_private_state(dir.path()),
+            RegionPrivateState::new(true)
+        );
+    }
+
+    #[test]
+    fn region_read_only_been_active() {
+        // been_active is not tracked for a read-only region.  Asking or
+        // setting it is an error.
+        let dir = tempdir().unwrap();
+        let log = csl();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(1, Backend::RawFile).unwrap();
+        drop(region);
+
+        // With a `false` file present, the file is left alone
+        let mut region = Region::open(&dir, true, true, &log).unwrap();
+        region.been_active().unwrap_err();
+        region.set_been_active().unwrap_err();
+        drop(region);
+        assert_eq!(
+            read_private_state(dir.path()),
+            RegionPrivateState::new(false)
+        );
+
+        // With no file present, none is created
+        std::fs::remove_file(private_path(&dir)).unwrap();
+        let mut region = Region::open(&dir, true, true, &log).unwrap();
+        region.been_active().unwrap_err();
+        region.set_been_active().unwrap_err();
+        drop(region);
+        assert!(!private_path(&dir).exists());
+
+        // The same holds when we open the region for dump access, it should
+        // not create a file, even if the region is read write.
+        let (region, errors) = Region::open_for_dump(&dir, &log).unwrap();
+        assert!(errors.is_empty());
+        region.been_active().unwrap_err();
+        drop(region);
+        assert!(!private_path(&dir).exists());
+
+        // An unparseable file is ignored by a read-only open
+        std::fs::write(private_path(&dir), "not json").unwrap();
+        let region = Region::open(&dir, true, true, &log).unwrap();
+        region.been_active().unwrap_err();
+    }
+
+    #[test]
+    fn region_open_bad_private_file() {
+        // A read-write open fails if the private file can't be parsed or has
+        // an unknown version.
+        let dir = tempdir().unwrap();
+        let log = csl();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(1, Backend::RawFile).unwrap();
+        drop(region);
+
+        std::fs::write(private_path(&dir), "not json").unwrap();
+        Region::open(&dir, true, false, &log).unwrap_err();
+
+        std::fs::write(
+            private_path(&dir),
+            r#"{"version": "v99", "been_active": true}"#,
+        )
+        .unwrap();
+        Region::open(&dir, true, false, &log).unwrap_err();
+
+        // The bad file is left in place
+        assert_eq!(
+            std::fs::read_to_string(private_path(&dir)).unwrap(),
+            r#"{"version": "v99", "been_active": true}"#,
+        );
     }
 
     fn copy_extent_dir(backend: Backend) {
@@ -2162,6 +2489,145 @@ pub(crate) mod test {
          */
         dump_region(dvec, Some(ExtentId(2)), None, false, false, csl())
             .unwrap();
+    }
+
+    /// Write block 0 of `eid` twice with different data so that both
+    /// context slots (A and B) are populated.  The extent is left dirty
+    /// (no flush), which is required to trigger the recomputation path on
+    /// the next open.
+    fn fill_both_context_slots(region: &mut Region, eid: ExtentId) {
+        for byte in [0x00u8, 0x01u8] {
+            let data = Bytes::from(vec![byte; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let write = RegionWriteReq {
+                extent: eid,
+                write: ExtentWrite {
+                    offset: BlockOffset(0),
+                    data,
+                    block_contexts: vec![BlockContext {
+                        encryption_context: None,
+                        hash,
+                    }],
+                },
+            };
+            region
+                .region_write(&RegionWrite(vec![write]), JobId(0), false)
+                .unwrap();
+        }
+    }
+
+    /// Overwrite block 0 of `eid` on disk with 0xFF bytes so that neither
+    /// stored context slot hash can match the actual block data.
+    fn corrupt_block_zero(dir: &Path, eid: ExtentId) {
+        let path = extent_path(dir, eid);
+        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0xFFu8; 512]).unwrap();
+    }
+
+    /// Create a 3-extent raw region (10 blocks each) where extent 1 has a
+    /// corrupted block 0: both context slots are populated but neither
+    /// matches the on-disk data.  Returns the persisted directory path.
+    fn make_region_with_corrupt_extent() -> PathBuf {
+        let dir = tempdir().unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, Backend::RawFile).unwrap();
+
+        fill_both_context_slots(&mut region, ExtentId(1));
+
+        let dir_path = dir.path().to_path_buf();
+        // Drop without flushing so the dirty flag stays set on disk.
+        drop(region);
+
+        corrupt_block_zero(&dir_path, ExtentId(1));
+
+        // keep() persists the directory past the end of the test.
+        dir.keep()
+    }
+
+    /// open_for_dump succeeds on a region with a corrupted extent, returning
+    /// the extent in the error list and leaving it Closed in the region.
+    #[test]
+    fn open_for_dump_skips_missing_context_slot() {
+        let dir_path = make_region_with_corrupt_extent();
+        let (region, errors) =
+            Region::open_for_dump(&dir_path, &csl()).unwrap();
+
+        assert_eq!(errors.len(), 1);
+        let (eid, err) = &errors[0];
+        assert_eq!(*eid, ExtentId(1));
+        assert!(
+            matches!(err, CrucibleError::MissingContextSlot { .. }),
+            "unexpected error: {err}"
+        );
+
+        assert!(matches!(region.extents[0], ExtentState::Opened(_)));
+        assert!(matches!(region.extents[1], ExtentState::Closed));
+        assert!(matches!(region.extents[2], ExtentState::Opened(_)));
+    }
+
+    /// dump_region with no specific extent succeeds even when one extent is
+    /// corrupted; it prints a warning and skips the bad extent.
+    #[test]
+    fn dump_region_skips_corrupt_extent() {
+        let dir_path = make_region_with_corrupt_extent();
+        dump_region(vec![dir_path], None, None, false, false, csl()).unwrap();
+    }
+
+    /// dump_region fails when the user explicitly requests the corrupted
+    /// extent with -e.
+    #[test]
+    fn dump_region_errors_on_requested_corrupt_extent() {
+        let dir_path = make_region_with_corrupt_extent();
+        let result = dump_region(
+            vec![dir_path],
+            Some(ExtentId(1)),
+            None,
+            false,
+            false,
+            csl(),
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("extent 1 could not be opened"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// dump_region fails when the user requests a block (-b) that falls
+    /// inside the corrupted extent.
+    #[test]
+    fn dump_region_errors_on_block_in_corrupt_extent() {
+        let dir_path = make_region_with_corrupt_extent();
+        // extent_size = 10, so blocks 10-19 belong to extent 1; use block 15.
+        let result =
+            dump_region(vec![dir_path], None, Some(15), false, false, csl());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("extent 1 could not be opened"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// dump_region succeeds when requesting a good extent even though a
+    /// different extent in both regions has a corrupted block.
+    #[test]
+    fn dump_good_extent_with_corrupt_extent_in_region() {
+        let dir1 = make_region_with_corrupt_extent();
+        let dir2 = make_region_with_corrupt_extent();
+
+        // Request extent 2, which is intact in both regions.  The bad
+        // block in extent 1 should produce only a warning.
+        dump_region(
+            vec![dir1, dir2],
+            Some(ExtentId(2)),
+            None,
+            false,
+            false,
+            csl(),
+        )
+        .unwrap();
     }
 
     /// Read block data from raw files on disk
@@ -3117,11 +3583,9 @@ pub(crate) mod test {
         region.extend(10, backend).unwrap();
 
         // Write to extents 0 to 9
-        let mut job_id = 1;
-        for ext in (0..10).map(ExtentId) {
+        for (job_id, ext) in (1..).zip((0..10).map(ExtentId)) {
             let writes = create_generic_write(ext, BlockOffset(5));
             region.region_write(&writes, JobId(job_id), true).unwrap();
-            job_id += 1;
         }
 
         // Verify the dirty bit is now set for all extents.

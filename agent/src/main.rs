@@ -397,8 +397,8 @@ where
         .collect::<HashSet<_>>();
 
     let expected_snapshot_instances: Vec<String> = running_snapshots
-        .iter()
-        .flat_map(|(_, n)| {
+        .values()
+        .flat_map(|n| {
             n.iter()
                 .filter(|(_, rs)| rs.state == RunningSnapshotState::Created)
                 .map(|(_, rs)| {
@@ -636,7 +636,7 @@ where
         inst.enable(false)?;
     }
 
-    for (_, region_snapshots) in running_snapshots.iter_mut() {
+    for region_snapshots in running_snapshots.values_mut() {
         for snapshot in region_snapshots.values_mut() {
             // The agent is not responsible for creating snapshots, only
             // starting a read-only downstairs that points to them. When the
@@ -1329,8 +1329,8 @@ mod test {
         let snapshot_prefix = "snapshot";
 
         let expected_snapshot_instances: Vec<String> = running_snapshots
-            .iter()
-            .flat_map(|(_, n)| {
+            .values()
+            .flat_map(|n| {
                 n.values()
                     .map(|s| {
                         format!("{}-{}-{}", snapshot_prefix, s.id.0, s.name)

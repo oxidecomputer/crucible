@@ -2,7 +2,7 @@
 use std::fmt;
 use std::fs::File;
 use std::hash::Hasher;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, IsTerminal, Read, Write};
 use std::path::Path;
 
 use ErrorKind::NotFound;
@@ -18,7 +18,8 @@ mod region;
 pub use region::{
     Block, BlockIndex, BlockOffset, DATABASE_READ_VERSION,
     DATABASE_WRITE_VERSION, ExtentId, MAX_BLOCK_SIZE, MAX_SHIFT,
-    MIN_BLOCK_SIZE, MIN_SHIFT, RegionDefinition, RegionOptions, config_path,
+    MIN_BLOCK_SIZE, MIN_SHIFT, RegionDefinition, RegionOptions,
+    RegionPrivateState, config_path, private_path,
 };
 
 pub mod impacted_blocks;
@@ -290,15 +291,25 @@ where
     let file = file.as_ref();
     let mut buf = serde_json::to_vec_pretty(data)?;
     buf.push(b'\n');
-    let mut tmpf = NamedTempFile::new_in(file.parent().unwrap())?;
+    // If we have no path, just a name, then use the current directory.
+    let parent = match file.parent().unwrap() {
+        p if p.as_os_str().is_empty() => Path::new("."),
+        p => p,
+    };
+    let mut tmpf = NamedTempFile::new_in(parent)?;
     tmpf.write_all(&buf)?;
     tmpf.flush()?;
+    // Sync the contents before the rename.  Without this a crash could
+    // leave the file renamed into place but empty or partly written.
+    tmpf.as_file().sync_all()?;
 
     if clobber {
         tmpf.persist(file)?;
     } else {
         tmpf.persist_noclobber(file)?;
     }
+    // Make the rename itself durable.
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -381,7 +392,7 @@ pub fn build_logger() -> slog::Logger {
 
 /// Build a logger with the specific log level
 pub fn build_logger_with_level(level: slog::Level) -> slog::Logger {
-    let main_drain = if atty::is(atty::Stream::Stdout) {
+    let main_drain = if std::io::stdout().is_terminal() {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
         slog_async::Async::new(drain)

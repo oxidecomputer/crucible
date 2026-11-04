@@ -12,7 +12,7 @@ use dropshot::RequestContext;
 use dropshot::endpoint;
 use dropshot::{HttpResponseOk, HttpResponseUpdatedNoContent};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::*;
@@ -125,6 +125,11 @@ pub struct Min {
 pub struct Max {
     max: u64,
 }
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DownstairsPid {
+    pid: Option<u32>,
+}
 
 async fn cid_bad(dsci: &DscInfo, cid: usize) -> bool {
     let rs = dsci.rs.lock().await;
@@ -141,7 +146,7 @@ async fn cid_bad(dsci: &DscInfo, cid: usize) -> bool {
 async fn dsc_get_pid(
     rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Cid>,
-) -> Result<HttpResponseOk<Option<u32>>, HttpError> {
+) -> Result<HttpResponseOk<DownstairsPid>, HttpError> {
     let path = path.into_inner();
     let cid = path.cid;
     let api_context = rqctx.context();
@@ -159,7 +164,7 @@ async fn dsc_get_pid(
         )
     })?;
 
-    Ok(HttpResponseOk(ds_pid))
+    Ok(HttpResponseOk(DownstairsPid { pid: ds_pid }))
 }
 
 /**

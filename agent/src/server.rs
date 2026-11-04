@@ -304,7 +304,10 @@ pub async fn run_server(
         ClientSpecifiesVersionInHeader::new(
             omicron_common::api::VERSION_HEADER,
             crucible_agent_api::latest_version(),
-        ),
+        )
+        // Reject requests for versions older than the oldest one that this
+        // server still supports.
+        .min_version(crucible_agent_api::oldest_version()),
     )))
     .build_starter()
     .map_err(|e| anyhow!("creating server: {:?}", e))?

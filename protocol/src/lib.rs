@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 
 use anyhow::bail;
 use bytes::{BufMut, BytesMut};
-use num_enum::IntoPrimitive;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
-use strum_macros::EnumDiscriminants;
+use strum_macros::{EnumDiscriminants, EnumIter};
 use tokio_util::codec::{Decoder, Encoder};
 use uuid::Uuid;
 
@@ -160,8 +160,25 @@ pub struct SnapshotDetails {
  * been introduced in the various Crucible upstairs to downstairs versions.
  */
 #[repr(u32)]
-#[derive(IntoPrimitive)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    IntoPrimitive,
+    TryFromPrimitive,
+)]
 pub enum MessageVersion {
+    /// Add `BeenActivePlease`, `BeenActive`, and `YouHaveBeenActive`
+    ///
+    /// This is the first version where an upstairs and downstairs may each
+    /// support more than one version, so the new variants are appended to the
+    /// end of `Message` and the tags of all V13 messages are unchanged.
+    V14 = 14,
+
     /// Remove `LastFlushAck`
     V13 = 13,
 
@@ -212,28 +229,67 @@ pub enum MessageVersion {
     V1 = 1,
 }
 impl MessageVersion {
+    /// The newest version this build can speak
     pub const fn current() -> Self {
-        Self::V13
+        Self::V14
+    }
+
+    /// Every version this build can speak, newest first
+    ///
+    /// This is [`MessageVersion::current()`] followed by any older versions
+    /// we still support.
+    pub const fn supported() -> &'static [MessageVersion] {
+        const SUPPORTED: &[MessageVersion] =
+            &[MessageVersion::current(), MessageVersion::V13];
+        SUPPORTED
     }
 }
 
-/**
- * Crucible Upstairs Downstairs message protocol version.
- * This, along with the MessageVersion enum above should be updated whenever
- * changes are made to the Message enum below.
- */
+impl std::fmt::Display for MessageVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", u32::from(*self))
+    }
+}
+
+/// Pick the version to use with a peer
+///
+/// `theirs` and `their_alternates` are the versions the peer offered (as in
+/// [`Message::HereIAm`]).  Returns the newest version in `ours` that the peer
+/// also offered, or `None` if there is no version in common.  In the usual
+/// upstairs/downstairs setup, the upstairs sends its supported list to the
+/// downstairs, and the downstairs determines what it can match and responds
+/// with that.
+pub fn negotiate_version(
+    ours: &[MessageVersion],
+    theirs: u32,
+    their_alternates: &[u32],
+) -> Option<MessageVersion> {
+    ours.iter()
+        .copied()
+        .filter(|v| {
+            let v = u32::from(*v);
+            v == theirs || their_alternates.contains(&v)
+        })
+        .max()
+}
+
+/// Crucible Upstairs Downstairs message protocol version.
+/// This is just MessageVersion::current() as a u32.
 pub const CRUCIBLE_MESSAGE_VERSION: u32 = MessageVersion::current() as u32;
 
-/*
- * If you add or change the Message enum, you must also increment the
- * CRUCIBLE_MESSAGE_VERSION.  It's just a few lines above you, why not
- * go do that right now before you forget.
- */
+/// If you add or change the Message enum, you must also add a new
+/// MessageVersion and make it MessageVersion::current().
+/// They're just above you, why not go do that right now before you forget.
+///
+/// bincode encodes each variant by its position in this enum, so new
+/// variants must be added at the end.  Never reorder or remove a variant
+/// while an older protocol version is still supported.  The
+/// `message_wire_tags_are_stable` test checks this.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
     Debug, PartialEq, Clone, Serialize, Deserialize, EnumDiscriminants,
 )]
-#[strum_discriminants(derive(Serialize, Deserialize))]
+#[strum_discriminants(derive(Serialize, Deserialize, EnumIter))]
 pub enum Message {
     /**
      * Initial negotiation messages
@@ -456,9 +512,11 @@ pub enum Message {
         result: Result<(), CrucibleError>,
     },
 
-    /*
-     * Metadata exchange
-     */
+    // Metadata exchange
+    //
+    // `BeenActivePlease` / `BeenActive` (V14) are also part of the
+    // metadata exchange, but are at the end of this enum to keep the wire
+    // tags of older messages unchanged.
     RegionInfoPlease,
     RegionInfo {
         region_def: RegionDefinition,
@@ -555,16 +613,36 @@ pub enum Message {
         error: CrucibleError,
     },
 
-    /*
-     * Misc
-     */
-    Unknown(u32, BytesMut),
+    // Messages added in V14.
+    //
+    // These belong with the negotiation messages above, but are placed here
+    // so that the wire tags of every V13 message are unchanged.  They must
+    // only be sent on a connection that negotiated V14 or later.
+    /// Ask the downstairs if its region has ever been part of an active
+    /// region set.  Sent after `RegionInfo`.
+    BeenActivePlease,
+
+    /// Reply to `BeenActivePlease`.  A region that has no record of being
+    /// active reports `false`.  Any region created before V14 will initially
+    /// report false until the first time it's activated with an upstairs
+    /// that is running V14 or greater, at that point it will start reporting
+    /// that it has been active.
+    BeenActive {
+        been_active: bool,
+    },
+
+    /// Tell the downstairs that it is now part of an active region set, so
+    /// it should record that it has been active.  The downstairs persists
+    /// this and never goes back to `false`.  If it can't, it logs an error,
+    /// drops the connection, and the flag stays `false`.
+    YouHaveBeenActive {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+    },
 }
-/*
- * If you just added or changed the Message enum above, you must also
- * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
- * forget.
- */
+// If you just added or changed the Message enum above, you must also add a
+// new MessageVersion and make it MessageVersion::current().
+// Go do that right now before you forget.  New variants go at the end.
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct WriteHeader {
@@ -638,7 +716,9 @@ impl Message {
             | Message::Barrier { .. }
             | Message::ReadRequest { .. }
             | Message::WriteUnwritten { .. }
-            | Message::Unknown(..) => None,
+            | Message::BeenActivePlease
+            | Message::BeenActive { .. }
+            | Message::YouHaveBeenActive { .. } => None,
 
             Message::ExtentError { error, .. }
             | Message::ErrorReport { error, .. } => Some(error),
@@ -1205,6 +1285,32 @@ mod tests {
     }
 
     #[test]
+    fn rt_been_active_please() -> Result<()> {
+        let input = Message::BeenActivePlease;
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_been_active() -> Result<()> {
+        for been_active in [true, false] {
+            let input = Message::BeenActive { been_active };
+            assert_eq!(input, round_trip(&input)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rt_you_have_been_active() -> Result<()> {
+        let input = Message::YouHaveBeenActive {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+        };
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
     fn correctly_detect_truncated_message() -> Result<()> {
         let mut encoder = CrucibleEncoder::new();
         let mut decoder = CrucibleDecoder::new();
@@ -1245,6 +1351,51 @@ mod tests {
             CRUCIBLE_MESSAGE_VERSION,
             <MessageVersion as Into<u32>>::into(cur)
         );
+    }
+
+    #[test]
+    fn supported_message_versions() {
+        // Verify that the newest version is first, and that the rest of
+        // the versions are listed in descending value.
+        let supported = MessageVersion::supported();
+        assert!(supported.windows(2).all(|w| w[0] > w[1]));
+    }
+
+    #[test]
+    fn message_version_try_from() {
+        // Every supported version converts to its number and back
+        for v in MessageVersion::supported() {
+            assert_eq!(MessageVersion::try_from(u32::from(*v)), Ok(*v));
+        }
+        // Numbers that will never be a version are rejected
+        assert!(MessageVersion::try_from(0).is_err());
+        assert!(MessageVersion::try_from(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn negotiate_message_version() {
+        use MessageVersion::{V12, V13, V14};
+        let both = [V14, V13];
+        let old = [V13];
+
+        // New with new: the newest common version
+        assert_eq!(negotiate_version(&both, 14, &[13]), Some(V14));
+        // New with old, in either direction
+        assert_eq!(negotiate_version(&both, 13, &[]), Some(V13));
+        assert_eq!(negotiate_version(&old, 14, &[13]), Some(V13));
+        // Old with old
+        assert_eq!(negotiate_version(&old, 13, &[]), Some(V13));
+
+        // An alternate newer than the primary still counts
+        assert_eq!(negotiate_version(&both, 13, &[14]), Some(V14));
+        // Unknown versions are ignored
+        assert_eq!(negotiate_version(&both, 99, &[13, 98]), Some(V13));
+
+        // No overlap
+        assert_eq!(negotiate_version(&both, 12, &[]), None);
+        assert_eq!(negotiate_version(&both, 15, &[12, 16]), None);
+        assert_eq!(negotiate_version(&[V12], 13, &[14]), None);
+        assert_eq!(negotiate_version(&[], 13, &[]), None);
     }
 
     #[test]
@@ -1370,6 +1521,390 @@ mod tests {
                 0x56, 0x34, 0, 0 // version
             ]
         );
+    }
+
+    /// The bincode tag that each `Message` variant is encoded with on the wire.
+    ///
+    /// bincode encodes an enum variant as its index in the enum, so these
+    /// values depend only on the order of the variants in the `Message` enum.
+    /// Peers running different (but compatible) protocol versions must agree
+    /// on the tag of every message they can exchange.  This means existing tags
+    /// can never change, new variants are only ever appended to the end of
+    /// `Message`, and no variant is ever removed or reordered while an older
+    /// protocol version is still supported.
+    ///
+    /// If you added a new variant, give it the next tag here.  If an existing
+    /// tag has to change, you are breaking compatibility with every older
+    /// protocol version.  Is that really what you want to do?
+    fn wire_tag(d: MessageDiscriminants) -> u32 {
+        match d {
+            MessageDiscriminants::HereIAm => 0,
+            MessageDiscriminants::YesItsMe => 1,
+            MessageDiscriminants::VersionMismatch => 2,
+            MessageDiscriminants::ReadOnlyMismatch => 3,
+            MessageDiscriminants::EncryptedMismatch => 4,
+            MessageDiscriminants::PromoteToActive => 5,
+            MessageDiscriminants::YouAreNowActive => 6,
+            MessageDiscriminants::YouAreNoLongerActive => 7,
+            MessageDiscriminants::UuidMismatch => 8,
+            MessageDiscriminants::Ruok => 9,
+            MessageDiscriminants::Imok => 10,
+            MessageDiscriminants::ExtentClose => 11,
+            MessageDiscriminants::ExtentReopen => 12,
+            MessageDiscriminants::ExtentFlush => 13,
+            MessageDiscriminants::ExtentRepair => 14,
+            MessageDiscriminants::RepairAckId => 15,
+            MessageDiscriminants::ExtentError => 16,
+            MessageDiscriminants::ExtentLiveClose => 17,
+            MessageDiscriminants::ExtentLiveFlushClose => 18,
+            MessageDiscriminants::ExtentLiveRepair => 19,
+            MessageDiscriminants::ExtentLiveReopen => 20,
+            MessageDiscriminants::ExtentLiveNoOp => 21,
+            MessageDiscriminants::ExtentLiveCloseAck => 22,
+            MessageDiscriminants::ExtentLiveRepairAckId => 23,
+            MessageDiscriminants::ExtentLiveAckId => 24,
+            MessageDiscriminants::RegionInfoPlease => 25,
+            MessageDiscriminants::RegionInfo => 26,
+            MessageDiscriminants::ExtentVersionsPlease => 27,
+            MessageDiscriminants::ExtentVersions => 28,
+            MessageDiscriminants::LastFlush => 29,
+            MessageDiscriminants::Write => 30,
+            MessageDiscriminants::WriteAck => 31,
+            MessageDiscriminants::Flush => 32,
+            MessageDiscriminants::FlushAck => 33,
+            MessageDiscriminants::Barrier => 34,
+            MessageDiscriminants::BarrierAck => 35,
+            MessageDiscriminants::ReadRequest => 36,
+            MessageDiscriminants::ReadResponse => 37,
+            MessageDiscriminants::WriteUnwritten => 38,
+            MessageDiscriminants::WriteUnwrittenAck => 39,
+            MessageDiscriminants::ErrorReport => 40,
+            // Added in V14
+            MessageDiscriminants::BeenActivePlease => 41,
+            MessageDiscriminants::BeenActive => 42,
+            MessageDiscriminants::YouHaveBeenActive => 43,
+        }
+    }
+
+    /// Builds an arbitrary `Message` with the given discriminant
+    fn sample_message(d: MessageDiscriminants) -> Message {
+        let upstairs_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let job_id = JobId(1000);
+        let repair_id = ReconciliationId(5);
+        let extent_id = ExtentId(3);
+        let addr: SocketAddr = "127.0.0.1:123".parse().unwrap();
+        let error = CrucibleError::GenericError("oops".to_string());
+        let write_header = WriteHeader {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies: vec![JobId(999)],
+            start: BlockIndex(7),
+            contexts: vec![BlockContext {
+                hash: 0x1234,
+                encryption_context: None,
+            }],
+        };
+
+        match d {
+            MessageDiscriminants::HereIAm => Message::HereIAm {
+                version: CRUCIBLE_MESSAGE_VERSION,
+                upstairs_id,
+                session_id,
+                generation: 1,
+                read_only: false,
+                encrypted: false,
+                alternate_versions: vec![],
+            },
+            MessageDiscriminants::YesItsMe => Message::YesItsMe {
+                version: CRUCIBLE_MESSAGE_VERSION,
+                repair_addr: addr,
+            },
+            MessageDiscriminants::VersionMismatch => Message::VersionMismatch {
+                version: CRUCIBLE_MESSAGE_VERSION,
+            },
+            MessageDiscriminants::ReadOnlyMismatch => {
+                Message::ReadOnlyMismatch { expected: true }
+            }
+            MessageDiscriminants::EncryptedMismatch => {
+                Message::EncryptedMismatch { expected: true }
+            }
+            MessageDiscriminants::PromoteToActive => Message::PromoteToActive {
+                upstairs_id,
+                session_id,
+                generation: 1,
+            },
+            MessageDiscriminants::YouAreNowActive => Message::YouAreNowActive {
+                upstairs_id,
+                session_id,
+                generation: 1,
+            },
+            MessageDiscriminants::YouAreNoLongerActive => {
+                Message::YouAreNoLongerActive {
+                    new_upstairs_id: upstairs_id,
+                    new_session_id: session_id,
+                    new_gen: 2,
+                }
+            }
+            MessageDiscriminants::UuidMismatch => Message::UuidMismatch {
+                expected_id: upstairs_id,
+            },
+            MessageDiscriminants::Ruok => Message::Ruok,
+            MessageDiscriminants::Imok => Message::Imok,
+            MessageDiscriminants::ExtentClose => Message::ExtentClose {
+                repair_id,
+                extent_id,
+            },
+            MessageDiscriminants::ExtentReopen => Message::ExtentReopen {
+                repair_id,
+                extent_id,
+            },
+            MessageDiscriminants::ExtentFlush => Message::ExtentFlush {
+                repair_id,
+                extent_id,
+                client_id: ClientId::new(0),
+                flush_number: 1,
+                gen_number: 1,
+            },
+            MessageDiscriminants::ExtentRepair => Message::ExtentRepair {
+                repair_id,
+                extent_id,
+                source_client_id: ClientId::new(0),
+                source_repair_address: addr,
+                dest_clients: vec![ClientId::new(1), ClientId::new(2)],
+            },
+            MessageDiscriminants::RepairAckId => {
+                Message::RepairAckId { repair_id }
+            }
+            MessageDiscriminants::ExtentError => Message::ExtentError {
+                repair_id,
+                extent_id,
+                error,
+            },
+            MessageDiscriminants::ExtentLiveClose => Message::ExtentLiveClose {
+                upstairs_id,
+                session_id,
+                job_id,
+                dependencies: vec![],
+                extent_id,
+            },
+            MessageDiscriminants::ExtentLiveFlushClose => {
+                Message::ExtentLiveFlushClose {
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    dependencies: vec![],
+                    extent_id,
+                    flush_number: 1,
+                    gen_number: 1,
+                }
+            }
+            MessageDiscriminants::ExtentLiveRepair => {
+                Message::ExtentLiveRepair {
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    dependencies: vec![],
+                    extent_id,
+                    source_client_id: ClientId::new(0),
+                    source_repair_address: addr,
+                }
+            }
+            MessageDiscriminants::ExtentLiveReopen => {
+                Message::ExtentLiveReopen {
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    dependencies: vec![],
+                    extent_id,
+                }
+            }
+            MessageDiscriminants::ExtentLiveNoOp => Message::ExtentLiveNoOp {
+                upstairs_id,
+                session_id,
+                job_id,
+                dependencies: vec![],
+            },
+            MessageDiscriminants::ExtentLiveCloseAck => {
+                Message::ExtentLiveCloseAck {
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result: Ok((1, 1, false)),
+                }
+            }
+            MessageDiscriminants::ExtentLiveRepairAckId => {
+                Message::ExtentLiveRepairAckId {
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result: Ok(()),
+                }
+            }
+            MessageDiscriminants::ExtentLiveAckId => Message::ExtentLiveAckId {
+                upstairs_id,
+                session_id,
+                job_id,
+                result: Ok(()),
+            },
+            MessageDiscriminants::RegionInfoPlease => Message::RegionInfoPlease,
+            MessageDiscriminants::RegionInfo => Message::RegionInfo {
+                region_def: RegionDefinition::default(),
+            },
+            MessageDiscriminants::ExtentVersionsPlease => {
+                Message::ExtentVersionsPlease
+            }
+            MessageDiscriminants::ExtentVersions => Message::ExtentVersions {
+                gen_numbers: vec![1],
+                flush_numbers: vec![2],
+                dirty_bits: vec![false],
+            },
+            MessageDiscriminants::LastFlush => Message::LastFlush {
+                last_flush_number: Some(job_id),
+            },
+            MessageDiscriminants::Write => Message::Write {
+                header: write_header,
+                data: bytes::Bytes::from(vec![1u8; 512]),
+            },
+            MessageDiscriminants::WriteAck => Message::WriteAck {
+                upstairs_id,
+                session_id,
+                job_id,
+                result: Ok(()),
+            },
+            MessageDiscriminants::Flush => Message::Flush {
+                upstairs_id,
+                session_id,
+                job_id,
+                dependencies: vec![],
+                flush_number: 1,
+                gen_number: 1,
+                snapshot_details: None,
+                extent_limit: None,
+            },
+            MessageDiscriminants::FlushAck => Message::FlushAck {
+                upstairs_id,
+                session_id,
+                job_id,
+                result: Ok(()),
+            },
+            MessageDiscriminants::Barrier => Message::Barrier {
+                upstairs_id,
+                session_id,
+                job_id,
+                dependencies: vec![],
+            },
+            MessageDiscriminants::BarrierAck => Message::BarrierAck {
+                upstairs_id,
+                session_id,
+                job_id,
+                result: Ok(()),
+            },
+            MessageDiscriminants::ReadRequest => Message::ReadRequest {
+                upstairs_id,
+                session_id,
+                job_id,
+                dependencies: vec![],
+                start: BlockIndex(7),
+                count: 1,
+            },
+            MessageDiscriminants::ReadResponse => Message::ReadResponse {
+                header: ReadResponseHeader {
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    blocks: Ok(vec![ReadBlockContext::Unencrypted {
+                        hash: 0x1234,
+                    }]),
+                },
+                data: BytesMut::from(&[2u8; 512][..]),
+            },
+            MessageDiscriminants::WriteUnwritten => Message::WriteUnwritten {
+                header: write_header,
+                data: bytes::Bytes::from(vec![3u8; 512]),
+            },
+            MessageDiscriminants::WriteUnwrittenAck => {
+                Message::WriteUnwrittenAck {
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result: Ok(()),
+                }
+            }
+            MessageDiscriminants::ErrorReport => Message::ErrorReport {
+                upstairs_id,
+                session_id,
+                job_id,
+                error,
+            },
+            MessageDiscriminants::BeenActivePlease => Message::BeenActivePlease,
+            MessageDiscriminants::BeenActive => {
+                Message::BeenActive { been_active: true }
+            }
+            MessageDiscriminants::YouHaveBeenActive => {
+                Message::YouHaveBeenActive {
+                    upstairs_id,
+                    session_id,
+                }
+            }
+        }
+    }
+
+    /// Test that the wire tag of every `Message` variant is stable
+    ///
+    /// Both the serde encoding of a `Message` and the `MessageDiscriminants`
+    /// that `MessageWriter::send_raw` puts on the wire must use the tag from
+    /// `wire_tag`.  See the comment on `wire_tag` for why these must never
+    /// change.
+    #[test]
+    fn message_wire_tags_are_stable() {
+        use strum::IntoEnumIterator;
+
+        for d in MessageDiscriminants::iter() {
+            let m = sample_message(d);
+            assert_eq!(MessageDiscriminants::from(&m), d);
+
+            let expected = wire_tag(d).to_le_bytes();
+
+            let encoded = bincode::serialize(&m).unwrap();
+            assert_eq!(
+                encoded[0..4],
+                expected,
+                "Message::{d:?} is encoded with the wrong tag"
+            );
+
+            let encoded = bincode::serialize(&d).unwrap();
+            assert_eq!(
+                encoded, expected,
+                "MessageDiscriminants::{d:?} is encoded with the wrong tag"
+            );
+        }
+    }
+
+    /// Test that every `Message` variant is framed by `CrucibleEncoder` with
+    /// the expected tag (after the 4-byte length), and that `CrucibleDecoder`
+    /// turns that same frame back into the original message.
+    #[test]
+    fn message_frame_tags_are_stable() -> Result<()> {
+        use strum::IntoEnumIterator;
+
+        for d in MessageDiscriminants::iter() {
+            let m = sample_message(d);
+
+            let mut buf = BytesMut::new();
+            CrucibleEncoder::new().encode(&m, &mut buf)?;
+            assert_eq!(
+                buf[4..8],
+                wire_tag(d).to_le_bytes(),
+                "Message::{d:?} is framed with the wrong tag"
+            );
+
+            let decoded = CrucibleDecoder::new().decode(&mut buf)?;
+            assert_eq!(Some(m), decoded, "Message::{d:?} decoded wrong");
+            assert!(buf.is_empty(), "Message::{d:?} left trailing bytes");
+        }
+        Ok(())
     }
 
     #[test]

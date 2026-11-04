@@ -867,10 +867,10 @@ impl BlockIO for VolumeInner {
             }
         }
 
-        if let Some(read_only_parent) = &self.read_only_parent {
-            if !read_only_parent.query_is_active().await? {
-                return Ok(false);
-            }
+        if let Some(read_only_parent) = &self.read_only_parent
+            && !read_only_parent.query_is_active().await?
+        {
+            return Ok(false);
         }
 
         Ok(true)

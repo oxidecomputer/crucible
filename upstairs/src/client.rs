@@ -9,7 +9,7 @@ use crate::{
 };
 use crucible_common::{NegotiationError, VerboseTimeout, x509::TLSContext};
 use crucible_protocol::{
-    CRUCIBLE_MESSAGE_VERSION, MessageWriter, ReconciliationId,
+    CRUCIBLE_MESSAGE_VERSION, MessageVersion, MessageWriter, ReconciliationId,
 };
 use strum::IntoDiscriminant;
 
@@ -157,6 +157,20 @@ pub(crate) struct DownstairsClient {
     /// [`Downstairs::next_flush`], which is a flush index).
     last_flush: Option<JobId>,
 
+    /// Message version negotiated with this downstairs
+    ///
+    /// This is set by `Message::YesItsMe` and cleared on reconnect.
+    message_version: Option<MessageVersion>,
+
+    /// Whether this downstairs reports that its region has been active
+    ///
+    /// This is `None` if we haven't asked the downstairs.  We only ask when
+    /// the negotiated version is V14 or newer and we are read-write.
+    /// If been_active is `None` or `false`, we will set it to `true` when we
+    /// tell this downstairs it has been active.
+    /// It's cleared on reconnect.
+    been_active: Option<bool>,
+
     /// Jobs that have been skipped
     pub(crate) skipped_jobs: BTreeSet<JobId>,
 
@@ -212,6 +226,8 @@ impl DownstairsClient {
                 state: NegotiationStateData::WaitConnect(client_connect_tx),
             },
             last_flush: None,
+            message_version: None,
+            been_active: None,
             stats: DownstairsStats::default(),
             skipped_jobs: BTreeSet::new(),
             repair_info: None,
@@ -248,15 +264,23 @@ impl DownstairsClient {
     }
 
     /// Send a `Message::HereIAm` via the client IO task
+    ///
+    /// We offer our newest version, with every older version we still
+    /// support as an alternate; the downstairs picks one of them.
     pub(crate) fn send_here_i_am(&mut self) {
+        let (newest, older) = self
+            .cfg
+            .message_versions
+            .split_first()
+            .expect("at least one supported message version");
         self.send(Message::HereIAm {
-            version: CRUCIBLE_MESSAGE_VERSION,
+            version: u32::from(*newest),
             upstairs_id: self.cfg.upstairs_id,
             session_id: self.cfg.session_id,
             generation: self.cfg.generation(),
             read_only: self.cfg.read_only,
             encrypted: self.cfg.encrypted(),
-            alternate_versions: vec![],
+            alternate_versions: older.iter().map(|v| u32::from(*v)).collect(),
         });
     }
 
@@ -521,6 +545,10 @@ impl DownstairsClient {
         // cases.
         self.repair_addr = None;
 
+        // Each connection negotiates its own version and been_active.
+        self.message_version = None;
+        self.been_active = None;
+
         // If the upstairs is already active (or trying to go active), then we
         // should automatically connect to the Downstairs.
         let auto_connect = match up_state {
@@ -724,21 +752,21 @@ impl DownstairsClient {
 
     /// Indicate that the upstairs has requested that we go active
     pub(crate) fn set_active_request(&mut self) {
-        if let DsStateData::Connecting { state, .. } = &mut self.state {
-            if matches!(state, NegotiationStateData::WaitConnect(..)) {
-                info!(self.log, "sending connect oneshot to client");
-                let mut s = NegotiationStateData::Start;
-                std::mem::swap(state, &mut s);
-                let NegotiationStateData::WaitConnect(t) = s else {
-                    unreachable!();
-                };
-                if let Err(e) = t.send(()) {
-                    error!(
-                        self.log,
-                        "failed to set client as active {e:?};
+        if let DsStateData::Connecting { state, .. } = &mut self.state
+            && matches!(state, NegotiationStateData::WaitConnect(..))
+        {
+            info!(self.log, "sending connect oneshot to client");
+            let mut s = NegotiationStateData::Start;
+            std::mem::swap(state, &mut s);
+            let NegotiationStateData::WaitConnect(t) = s else {
+                unreachable!();
+            };
+            if let Err(e) = t.send(()) {
+                error!(
+                    self.log,
+                    "failed to set client as active {e:?};
                          are we shutting down?"
-                    );
-                }
+                );
             }
         }
     }
@@ -970,7 +998,8 @@ impl DownstairsClient {
                 matches!(
                     (state, mode),
                     (
-                        NegotiationStateData::WaitForRegionInfo,
+                        NegotiationStateData::WaitForRegionInfo
+                            | NegotiationStateData::WaitForBeenActive,
                         ConnectionMode::Offline
                     ) | (NegotiationStateData::Reconcile, ConnectionMode::New)
                         | (
@@ -1049,6 +1078,22 @@ impl DownstairsClient {
                         NegotiationStateData::Start
                             | NegotiationStateData::WaitConnect(..)
                     )
+                ) || (
+                    // If all three downstairs needed live-repair while the
+                    // upstairs was active, we fall back to reconciliation.
+                    // If that reconciliation fails, the client must come back
+                    // and try reconciliation again.
+                    matches!(up_state, UpstairsState::Active)
+                        && matches!(
+                            (r, mode, state),
+                            (
+                                R::NegotiationFailed(
+                                    ClientNegotiationFailed::FailedReconcile
+                                ),
+                                ConnectionMode::Faulted,
+                                NegotiationStateData::Start
+                            )
+                        )
                 )
             }
 
@@ -1121,15 +1166,12 @@ impl DownstairsClient {
                     IOop::Read { .. } => {
                         assert!(!read_data.blocks.is_empty());
                         assert!(extent_info.is_none());
-                        if job.data.is_none() {
-                            job.data = Some(read_data);
-                        } else {
+                        if let Some(job_data) = &job.data {
                             // If another job has finished already, we compare
                             // our read hash to that and verify they are the
                             // same.
                             debug!(self.log, "Read already AckReady {ds_id}");
-                            let job_blocks = &job.data.as_ref().unwrap().blocks;
-                            if job_blocks != &read_data.blocks {
+                            if job_data.blocks != read_data.blocks {
                                 // XXX This error needs to go to Nexus
                                 // XXX This will become the "force all
                                 // downstairs to stop and refuse to restart"
@@ -1142,7 +1184,7 @@ impl DownstairsClient {
                                     self.cfg.session_id,
                                     self.client_id,
                                     ds_id,
-                                    job_blocks,
+                                    job_data.blocks,
                                     read_data.blocks,
                                     job,
                                 );
@@ -1152,6 +1194,8 @@ impl DownstairsClient {
                                     panic!("{msg}");
                                 }
                             }
+                        } else {
+                            job.data = Some(read_data);
                         }
                     }
                     IOop::Write { .. }
@@ -1313,18 +1357,24 @@ impl DownstairsClient {
                     error!(self.log, "got version already");
                     return Err(NegotiationError::OutOfOrder);
                 };
-                if version != CRUCIBLE_MESSAGE_VERSION {
+                // The downstairs must pick one of the versions we offered
+                let supported = self.cfg.message_versions;
+                let Some(negotiated_version) =
+                    MessageVersion::try_from(version)
+                        .ok()
+                        .filter(|v| supported.contains(v))
+                else {
                     error!(
                         self.log,
-                        "expected version {}, got {}",
-                        CRUCIBLE_MESSAGE_VERSION,
-                        version
+                        "expected one of versions {supported:?}, got {version}",
                     );
                     return Err(NegotiationError::IncompatibleVersion {
                         expected: CRUCIBLE_MESSAGE_VERSION,
                         actual: version,
                     });
-                }
+                };
+                info!(self.log, "negotiated version {negotiated_version}");
+                self.message_version = Some(negotiated_version);
                 self.repair_addr = Some(repair_addr);
                 *state = NegotiationStateData::WaitForPromote;
                 self.send(Message::PromoteToActive {
@@ -1337,8 +1387,8 @@ impl DownstairsClient {
             Message::VersionMismatch { version } => {
                 error!(
                     self.log,
-                    "downstairs version is {version}, \
-                     ours is {CRUCIBLE_MESSAGE_VERSION}"
+                    "downstairs version is {version}, ours are {:?}",
+                    self.cfg.message_versions,
                 );
                 Err(NegotiationError::IncompatibleVersion {
                     expected: CRUCIBLE_MESSAGE_VERSION,
@@ -1528,64 +1578,44 @@ impl DownstairsClient {
                  * values, the first downstairs to connect sets the expected
                  * values for the other two.
                  */
-                if let Some(prev_def) = ddef.get_def() {
-                    if prev_def.block_size() != region_def.block_size()
+                if let Some(prev_def) = ddef.get_def()
+                    && (prev_def.block_size() != region_def.block_size()
                         || prev_def.extent_size().value
                             != region_def.extent_size().value
                         || prev_def.extent_size().block_size_in_bytes()
                             != region_def.extent_size().block_size_in_bytes()
-                        || prev_def.extent_count() != region_def.extent_count()
-                    {
-                        // TODO(#558) Figure out if we can handle this error.
-                        // Possibly not.
-                        panic!(
-                            "{} [{}] New downstairs region info mismatch: \
+                        || prev_def.extent_count() != region_def.extent_count())
+                {
+                    // TODO(#558) Figure out if we can handle this error.
+                    // Possibly not.
+                    panic!(
+                        "{} [{}] New downstairs region info mismatch: \
                                  {:?} vs. {:?}",
-                            self.cfg.session_id,
-                            self.client_id,
-                            ddef,
-                            region_def
-                        );
-                    }
+                        self.cfg.session_id, self.client_id, ddef, region_def
+                    );
                 }
 
                 *ddef = RegionDefinitionStatus::Received(region_def);
 
-                // Match on the current state of this downstairs
-                match mode {
-                    ConnectionMode::Offline => {
-                        /*
-                         * If we are coming from state Offline, then it means
-                         * the downstairs has departed then came back in short
-                         * enough time that it does not have to go into full
-                         * recovery/repair mode. If we have verified that the
-                         * UUID and region info is the same, we can reconnect
-                         * and let any outstanding work be replayed to catch us
-                         * up.  We do need to tell the downstairs the last flush
-                         * ID it had ACKd to us.
-                         */
-                        let lf = self.last_flush;
-                        info!(
-                            self.log,
-                            "send last flush ID to this DS: {:?}", lf
-                        );
-                        self.send(Message::LastFlush {
-                            last_flush_number: lf,
-                        });
-                        self.set_active();
-                        Ok(NegotiationResult::Replay)
-                    }
-                    ConnectionMode::New
-                    | ConnectionMode::Faulted
-                    | ConnectionMode::Replaced => {
-                        /*
-                         * Ask for the current version of all extents.
-                         */
-                        *state = NegotiationStateData::GetExtentVersions;
-                        self.send(Message::ExtentVersionsPlease);
-                        Ok(NegotiationResult::NotDone)
-                    }
+                // On V14, the next step in negotiation for a read-write upstairs
+                // is to ask if this region has been active.
+                if self.message_version >= Some(MessageVersion::V14)
+                    && !self.cfg.read_only
+                {
+                    *state = NegotiationStateData::WaitForBeenActive;
+                    self.send(Message::BeenActivePlease);
+                    return Ok(NegotiationResult::NotDone);
                 }
+                Ok(self.negotiate_by_mode(mode))
+            }
+            Message::BeenActive { been_active } => {
+                if !matches!(state, NegotiationStateData::WaitForBeenActive) {
+                    error!(self.log, "Received BeenActive out of order!");
+                    return Err(NegotiationError::OutOfOrder);
+                }
+                info!(self.log, "downstairs been_active: {been_active}");
+                self.been_active = Some(been_active);
+                Ok(self.negotiate_by_mode(mode))
             }
             Message::ExtentVersions {
                 gen_numbers,
@@ -1641,6 +1671,53 @@ impl DownstairsClient {
                 "{} [{}] invalid message in continue_negotiation: {m:?}",
                 self.cfg.session_id, self.client_id
             ),
+        }
+    }
+
+    /// Figure out and send the next negotiation message after `RegionInfo`
+    /// (and possibly `BeenActive`, if we asked for it)
+    ///
+    /// The next step depends on the current connection mode.
+    ///
+    /// # Panics
+    /// If the state is not `DsStateData::Connecting`
+    fn negotiate_by_mode(&mut self, mode: ConnectionMode) -> NegotiationResult {
+        // Match on the current state of this downstairs
+        match mode {
+            ConnectionMode::Offline => {
+                // If we are coming from state Offline, then it means
+                // the downstairs has departed then came back in short
+                // enough time that it does not have to go into full
+                // recovery/repair mode. If we have verified that the
+                // UUID and region info is the same, we can reconnect
+                // and let any outstanding work be replayed to catch us
+                // up.  We do need to tell the downstairs the last flush
+                // ID it had ACKd to us.
+                let lf = self.last_flush;
+                info!(self.log, "send last flush ID to this DS: {:?}", lf);
+                self.send(Message::LastFlush {
+                    last_flush_number: lf,
+                });
+                self.set_active();
+                // This downstairs was already active in this session.  Tell
+                // it again, in case it didn't record that before it left.
+                self.send_you_have_been_active();
+                NegotiationResult::Replay
+            }
+            ConnectionMode::New
+            | ConnectionMode::Faulted
+            | ConnectionMode::Replaced => {
+                /*
+                 * Ask for the current version of all extents.
+                 */
+                let DsStateData::Connecting { state, .. } = &mut self.state
+                else {
+                    unreachable!("checked by our caller");
+                };
+                *state = NegotiationStateData::GetExtentVersions;
+                self.send(Message::ExtentVersionsPlease);
+                NegotiationResult::NotDone
+            }
         }
     }
 
@@ -1795,6 +1872,36 @@ impl DownstairsClient {
     pub(crate) fn repair_addr(&self) -> Option<SocketAddr> {
         self.repair_addr
     }
+
+    // Nothing outside of tests uses this yet
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn been_active(&self) -> Option<bool> {
+        self.been_active
+    }
+
+    /// Tells the downstairs that its region has been active
+    ///
+    /// We only send this when the negotiated version is V14 or newer and we
+    /// are read-write.  Otherwise, this does nothing.
+    pub(crate) fn send_you_have_been_active(&mut self) {
+        if self.message_version < Some(MessageVersion::V14)
+            || self.cfg.read_only
+        {
+            return;
+        }
+        info!(self.log, "sending YouHaveBeenActive");
+        self.send(Message::YouHaveBeenActive {
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+        });
+        self.been_active = Some(true);
+    }
+
+    /// Sets the negotiated message version without negotiating
+    #[cfg(test)]
+    pub(crate) fn set_message_version(&mut self, version: MessageVersion) {
+        self.message_version = Some(version);
+    }
 }
 
 /// Tracks client negotiation progress
@@ -1814,12 +1921,17 @@ impl DownstairsClient {
 ///                  │
 ///         ┌────────▼──────────┐
 ///         │ WaitForRegionInfo │
+///         └────────┬──────────┘
+///                  │
+///         ┌────────▼──────────┐
+///         │ WaitForBeenActive │
 ///         └──┬──────────────┬─┘
 ///    Offline │              │ New / Faulted / Replaced
 ///   (replay) │         ┌────▼────────────┐
 ///            │         │GetExtentVersions│
 ///            │         └─┬─────────────┬─┘
-///            │           │ New         │ Faulted / Replaced
+///            │     New / │             │ Faulted / Replaced
+///            │ Replaced* │             │
 ///            │    ┌──────▼───┐    ┌────▼──────────┐
 ///            │    │WaitQuorum│    │LiveRepairReady│
 ///            │    └────┬─────┘    └─┬──┬──────────┘
@@ -1832,6 +1944,13 @@ impl DownstairsClient {
 ///            └─────► Done ◄────────────┘
 ///                  └──────┘
 /// ```
+///
+/// `WaitForBeenActive` is only used when the negotiated version is V14 or
+/// newer and we are read-write; otherwise, `WaitForRegionInfo` goes directly
+/// to the next state.
+///
+/// \* A `Replaced` downstairs goes to `WaitQuorum` if the upstairs is still
+/// going active (`Initializing` or `GoActive`).
 ///
 /// `Done` isn't actually present in the state machine; it's indicated by
 /// returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].
@@ -1858,6 +1977,13 @@ pub enum NegotiationStateData {
 
     /// Waiting to hear `RegionInfo` from the client
     WaitForRegionInfo,
+
+    /// Waiting to hear `BeenActive` from the client
+    ///
+    /// This is only used for read-write regions.
+    //
+    // It is also only used when the negotiated version is V14 or newer.
+    WaitForBeenActive,
 
     /// Waiting to hear `ExtentVersions` from the client
     GetExtentVersions,
@@ -1896,6 +2022,11 @@ impl NegotiationStateData {
                 _
             ) | (
                 NegotiationStateData::WaitForRegionInfo,
+                NegotiationStateData::WaitForBeenActive,
+                _
+            ) | (
+                NegotiationStateData::WaitForRegionInfo
+                    | NegotiationStateData::WaitForBeenActive,
                 NegotiationStateData::GetExtentVersions,
                 ConnectionMode::New | ConnectionMode::Faulted,
             ) | (
@@ -1960,6 +2091,233 @@ mod test {
     use super::*;
     use slog::Discard;
 
+    fn test_client() -> DownstairsClient {
+        test_client_with(false, MessageVersion::supported())
+    }
+
+    fn test_client_with(
+        read_only: bool,
+        message_versions: &'static [MessageVersion],
+    ) -> DownstairsClient {
+        DownstairsClient::new(
+            ClientId::new(0),
+            Arc::new(UpstairsConfig {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                generation: AtomicU64::new(1),
+                read_only,
+                encryption_context: None,
+                message_versions,
+            }),
+            None,
+            ClientIOLimits::new(100, 1024 * 1024),
+            Logger::root(Discard, o!()),
+            None,
+        )
+    }
+
+    /// Send `YesItsMe` with the given version to a client that is waiting
+    /// for it, returning the result of negotiation
+    fn yes_its_me(version: u32) -> Result<NegotiationResult, NegotiationError> {
+        let mut client = test_client();
+        client.set_active_request();
+        let mut ddef = RegionDefinitionStatus::WaitingForDownstairs;
+        client.continue_negotiation(
+            Message::YesItsMe {
+                version,
+                repair_addr: "127.0.0.1:1234".parse().unwrap(),
+            },
+            &UpstairsState::Initializing,
+            &mut ddef,
+        )
+    }
+
+    #[test]
+    fn test_yes_its_me_supported_versions() {
+        // Verify every supported version we offer is accepted
+        for v in MessageVersion::supported() {
+            assert!(matches!(
+                yes_its_me(u32::from(*v)),
+                Ok(NegotiationResult::NotDone)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_yes_its_me_unsupported_versions() {
+        // Versions we don't offer are rejected, including known versions
+        // that are older or newer than our supported set.
+        let supported = MessageVersion::supported();
+        let newest = u32::from(supported[0]);
+        let oldest = u32::from(supported[supported.len() - 1]);
+        for v in [0, oldest - 1, newest + 1, u32::MAX] {
+            assert!(
+                matches!(
+                    yes_its_me(v),
+                    Err(NegotiationError::IncompatibleVersion { actual, .. })
+                        if actual == v
+                ),
+                "version {v} should be rejected"
+            );
+        }
+    }
+
+    /// Message versions for a client that can negotiate V14
+    const V14_V13: &[MessageVersion] =
+        &[MessageVersion::V14, MessageVersion::V13];
+
+    /// Steps a new client to `WaitForRegionInfo` with the given mode and
+    /// negotiated version, then sends it `RegionInfo`
+    ///
+    /// Returns the result of sending `RegionInfo`
+    fn send_region_info(
+        client: &mut DownstairsClient,
+        mode: ConnectionMode,
+        version: MessageVersion,
+    ) -> Result<NegotiationResult, NegotiationError> {
+        let up_state = UpstairsState::Initializing;
+        for state in [
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+        ] {
+            client.checked_state_transition(
+                &up_state,
+                DsStateData::Connecting { state, mode },
+            );
+        }
+        client.message_version = Some(version);
+        let mut ddef = RegionDefinitionStatus::WaitingForDownstairs;
+        client.continue_negotiation(
+            Message::RegionInfo {
+                region_def: crate::RegionDefinition::default(),
+            },
+            &up_state,
+            &mut ddef,
+        )
+    }
+
+    /// Sends `BeenActive` to the client, returning the result of negotiation
+    fn send_been_active(
+        client: &mut DownstairsClient,
+        been_active: bool,
+    ) -> Result<NegotiationResult, NegotiationError> {
+        let mut ddef = RegionDefinitionStatus::WaitingForDownstairs;
+        client.continue_negotiation(
+            Message::BeenActive { been_active },
+            &UpstairsState::Initializing,
+            &mut ddef,
+        )
+    }
+
+    #[test]
+    fn test_been_active_asked() {
+        // On V14, a read-write upstairs asks for BeenActive after
+        // RegionInfo.  For each connection mode, we pretend to be a
+        // downstairs that answers `false` (never been active) or `true`.
+        //
+        // ConnectionMode::New: the upstairs stores the answer as is, then
+        // moves on to GetExtentVersions.
+        //
+        // ConnectionMode::Offline: the downstairs was already active in
+        // this session, so the upstairs goes straight to Active and sends
+        // YouHaveBeenActive.  That sets the stored value to `true`,
+        // whatever the answer was.  The `false` case is a downstairs that
+        // didn't record being active before it disconnected, and this is
+        // how it gets told again.
+        //
+        // The test client can't see sent messages, so the stored value is
+        // how we check that YouHaveBeenActive was sent.
+        for (mode, answer) in [
+            (ConnectionMode::New, false),
+            (ConnectionMode::New, true),
+            (ConnectionMode::Offline, false),
+            (ConnectionMode::Offline, true),
+        ] {
+            let mut client = test_client_with(false, V14_V13);
+            let r = send_region_info(&mut client, mode, MessageVersion::V14);
+            assert!(matches!(r, Ok(NegotiationResult::NotDone)));
+            assert_eq!(
+                client.state(),
+                DsState::Connecting {
+                    state: NegotiationState::WaitForBeenActive,
+                    mode,
+                }
+            );
+            assert_eq!(client.been_active(), None);
+
+            let r = send_been_active(&mut client, answer);
+            match mode {
+                ConnectionMode::New => {
+                    assert_eq!(client.been_active(), Some(answer));
+                    assert!(matches!(r, Ok(NegotiationResult::NotDone)));
+                    assert_eq!(
+                        client.state(),
+                        DsState::Connecting {
+                            state: NegotiationState::GetExtentVersions,
+                            mode,
+                        }
+                    );
+                }
+                ConnectionMode::Offline => {
+                    assert_eq!(client.been_active(), Some(true));
+                    assert!(matches!(r, Ok(NegotiationResult::Replay)));
+                    assert_eq!(client.state(), DsState::Active);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_been_active_not_asked() {
+        // The upstairs doesn't ask, and goes from RegionInfo straight to
+        // GetExtentVersions as before, when:
+        // - the downstairs picked V13
+        // - the upstairs is read-only, even on V14
+        // A BeenActive that we didn't ask for is out of order.
+        for (read_only, version) in
+            [(false, MessageVersion::V13), (true, MessageVersion::V14)]
+        {
+            let mut client = test_client_with(read_only, V14_V13);
+            let r = send_region_info(&mut client, ConnectionMode::New, version);
+            assert!(matches!(r, Ok(NegotiationResult::NotDone)));
+            assert_eq!(
+                client.state(),
+                DsState::Connecting {
+                    state: NegotiationState::GetExtentVersions,
+                    mode: ConnectionMode::New,
+                },
+                "read_only {read_only}, version {version}"
+            );
+            assert!(matches!(
+                send_been_active(&mut client, true),
+                Err(NegotiationError::OutOfOrder)
+            ));
+            assert_eq!(client.been_active(), None);
+        }
+    }
+
+    #[test]
+    fn test_send_you_have_been_active() {
+        // We only tell a downstairs it has been active on V14 when we are
+        // read-write.  Telling it also records that it has been active.
+        for (read_only, version, expected) in [
+            (false, MessageVersion::V14, Some(true)),
+            (false, MessageVersion::V13, None),
+            (true, MessageVersion::V14, None),
+        ] {
+            let mut client = test_client_with(read_only, V14_V13);
+            client.set_message_version(version);
+            client.send_you_have_been_active();
+            assert_eq!(
+                client.been_active(),
+                expected,
+                "read_only {read_only}, version {version}"
+            );
+        }
+    }
+
     #[test]
     fn test_set_active_request_while_replacing() {
         let mut client = DownstairsClient::new(
@@ -1970,6 +2328,7 @@ mod test {
                 generation: AtomicU64::new(1),
                 read_only: false,
                 encryption_context: None,
+                message_versions: MessageVersion::supported(),
             }),
             None,
             ClientIOLimits::new(100, 1024 * 1024),

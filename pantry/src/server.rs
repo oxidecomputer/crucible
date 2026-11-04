@@ -275,7 +275,10 @@ pub fn run_server(
         ClientSpecifiesVersionInHeader::new(
             omicron_common::api::VERSION_HEADER,
             crucible_pantry_api::latest_version(),
-        ),
+        )
+        // Reject requests for versions older than the oldest one that this
+        // server still supports.
+        .min_version(crucible_pantry_api::oldest_version()),
     )))
     .build_starter()
     .map_err(|e| anyhow!("creating server: {:?}", e))?

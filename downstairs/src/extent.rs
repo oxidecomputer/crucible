@@ -908,7 +908,7 @@ pub(crate) fn check_input(
     /*
      * Only accept block-aligned operations
      */
-    if data_len % block_size as usize != 0 {
+    if !data_len.is_multiple_of(block_size as usize) {
         crucible_bail!(DataLenUnaligned);
     }
 
