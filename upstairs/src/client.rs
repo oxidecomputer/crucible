@@ -1529,12 +1529,13 @@ impl DownstairsClient {
                             );
                         } else {
                             // If we are not yet active (and, as such, we have
-                            // not finished reconciliation), we cannot
-                            // replace a downstairs here.
+                            // not finished reconciliation), we can replace a
+                            // downstairs here.
                             match up_state {
                                 UpstairsState::Initializing
                                 | UpstairsState::GoActive { .. } => {
-                                    panic!(
+                                    warn!(
+                                        self.log,
                                         "Replace {} with {} before active",
                                         uuid,
                                         region_def.uuid(),
@@ -1641,9 +1642,9 @@ impl DownstairsClient {
                         *state = NegotiationStateData::WaitQuorum(dsr);
                         NegotiationResult::WaitQuorum
                     }
-                    // We don't support replacement before we have completed
-                    // reconciliation.  If we find the downstairs is in
-                    // this state, then something has gone wrong.
+                    // Special case: if a downstairs is replaced while we're
+                    // still trying to go active, then we use the WaitQuorum
+                    // path instead of LiveRepair.
                     ConnectionMode::Replaced
                         if matches!(
                             up_state,
@@ -1651,7 +1652,8 @@ impl DownstairsClient {
                                 | UpstairsState::GoActive { .. }
                         ) =>
                     {
-                        panic!("Can't replace if not active, {:?}", up_state);
+                        *state = NegotiationStateData::WaitQuorum(dsr);
+                        NegotiationResult::WaitQuorum
                     }
 
                     ConnectionMode::Faulted | ConnectionMode::Replaced => {
@@ -2033,7 +2035,9 @@ impl NegotiationStateData {
                 NegotiationStateData::WaitForRegionInfo
                     | NegotiationStateData::WaitForBeenActive,
                 NegotiationStateData::GetExtentVersions,
-                ConnectionMode::New | ConnectionMode::Faulted,
+                ConnectionMode::New
+                    | ConnectionMode::Faulted
+                    | ConnectionMode::Replaced,
             ) | (
                 NegotiationStateData::GetExtentVersions,
                 NegotiationStateData::WaitQuorum(..),

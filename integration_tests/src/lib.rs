@@ -3884,7 +3884,7 @@ mod integration_tests {
     #[tokio::test]
     async fn integration_test_volume_inactive_replace_downstairs() -> Result<()>
     {
-        // Replace a downstairs before the volume is active. This should fail
+        // Replace a downstairs before the volume is active.
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
@@ -3916,13 +3916,10 @@ mod integration_tests {
                 test_downstairs_set.downstairs1_address(),
                 new_downstairs.address(),
             )
-            .await;
+            .await
+            .unwrap();
 
-        assert!(res.is_err());
-        assert!(matches!(
-            res.err().unwrap(),
-            CrucibleError::ReplaceRequestInvalid(_)
-        ));
+        assert_eq!(res, ReplaceResult::Started);
         Ok(())
     }
 
@@ -4514,8 +4511,9 @@ mod integration_tests {
 
     #[tokio::test]
     async fn integration_test_guest_replace_ds_before_active() -> Result<()> {
-        // Test using the guest layer to verify replacing a downstairs
-        // before the upstairs is active will fail.
+        // Test using the guest layer to verify we can replace a downstairs
+        // before the upstairs is active.
+        const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
         let tds = DefaultTestDownstairsSet::small(false).await?;
@@ -4535,13 +4533,26 @@ mod integration_tests {
                 tds.downstairs1_address(),
                 new_downstairs.address(),
             )
-            .await;
+            .await
+            .unwrap();
 
-        assert!(res.is_err());
-        assert!(matches!(
-            res.err().unwrap(),
-            CrucibleError::ReplaceRequestInvalid(_)
-        ));
+        assert_eq!(res, ReplaceResult::Started);
+
+        guest.activate().await?;
+
+        // Write data in
+        guest
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
+            )
+            .await?;
+
+        // Read back our block post replacement, verify contents
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
+        guest.read(BlockIndex(0), &mut buffer).await?;
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
