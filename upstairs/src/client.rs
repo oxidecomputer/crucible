@@ -1873,8 +1873,6 @@ impl DownstairsClient {
         self.repair_addr
     }
 
-    // Nothing outside of tests uses this yet
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn been_active(&self) -> Option<bool> {
         self.been_active
     }
@@ -1901,6 +1899,13 @@ impl DownstairsClient {
     #[cfg(test)]
     pub(crate) fn set_message_version(&mut self, version: MessageVersion) {
         self.message_version = Some(version);
+    }
+
+    /// Sets what the downstairs told us about been_active without
+    /// negotiating
+    #[cfg(test)]
+    pub(crate) fn set_been_active(&mut self, been_active: Option<bool>) {
+        self.been_active = been_active;
     }
 }
 

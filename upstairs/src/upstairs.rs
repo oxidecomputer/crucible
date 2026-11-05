@@ -1972,6 +1972,14 @@ impl Upstairs {
     ///
     /// If we have a problem here, we can't activate the upstairs.
     ///
+    /// ## Min-quorum
+    /// If only two downstairs are in `WaitQuorum`, and both have been active
+    /// before, we wait `NEGOTIATION_DELAY` for the third.  If it doesn't
+    /// arrive, we reconcile with the two (see `on_min_quorum`), and the third
+    /// must join later through live repair.  A downstairs that has never been
+    /// active doesn't count toward the two, so a new region set always needs
+    /// all three downstairs for its first activation.
+    ///
     /// # Notes on reconciliation
     /// If reconciliation is required, it happens in three phases.  Failure
     /// during reconciliation will result in the upstairs being disabled (and
@@ -2054,6 +2062,21 @@ impl Upstairs {
             0 => panic!("called on_wait_quorum with no WaitQuorum downstairs"),
             1 => return, // nothing to do yet
             2 => {
+                if !self.downstairs.min_quorum_allowed(&is_ready) {
+                    // We have determined that the two downstairs that have
+                    // connected don't qualify for min-quorum activation, so
+                    // we need to wait for the third downstairs.  Cancel any
+                    // min-quorum deadline set
+                    if min_quorum_deadline.take().is_some() {
+                        info!(
+                            self.log,
+                            "cancelling min-quorum reconciliation, \
+                             waiting for full quorum"
+                        );
+                    }
+                    return;
+                }
+
                 // Print a warning if `min_quorum` is already present.  This
                 // would be a little weird, because we're just now entering the
                 // min-quorum state, but could be possible if a Downstairs has
@@ -2141,6 +2164,14 @@ impl Upstairs {
                 self.log,
                 "min-quorum negotiation found {ready_count} \
                  ready downstairs; cancelling"
+            );
+            return;
+        }
+        if !self.downstairs.min_quorum_allowed(&is_ready) {
+            warn!(
+                self.log,
+                "min-quorum negotiation found ready downstairs that have \
+                 not been active; cancelling"
             );
             return;
         }
@@ -2683,6 +2714,238 @@ pub(crate) mod test {
         ));
         // The activation hasn't happened
         assert!(!matches!(&up.state, &UpstairsState::Active))
+    }
+
+    /// Builds a read-write upstairs that is trying to go active
+    ///
+    /// Each client negotiated V14, so it is told when it has been active.
+    /// Keep the returned `BlockOpWaiter` alive for the length of the test.
+    fn min_quorum_test_upstairs() -> (Upstairs, BlockOpWaiter<()>) {
+        let mut up = Upstairs::test_default(None, false);
+        up.cfg
+            .generation
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        for cid in ClientId::iter() {
+            up.downstairs.clients[cid]
+                .set_message_version(crucible_protocol::MessageVersion::V14);
+        }
+        let (rx, done) = BlockOpWaiter::pair();
+        up.state = UpstairsState::GoActive {
+            res: done,
+            min_quorum_deadline: None,
+        };
+        (up, rx)
+    }
+
+    /// Moves a client through negotiation to `WaitQuorum`, then calls
+    /// `on_wait_quorum` as the upstairs does
+    ///
+    /// `been_active` is what the downstairs reported during negotiation.
+    /// Every client reports the same extent metadata, so reconciliation has
+    /// no work to do.
+    fn to_wait_quorum(
+        up: &mut Upstairs,
+        cid: ClientId,
+        been_active: Option<bool>,
+    ) {
+        for state in [
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+            NegotiationStateData::WaitQuorum(RegionMetadata::new(
+                &[0; 4],
+                &[0; 4],
+                &[false; 4],
+            )),
+        ] {
+            up.ds_transition(
+                cid,
+                DsStateData::Connecting {
+                    mode: ConnectionMode::New,
+                    state,
+                },
+            );
+        }
+        up.downstairs.clients[cid].set_been_active(been_active);
+        up.on_wait_quorum();
+    }
+
+    /// Restarts negotiation for a client, as if its downstairs went away
+    fn disconnect(up: &mut Upstairs, cid: ClientId) {
+        up.ds_transition(
+            cid,
+            DsStateData::Connecting {
+                mode: ConnectionMode::New,
+                state: NegotiationStateData::Start,
+            },
+        );
+        up.downstairs.clients[cid].set_been_active(None);
+    }
+
+    fn min_quorum_deadline(up: &Upstairs) -> Option<Instant> {
+        match &up.state {
+            UpstairsState::GoActive {
+                min_quorum_deadline,
+                ..
+            } => *min_quorum_deadline,
+            s => panic!("expected GoActive, found {s:?}"),
+        }
+    }
+
+    fn is_wait_quorum(up: &Upstairs, cid: ClientId) -> bool {
+        matches!(
+            up.ds_state(cid),
+            DsState::Connecting {
+                state: NegotiationState::WaitQuorum,
+                ..
+            }
+        )
+    }
+
+    #[test]
+    fn min_quorum_two_been_active() {
+        // Two ready downstairs that have both been active start the
+        // min-quorum deadline.  When it fires, the two reconcile and go
+        // active, and the third must join through live repair.
+        let (mut up, _rx) = min_quorum_test_upstairs();
+        to_wait_quorum(&mut up, ClientId::new(0), Some(true));
+        assert!(min_quorum_deadline(&up).is_none());
+        to_wait_quorum(&mut up, ClientId::new(1), Some(true));
+        assert!(min_quorum_deadline(&up).is_some());
+
+        up.on_min_quorum();
+
+        assert!(matches!(up.state, UpstairsState::Active));
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            assert_eq!(up.ds_state(cid), DsState::Active);
+            assert_eq!(up.downstairs.clients[cid].been_active(), Some(true));
+        }
+        assert!(matches!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                mode: ConnectionMode::Faulted,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn min_quorum_not_allowed() {
+        // If either ready downstairs has not been active, or can't tell us
+        // (None, from a V13 downstairs), there is no min-quorum deadline.
+        // The upstairs waits for the third downstairs.
+        for (a, b) in [
+            (Some(true), Some(false)),
+            (Some(false), Some(true)),
+            (Some(false), Some(false)),
+            (Some(true), None),
+            (None, None),
+        ] {
+            let (mut up, _rx) = min_quorum_test_upstairs();
+            to_wait_quorum(&mut up, ClientId::new(0), a);
+            to_wait_quorum(&mut up, ClientId::new(1), b);
+
+            assert!(min_quorum_deadline(&up).is_none(), "{a:?} {b:?}");
+            assert!(is_wait_quorum(&up, ClientId::new(0)));
+            assert!(is_wait_quorum(&up, ClientId::new(1)));
+        }
+    }
+
+    #[test]
+    fn full_quorum_without_been_active() {
+        // When min-quorum is not allowed, the third downstairs arriving
+        // gives full quorum, whatever been_active each one reported.  This
+        // is how a new region set activates for the first time.  Afterwards
+        // all three have been told that they have been active.
+        for been_active in [
+            [Some(false), Some(false), Some(false)],
+            [Some(true), Some(false), Some(true)],
+            [None, Some(true), Some(false)],
+        ] {
+            let (mut up, _rx) = min_quorum_test_upstairs();
+            for cid in ClientId::iter() {
+                to_wait_quorum(&mut up, cid, been_active[cid.get() as usize]);
+            }
+
+            assert!(matches!(up.state, UpstairsState::Active));
+            for cid in ClientId::iter() {
+                assert_eq!(up.ds_state(cid), DsState::Active);
+                assert_eq!(
+                    up.downstairs.clients[cid].been_active(),
+                    Some(true),
+                    "{been_active:?} {cid}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn min_quorum_cancelled_by_new_pair() {
+        // DS0 and DS1 have been active, so the deadline is set.  DS1 goes
+        // away, and DS2, which has not been active, reaches WaitQuorum.
+        // The new pair can't do min-quorum, so the deadline is cancelled.
+        let (mut up, _rx) = min_quorum_test_upstairs();
+        to_wait_quorum(&mut up, ClientId::new(0), Some(true));
+        to_wait_quorum(&mut up, ClientId::new(1), Some(true));
+        assert!(min_quorum_deadline(&up).is_some());
+
+        disconnect(&mut up, ClientId::new(1));
+        to_wait_quorum(&mut up, ClientId::new(2), Some(false));
+        assert!(min_quorum_deadline(&up).is_none());
+
+        // DS1 comes back.  Now all three are ready, and we have full quorum.
+        to_wait_quorum(&mut up, ClientId::new(1), Some(true));
+        assert!(matches!(up.state, UpstairsState::Active));
+        for cid in ClientId::iter() {
+            assert_eq!(up.ds_state(cid), DsState::Active);
+        }
+    }
+
+    #[test]
+    fn min_quorum_after_reconnect() {
+        // DS0 and DS1 have been active, so the deadline is set.  DS1 goes
+        // away and comes back, still having been active.  The deadline is
+        // set again and min-quorum goes ahead.
+        let (mut up, _rx) = min_quorum_test_upstairs();
+        to_wait_quorum(&mut up, ClientId::new(0), Some(true));
+        to_wait_quorum(&mut up, ClientId::new(1), Some(true));
+        let first = min_quorum_deadline(&up).unwrap();
+
+        disconnect(&mut up, ClientId::new(1));
+        to_wait_quorum(&mut up, ClientId::new(1), Some(true));
+        assert!(min_quorum_deadline(&up).unwrap() >= first);
+
+        up.on_min_quorum();
+        assert!(matches!(up.state, UpstairsState::Active));
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            assert_eq!(up.ds_state(cid), DsState::Active);
+        }
+    }
+
+    #[test]
+    fn min_quorum_rechecked_when_deadline_fires() {
+        // The deadline is set for two downstairs that have been active.  If
+        // by the time it fires one of the ready downstairs has not been
+        // active, min-quorum is cancelled and nothing changes.
+        let (mut up, _rx) = min_quorum_test_upstairs();
+        to_wait_quorum(&mut up, ClientId::new(0), Some(true));
+        to_wait_quorum(&mut up, ClientId::new(1), Some(true));
+        assert!(min_quorum_deadline(&up).is_some());
+
+        up.downstairs.clients[ClientId::new(1)].set_been_active(Some(false));
+        up.on_min_quorum();
+
+        assert!(min_quorum_deadline(&up).is_none());
+        assert!(is_wait_quorum(&up, ClientId::new(0)));
+        assert!(is_wait_quorum(&up, ClientId::new(1)));
+        assert!(!matches!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                mode: ConnectionMode::Faulted,
+                ..
+            }
+        ));
     }
 
     #[test]

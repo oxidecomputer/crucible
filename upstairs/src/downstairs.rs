@@ -2040,6 +2040,32 @@ impl Downstairs {
         self.reconcile_repair_aborted += 1;
     }
 
+    /// Checks if all the ready clients in `is_ready` can activate with
+    /// min-quorum
+    ///
+    /// To be eligible for min-quorum, every ready client must have been
+    /// active before.  A downstairs that has never been active may be new
+    /// and missing data, so it can't count toward min-quorum.  A downstairs
+    /// that negotiated V13 can't tell us, so it can't count either.
+    pub(crate) fn min_quorum_allowed(
+        &self,
+        is_ready: &ClientData<bool>,
+    ) -> bool {
+        let mut allowed = true;
+        for cid in ClientId::iter().filter(|cid| is_ready[*cid]) {
+            let been_active = self.clients[cid].been_active();
+            if been_active != Some(true) {
+                info!(
+                    self.log,
+                    "{cid} been_active is {been_active:?}, \
+                     it can't count toward min-quorum"
+                );
+                allowed = false;
+            }
+        }
+        allowed
+    }
+
     /// Initial reconciliation was skipped, sets all WQ clients as Active
     pub(crate) fn on_reconciliation_skipped(&mut self, go_active: bool) {
         assert!(self.reconcile.is_none());

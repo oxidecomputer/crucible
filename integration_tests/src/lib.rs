@@ -758,6 +758,19 @@ mod integration_tests {
             self.extent_count
         }
 
+        /// Activates an upstairs with all three downstairs, then deactivates
+        ///
+        /// Each downstairs records that it has been active, so it can count
+        /// toward min-quorum.  This uses generation 1, so later activations
+        /// must use generation 2 or higher.
+        pub async fn activate_all_once(&self) -> Result<()> {
+            let (guest, io) = Guest::new(None);
+            let _join_handle = up_main(self.opts(), 1, None, io, None)?;
+            guest.activate().await?;
+            guest.deactivate().await?;
+            Ok(())
+        }
+
         pub async fn reboot_read_only(&mut self) -> Result<()> {
             self.downstairs1.reboot_read_only().await?;
             self.downstairs2.reboot_read_only().await?;
@@ -6525,12 +6538,16 @@ mod integration_tests {
 
         // Spin off three downstairs, build our Crucible struct.
         let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Activate with all three once, so each has been active and can
+        // count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
         let opts = tds.opts();
         tds.downstairs1.stop().await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         let (guest, io) = Guest::new(None);
-        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
         guest.activate().await.unwrap();
 
         let res = guest
@@ -6550,12 +6567,16 @@ mod integration_tests {
 
         // Spin off three downstairs, build our Crucible struct.
         let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Activate with all three once, so each has been active and can
+        // count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
         let opts = tds.opts();
         let (ds1_port, ds1_rport) = tds.downstairs1.stop().await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         let (guest, io) = Guest::new(None);
-        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
         guest.activate().await.unwrap();
 
         let res = guest
@@ -6602,6 +6623,10 @@ mod integration_tests {
         // Spin off three downstairs, build our Crucible struct.
         let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
 
+        // Activate with all three once, so each has been active and can
+        // count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
+
         // Stop downstairs 1 before constructing the guest, so it won't be
         // included and we'll do min-quorum reconciliation.
         let (port, rport) = tds.downstairs1.stop().await.unwrap();
@@ -6609,7 +6634,7 @@ mod integration_tests {
         // Start the guest and do a write to ds 2 and 3.
         let (guest, io) = Guest::new(None);
         let opts = tds.opts();
-        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
         guest.activate().await.unwrap();
         let res = guest
             .write(
@@ -6630,7 +6655,7 @@ mod integration_tests {
             .await
             .unwrap();
         tds.downstairs2.stop().await.unwrap();
-        guest.activate_with_gen(2).await.unwrap();
+        guest.activate_with_gen(3).await.unwrap();
 
         let mut buf = Buffer::new(2, BLOCK_SIZE);
         guest.read(BlockIndex(0), &mut buf).await.unwrap();
@@ -6643,6 +6668,10 @@ mod integration_tests {
         // Spin off three downstairs, build our Crucible struct.
         let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
 
+        // Activate with all three once, so each has been active and can
+        // count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
+
         // Stop downstairs 1 before constructing the guest, so it won't be
         // included and we'll do min-quorum reconciliation.
         let (port, rport) = tds.downstairs1.stop().await.unwrap();
@@ -6650,7 +6679,7 @@ mod integration_tests {
         // Start the guest and do a write to ds 2 and 3.
         let (guest, io) = Guest::new(None);
         let opts = tds.opts();
-        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
         let s = tokio::spawn(async move { guest.activate().await });
 
         // Get into our min-quorum wait, which is 500 ms
