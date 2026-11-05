@@ -52,6 +52,12 @@ pub enum ClientCommand {
     },
     /// Show whether downstairs are running read-only
     ReadOnly,
+    /// Replace the region of the given client ID with a new, empty region.
+    /// The downstairs must be stopped with restart disabled.
+    Recreate {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
     /// Get count of regions.
     RegionCount,
     /// Get region info.
@@ -137,6 +143,10 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
         }
         ClientCommand::RegionCount => {
             let res = dsc.dsc_get_region_count().await.unwrap();
+            println!("{:?}", res);
+        }
+        ClientCommand::Recreate { cid } => {
+            let res = dsc.dsc_recreate(cid).await.unwrap();
             println!("{:?}", res);
         }
         ClientCommand::RegionInfo => {

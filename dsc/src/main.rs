@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use byte_unit::Byte;
 use clap::{Parser, Subcommand};
 use csv::WriterBuilder;
@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::process::{Child, Command};
 use tokio::runtime::Builder;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::time::{Duration, Instant, sleep_until};
 use uuid::Uuid;
 
@@ -532,34 +532,20 @@ impl DscInfo {
         let port = rs.port_base + (ds_id as u32 * rs.port_step);
         let rd = &rs.region_dir[ds_id];
         let new_region_dir = port_to_region(rd.clone(), port)?;
-        let extent_size = format!("{}", extent_size);
-        let extent_count = format!("{}", extent_count);
-        let block_size = format!("{}", block_size);
         let uuid = format!("12345678-0000-0000-0000-{:012}", port);
         let ds_uuid = Uuid::parse_str(&uuid).unwrap();
         let start = std::time::Instant::now();
-        let mut cmd_args = vec![
-            "create",
-            "-d",
+        let output = create_region(
+            &rs.ds_bin,
             &new_region_dir,
-            "--uuid",
-            &uuid,
-            "--extent-count",
-            &extent_count,
-            "--extent-size",
-            &extent_size,
-            "--block-size",
-            &block_size,
-        ];
-        if encrypted {
-            cmd_args.push("--encrypted");
-        }
-
-        let output = Command::new(rs.ds_bin.clone())
-            .args(&cmd_args)
-            .output()
-            .await
-            .unwrap();
+            ds_uuid,
+            extent_size,
+            extent_count,
+            block_size,
+            encrypted,
+        )
+        .await
+        .unwrap();
 
         let end = start.elapsed();
         let time_f = end.as_secs() as f32 + (end.subsec_nanos() as f32 / 1e9);
@@ -760,6 +746,14 @@ impl DscInfo {
         Ok(rs.ds[client_id].uuid)
     }
 
+    /// Record a new UUID for the region at the given client_id
+    async fn set_ds_uuid(&self, client_id: usize, uuid: Uuid) {
+        let mut rs = self.rs.lock().await;
+        let mut dsi = (*rs.ds[client_id]).clone();
+        dsi.uuid = uuid;
+        rs.ds[client_id] = Arc::new(dsi);
+    }
+
     async fn get_region_info(&self) -> Result<RegionExtentInfo> {
         let rs = self.rs.lock().await;
         if let Some(ri) = &rs.region_info {
@@ -878,6 +872,13 @@ async fn do_dsc_work(
                     .await
                     .unwrap();
             }
+        }
+        DscCmd::Recreate(cid, reply) => {
+            println!("recreate {}", cid);
+            action_tx_list[cid]
+                .send(DownstairsAction::Recreate(reply))
+                .await
+                .unwrap();
         }
         // Any other commands should not arrive here.
         _ => {
@@ -1091,6 +1092,91 @@ async fn start_dsc(
     Ok(())
 }
 
+/// Run the downstairs binary to create a region
+async fn create_region(
+    ds_bin: &str,
+    region_dir: &str,
+    uuid: Uuid,
+    extent_size: u64,
+    extent_count: u32,
+    block_size: u64,
+    encrypted: bool,
+) -> Result<std::process::Output> {
+    let uuid = uuid.to_string();
+    let extent_count = extent_count.to_string();
+    let extent_size = extent_size.to_string();
+    let block_size = block_size.to_string();
+    let mut cmd_args = vec![
+        "create",
+        "-d",
+        region_dir,
+        "--uuid",
+        &uuid,
+        "--extent-count",
+        &extent_count,
+        "--extent-size",
+        &extent_size,
+        "--block-size",
+        &block_size,
+    ];
+    if encrypted {
+        cmd_args.push("--encrypted");
+    }
+
+    Command::new(ds_bin)
+        .args(&cmd_args)
+        .output()
+        .await
+        .with_context(|| format!("failed to run {ds_bin} create"))
+}
+
+/// Replace the region at `region_dir` with a new, empty region
+///
+/// The new region has the same geometry and encryption setting as the old
+/// one, and a new random UUID, as a replacement region would in the
+/// product.  It is created next to the old region first, so if the create
+/// fails, the old region is left as it was.
+///
+/// Returns the UUID of the new region.
+async fn recreate_region(ds_bin: &str, region_dir: &str) -> Result<Uuid> {
+    let cp = config_path::<&Path>(region_dir.as_ref());
+    let def: RegionDefinition = read_json(&cp)
+        .with_context(|| format!("failed to read region config {cp:?}"))?;
+
+    let new_dir = format!("{region_dir}.recreate");
+    if Path::new(&new_dir).exists() {
+        fs::remove_dir_all(&new_dir)
+            .with_context(|| format!("failed to remove {new_dir}"))?;
+    }
+
+    let uuid = Uuid::new_v4();
+    let output = create_region(
+        ds_bin,
+        &new_dir,
+        uuid,
+        def.extent_size().value,
+        def.extent_count(),
+        def.block_size(),
+        def.get_encrypted(),
+    )
+    .await?;
+    if !output.status.success() {
+        let _ = fs::remove_dir_all(&new_dir);
+        bail!(
+            "creating region at {new_dir} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fs::remove_dir_all(region_dir)
+        .with_context(|| format!("failed to remove {region_dir}"))?;
+    fs::rename(&new_dir, region_dir).with_context(|| {
+        format!("failed to rename {new_dir} to {region_dir}")
+    })?;
+    Ok(uuid)
+}
+
 /// Create a path for a region
 ///
 /// By combining the region directory and the port this downstairs
@@ -1133,8 +1219,7 @@ pub enum DownstairsState {
 ///
 /// This is used to send actions between the main task and a task that
 /// is responsible stopping/starting/restarting a downstairs process.
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 enum DownstairsAction {
     // Stop the downstairs
     Stop,
@@ -1145,14 +1230,16 @@ enum DownstairsAction {
     DisableRestart,
     // Enable auto restart
     EnableRestart,
+    // Replace the region with a new, empty one, and reply with its UUID.
+    // The downstairs must be stopped, and must not be about to restart.
+    Recreate(oneshot::Sender<Result<Uuid>>),
 }
 
 /// Commands supported by DSC.
 ///
 /// These are the commands the main dsc task can accept from the dropshot
 /// control server.
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 enum DscCmd {
     /// Start the downstairs at the given client index.
     Start(usize),
@@ -1182,6 +1269,9 @@ enum DscCmd {
     RandomStopMin(u64),
     /// Set the maximum wait time between random stops
     RandomStopMax(u64),
+    /// Replace the region at the given client index with a new, empty one,
+    /// and reply with its UUID.
+    Recreate(usize, oneshot::Sender<Result<Uuid>>),
 }
 
 /// Start a process for a downstairs.
@@ -1264,6 +1354,37 @@ async fn ds_start_monitor(
                         DownstairsAction::EnableRestart => {
                             keep_running = true;
                             println!("[{}] Enable  keep_running", ds.port);
+                        }
+                        DownstairsAction::Recreate(reply) => {
+                            println!("[{}] Got recreate action", ds.port);
+                            let res = if keep_running || start_once {
+                                Err(anyhow!(
+                                    "downstairs at port {} will restart, \
+                                     disable restart first",
+                                    ds.port,
+                                ))
+                            } else {
+                                match cmd.try_wait() {
+                                    Ok(Some(_)) => {
+                                        recreate_region(
+                                            &ds.ds_bin,
+                                            &ds.region_dir,
+                                        )
+                                        .await
+                                    }
+                                    Ok(None) => Err(anyhow!(
+                                        "downstairs at port {} is running",
+                                        ds.port,
+                                    )),
+                                    Err(e) => Err(anyhow!(
+                                        "downstairs at port {} state \
+                                         unknown: {e}",
+                                        ds.port,
+                                    )),
+                                }
+                            };
+                            println!("[{}] Recreate returns {res:?}", ds.port);
+                            let _ = reply.send(res);
                         }
                     }
                 } else {
@@ -1908,6 +2029,181 @@ mod test {
         let res = dsci.delete_ds_region(0).await;
         assert!(res.is_ok());
         assert!(!Path::new(&ds_region_dir).exists());
+    }
+
+    /// Writes a fake downstairs binary to `dir` and returns its path
+    ///
+    /// dsc creates and runs regions by running the downstairs binary.  A
+    /// test here can't find the real `crucible-downstairs` since it is in
+    /// another package, so these tests use a small script in its place.  It
+    /// lets a test check the arguments dsc passes, make a create fail, and
+    /// have a downstairs that stays running.
+    ///
+    /// For `create -d DIR ...` it makes DIR and writes its arguments to
+    /// DIR/args, or exits 1 if `fail_create` is set.  For `run` it sleeps.
+    #[cfg(unix)]
+    fn fake_ds_bin(dir: &Path, fail_create: bool) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let create = if fail_create {
+            "exit 1"
+        } else {
+            r#"mkdir -p "$3" && echo "$@" > "$3/args""#
+        };
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             create) {create} ;;\n\
+             run) exec sleep 60 ;;\n\
+             esac\n"
+        );
+        let path = dir.join("fake-downstairs");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    /// Makes a region directory with a config and an extra file, `old`
+    fn make_region_dir(region_dir: &Path, encrypted: bool) {
+        fs::create_dir_all(region_dir).unwrap();
+        let mut opts = crucible_common::RegionOptions::default();
+        opts.set_block_size(4096);
+        opts.set_extent_size(crucible_common::Block::new(100, 12));
+        opts.set_uuid(Uuid::new_v4());
+        opts.set_encrypted(encrypted);
+        let mut def = RegionDefinition::from_options(&opts).unwrap();
+        def.set_extent_count(7);
+        crucible_common::write_json(config_path(region_dir), &def, false)
+            .unwrap();
+        fs::write(region_dir.join("old"), "old region").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recreate_region_replaces_region() {
+        // The old region is replaced by a new one, created with the old
+        // geometry and encryption setting and a new UUID.
+        for encrypted in [false, true] {
+            let dir = tempdir().unwrap();
+            let ds_bin = fake_ds_bin(dir.path(), false);
+            let region_dir = dir.path().join("8810");
+            make_region_dir(&region_dir, encrypted);
+            let region_dir = region_dir.to_str().unwrap();
+
+            let uuid = recreate_region(&ds_bin, region_dir).await.unwrap();
+
+            let region_dir = Path::new(region_dir);
+            assert!(!region_dir.join("old").exists());
+            assert!(
+                !Path::new(&format!("{}.recreate", region_dir.display()))
+                    .exists()
+            );
+            let args = fs::read_to_string(region_dir.join("args")).unwrap();
+            let mut expected = format!(
+                "create -d {}.recreate --uuid {uuid} --extent-count 7 \
+                 --extent-size 100 --block-size 4096",
+                region_dir.display()
+            );
+            if encrypted {
+                expected.push_str(" --encrypted");
+            }
+            assert_eq!(args.trim(), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recreate_region_create_fails() {
+        // If the create fails, the old region is left as it was.
+        let dir = tempdir().unwrap();
+        let ds_bin = fake_ds_bin(dir.path(), true);
+        let region_dir = dir.path().join("8810");
+        make_region_dir(&region_dir, false);
+
+        let res = recreate_region(&ds_bin, region_dir.to_str().unwrap()).await;
+
+        assert!(res.is_err());
+        assert!(region_dir.join("old").exists());
+        assert!(config_path(&region_dir).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recreate_region_no_config() {
+        // A directory that is not a region can't be recreated.
+        let dir = tempdir().unwrap();
+        let ds_bin = fake_ds_bin(dir.path(), false);
+        let region_dir = dir.path().join("8810");
+        fs::create_dir_all(&region_dir).unwrap();
+
+        let res = recreate_region(&ds_bin, region_dir.to_str().unwrap()).await;
+
+        assert!(res.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recreate_only_when_stopped() {
+        // The monitor only recreates a region when its downstairs is not
+        // running and will not be restarted.
+        let dir = tempdir().unwrap();
+        let ds_bin = fake_ds_bin(dir.path(), false);
+        let region_dir = dir.path().join("8810");
+        make_region_dir(&region_dir, false);
+        let ds = Arc::new(DownstairsInfo::new(
+            ds_bin,
+            region_dir.to_str().unwrap().to_string(),
+            8810,
+            Uuid::new_v4(),
+            String::new(),
+            dir.path().join("downstairs-8810.txt"),
+            0,
+            false,
+        ));
+        let (tx, mut rx) = mpsc::channel(10);
+        let (action_tx, action_rx) = mpsc::channel(10);
+        tokio::spawn(ds_start_monitor(ds, tx, action_rx));
+
+        let recreate = async || {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            action_tx
+                .send(DownstairsAction::Recreate(reply_tx))
+                .await
+                .unwrap();
+            reply_rx.await.unwrap()
+        };
+        let wait_for = async |rx: &mut mpsc::Receiver<MonitorInfo>, state| {
+            while rx.recv().await.unwrap().state != state {}
+        };
+
+        // Running: refused, and the old region is still there.
+        wait_for(&mut rx, DownstairsState::Running).await;
+        assert!(recreate().await.is_err());
+        assert!(region_dir.join("old").exists());
+
+        // Stopped, and staying stopped: recreated.
+        action_tx.send(DownstairsAction::Stop).await.unwrap();
+        wait_for(&mut rx, DownstairsState::Exit).await;
+        assert!(recreate().await.is_ok());
+        assert!(!region_dir.join("old").exists());
+
+        // Stopped, but with restart enabled: refused.  The monitor may
+        // restart the downstairs before it sees the recreate, which is also
+        // refused.
+        action_tx
+            .send(DownstairsAction::EnableRestart)
+            .await
+            .unwrap();
+        assert!(recreate().await.is_err());
+
+        // Don't leave a downstairs running.  The monitor handles actions in
+        // order, so once the last recreate has a reply, the stop is done.
+        action_tx
+            .send(DownstairsAction::DisableRestart)
+            .await
+            .unwrap();
+        action_tx.send(DownstairsAction::Stop).await.unwrap();
+        let _ = recreate().await;
     }
 
     #[tokio::test]
