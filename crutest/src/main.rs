@@ -1,6 +1,6 @@
 // Copyright 2026 Oxide Computer Company
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use clap::Parser;
 use futures::StreamExt;
@@ -38,7 +38,10 @@ use crucible::volume::VolumeExtentInfo;
 use crucible::*;
 use crucible_client_types::RegionExtentInfo;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
-use dsc_client::{Client, types::DownstairsState};
+use dsc_client::{
+    Client,
+    types::{DownstairsState, RecreateStatus},
+};
 use repair_client::Client as repair_client;
 
 /*
@@ -2494,6 +2497,82 @@ async fn replay_workload(
     Ok(())
 }
 
+// Wait for dsc to report the given state for a downstairs
+async fn wait_for_ds_state(
+    dsc_client: &Client,
+    cid: u32,
+    want: DownstairsState,
+) -> Result<()> {
+    loop {
+        let state = dsc_client
+            .dsc_get_ds_state(cid)
+            .await
+            .context("failed to get downstairs state")?
+            .into_inner();
+        if state == want {
+            return Ok(());
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+    }
+}
+
+// Give a downstairs that has been replaced a new, empty region, then start it
+//
+// These tests reuse a downstairs that was replaced as a new replacement in a
+// later loop.  In the product a replacement region is always new.  The
+// region is empty and has never been active.  Recreating the region here
+// makes the "reused" downstairs look like that.  This allows the same cid
+// to be reused by clients without having to make new regions.
+async fn recreate_downstairs(
+    dsc_client: &Client,
+    cid: u32,
+    log: &Logger,
+) -> Result<()> {
+    // We have to be sure the current downstairs has stopped and will remain
+    // stopped so we can recreate it.
+    dsc_client
+        .dsc_disable_restart(cid)
+        .await
+        .context("failed to disable restart")?;
+    dsc_client.dsc_stop(cid).await.context("failed to stop")?;
+    wait_for_ds_state(dsc_client, cid, DownstairsState::Exit).await?;
+
+    dsc_client
+        .dsc_recreate(cid)
+        .await
+        .context("failed to start region recreate")?;
+
+    // Creating a large region can take many minutes, so there is no limit
+    // on how long we wait here.
+    let mut polls = 0;
+    let uuid = loop {
+        let status = dsc_client
+            .dsc_get_recreate_status(cid)
+            .await
+            .context("failed to get recreate status")?
+            .into_inner();
+        match status {
+            RecreateStatus::Done { uuid } => break uuid,
+            RecreateStatus::Failed { error } => {
+                bail!("failed to recreate region {cid}: {error}");
+            }
+            RecreateStatus::InProgress => {}
+            RecreateStatus::Idle => {
+                bail!("recreate of region {cid} did not start");
+            }
+        }
+        polls += 1;
+        if polls % 30 == 0 {
+            info!(log, "Waiting for recreate of downstairs {cid}");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    };
+    info!(log, "Recreated downstairs {cid} with new region {uuid}");
+
+    dsc_client.dsc_start(cid).await.context("failed to start")?;
+    wait_for_ds_state(dsc_client, cid, DownstairsState::Running).await
+}
+
 // Test that a downstairs can be replaced while the initial reconciliation
 // is underway.
 //
@@ -2659,6 +2738,12 @@ async fn replace_while_reconcile(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
+        // Recreate a new region at the old client for the downstairs we just
+        // replaced.  This gives us a brand new set of extents and no old
+        // data.  When this is used as a replacement it will look like the
+        // new region the control plane would provide.
+        recreate_downstairs(&dsc_client, old_ds, &log).await?;
+
         old_ds = (old_ds + 1) % (ds_total as u32 + 1);
         new_ds = (new_ds + 1) % (ds_total + 1);
 
@@ -2800,9 +2885,11 @@ async fn replace_before_active(
             bail!("Requested volume verify failed: {:?}", e)
         }
 
-        // Start up the old downstairs so it is ready for the next loop.
-        let res = dsc_client.dsc_start(old_ds).await;
-        info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
+        // Recreate a new region at the old client for the downstairs we just
+        // replaced.  This gives us a brand new set of extents and no old
+        // data.  When this is used as a replacement it will look like the
+        // new region the control plane would provide.
+        recreate_downstairs(&dsc_client, old_ds, &log).await?;
 
         // Wait for all IO to finish before we continue
         loop {
