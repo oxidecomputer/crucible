@@ -1222,18 +1222,8 @@ impl Upstairs {
                 self.submit_flush(Some(done), snapshot_details, Some(io_guard));
             }
             BlockOp::ReplaceDownstairs { id, old, new, done } => {
-                if !matches!(self.state, UpstairsState::Active) {
-                    warn!(self.log, "Replace before active request");
-                    done.send_result(Err(
-                        CrucibleError::ReplaceRequestInvalid(
-                            "replace not allowed before upstairs is active"
-                                .to_string(),
-                        ),
-                    ));
-                } else {
-                    let r = self.downstairs.replace(id, old, new, &self.state);
-                    done.send_result(r);
-                }
+                let r = self.downstairs.replace(id, old, new, &self.state);
+                done.send_result(r);
             }
 
             #[cfg(test)]

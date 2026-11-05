@@ -126,6 +126,18 @@ enum Workload {
         #[clap(long, action)]
         replacement: SocketAddr,
     },
+    /// Test that we can replace a downstairs when the upstairs is not active.
+    ReplaceBeforeActive {
+        /// The address:port of a running downstairs for replacement
+        #[clap(long, action)]
+        replacement: SocketAddr,
+    },
+    /// Test replacement of a downstairs while doing the initial reconciliation.
+    ReplaceReconcile {
+        /// The address:port of a running downstairs for replacement
+        #[clap(long, action)]
+        replacement: SocketAddr,
+    },
     Span,
     /// Test 2/3 activation.
     TwoOfThree,
@@ -1314,6 +1326,98 @@ async fn main() -> Result<()> {
             .await?;
         }
 
+        Workload::ReplaceBeforeActive { replacement } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replace before active requires a dsc endpoint");
+                }
+            };
+            // Either we have a count, or we run until we get a signal.
+            let wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else {
+                    let count = opt.count.unwrap_or(5);
+                    WhenToQuit::Count { count }
+                }
+            };
+
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
+            targets.push(replacement);
+
+            // Verify the number of targets dsc has matches what the number
+            // of targets we found.
+            let res = dsc_client.dsc_get_region_count().await.unwrap();
+            let region_count = res.into_inner();
+            if region_count != targets.len() as u32 {
+                bail!(
+                    "Downstairs targets:{} does not match dsc targets: {}",
+                    region_count,
+                    targets.len(),
+                );
+            }
+            replace_before_active(
+                &volume,
+                wtq,
+                &mut disk_info,
+                targets,
+                dsc_client,
+                opt.generation,
+                test_log.clone(),
+            )
+            .await?;
+        }
+        Workload::ReplaceReconcile { replacement } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replace reconcile requires a dsc endpoint");
+                }
+            };
+            // Either we have a count, or we run until we get a signal.
+            let wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else {
+                    let count = opt.count.unwrap_or(5);
+                    WhenToQuit::Count { count }
+                }
+            };
+
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
+            targets.push(replacement);
+
+            // Verify the number of targets dsc has matches what the number
+            // of targets we found.
+            let res = dsc_client.dsc_get_region_count().await.unwrap();
+            let region_count = res.into_inner();
+            if region_count != targets.len() as u32 {
+                bail!(
+                    "Downstairs targets:{} does not match dsc targets: {}",
+                    region_count,
+                    targets.len(),
+                );
+            }
+            replace_while_reconcile(
+                &volume,
+                wtq,
+                &mut disk_info,
+                targets,
+                dsc_client,
+                opt.generation,
+                test_log.clone(),
+            )
+            .await?;
+        }
         Workload::TwoOfThree => {
             let dsc_client = match opt.dsc {
                 Some(dsc_addr) => {
@@ -2423,6 +2527,366 @@ async fn replay_workload(
     }
 
     println!("Test replay has completed");
+    Ok(())
+}
+
+// Test that a downstairs can be replaced while the initial reconciliation
+// is underway.
+//
+// This test makes use of the dsc client to stop and start downstairs that
+// will allow us to create a mismatch between downstairs which will then
+// trigger a reconcile.
+async fn replace_while_reconcile(
+    volume: &Volume,
+    mut wtq: WhenToQuit,
+    di: &mut DiskInfo,
+    targets: Vec<SocketAddr>,
+    dsc_client: Client,
+    mut generation: u64,
+    log: Logger,
+) -> Result<()> {
+    assert!(targets.len() % 3 == 1);
+
+    // The total number of downstairs we have that are part of the Volume.
+    let ds_total = targets.len() - 1;
+    let mut old_ds = 0;
+    let mut new_ds = targets.len() - 1;
+    let mut c = 1;
+    // How long we wait for reconcile to start before we replace
+    let mut active_wait = 6;
+
+    info!(log, "Begin replacement while reconciliation test");
+    loop {
+        info!(log, "[{c}] Touch every extent part 1");
+        fill_sparse_workload(volume, di).await?;
+
+        info!(log, "[{c}] Stop a downstairs");
+        // Stop a downstairs, wait for dsc to confirm it is stopped.
+        dsc_client.dsc_stop(old_ds).await.unwrap();
+        loop {
+            let res = dsc_client.dsc_get_ds_state(old_ds).await.unwrap();
+            let state = res.into_inner();
+            if state == DownstairsState::Exit {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+        info!(log, "[{c}] Touch every extent part 2");
+        fill_sparse_workload(volume, di).await?;
+
+        info!(log, "[{c}] Deactivate");
+        volume.deactivate().await.unwrap();
+        loop {
+            let is_active = volume.query_is_active().await.unwrap();
+            if !is_active {
+                break;
+            }
+            info!(log, "[{c}] Waiting for deactivation");
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        // We now have touched every extent with one downstairs missing,
+        // so on restart of that downstairs we will require reconciliation.
+
+        // Start a downstairs, wait for dsc to confirm it is started.
+        info!(log, "[{c}] Deactivate complete, now Start a downstairs");
+        dsc_client.dsc_start(old_ds).await.unwrap();
+        loop {
+            let res = dsc_client.dsc_get_ds_state(old_ds).await.unwrap();
+            let state = res.into_inner();
+            if state == DownstairsState::Running {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        info!(log, "[{c}] Request the upstairs activate");
+        // Spawn a task to re-activate, this will not finish till all three
+        // downstairs have reconciled.
+        generation += 1;
+        let gc = volume.clone();
+        let handle =
+            tokio::spawn(async move { gc.activate_with_gen(generation).await });
+
+        info!(log, "[{c}] wait {active_wait} for reconcile to start");
+        tokio::time::sleep(tokio::time::Duration::from_secs(active_wait)).await;
+
+        //  Give the activation request time to percolate in the upstairs.
+        let is_active = volume.query_is_active().await.unwrap();
+        info!(log, "[{c}] activate should now be waiting {:?}", is_active);
+        // If this check fails, then the reconciliation has finished
+        // before we had a chance to replace our downstairs. We try here to
+        // reduce the wait time and do another loop.
+        if is_active {
+            if active_wait > 1 {
+                active_wait -= 1;
+                warn!(
+                    log,
+                    "[{c}] Adjusting wait time smaller to catch reconcile",
+                );
+                continue;
+            } else {
+                // A second was not long enough to catch the reconcile, so
+                // the downstairs region size is too small for this test.
+                panic!(
+                    "Downstairs reconciliation too fast for this test, \
+                    consider making a larger downstairs region"
+                );
+            }
+        }
+
+        info!(
+            log,
+            "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
+            targets[old_ds as usize],
+            targets[new_ds],
+        );
+        match volume
+            .replace_downstairs(
+                Uuid::new_v4(),
+                targets[old_ds as usize],
+                targets[new_ds],
+            )
+            .await
+        {
+            Ok(ReplaceResult::Started) => {}
+            x => {
+                bail!("Failed replace: {:?}", x);
+            }
+        }
+
+        info!(log, "[{c}] Wait for activation after replacement");
+        loop {
+            let is_active = volume.query_is_active().await.unwrap();
+            if is_active {
+                break;
+            }
+            info!(
+                log,
+                "[{c}] Upstairs query_is_active reports: {:?}", is_active
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        }
+
+        // Our activate request task should have ended.
+        if let Err(e) = handle.await.unwrap() {
+            bail!("Failure reported in activate task {:?}", e);
+        }
+
+        info!(log, "[{c}] Verify volume after replacement");
+        if let Err(e) = verify_volume(volume, di, false).await {
+            bail!("Requested volume verify failed: {:?}", e)
+        }
+
+        // Wait for all IO to finish before we continue
+        loop {
+            let wc = volume.show_work().await?;
+            info!(
+                log,
+                "[{c}] Jobs Up:{} Ds:{}  DS active:{}",
+                wc.up_count,
+                wc.ds_count,
+                wc.active_count
+            );
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
+                info!(log, "[{c}] All jobs finished, all DS active.");
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        old_ds = (old_ds + 1) % (ds_total as u32 + 1);
+        new_ds = (new_ds + 1) % (ds_total + 1);
+
+        c += 1;
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if c > count {
+                    break;
+                }
+            }
+            WhenToQuit::Signal {
+                ref mut shutdown_rx,
+            } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(volume, di, false).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {} // Ignore everything else
+                }
+            }
+        }
+    }
+
+    info!(log, "Test replace_while_reconcile has completed");
+    Ok(())
+}
+
+// Test that a downstairs can be replaced before activation when the original
+// downstairs is offline.
+// Make use of dsc to stop our downstairs before activation.
+// Do a fill on each loop so every extent will need to be repaired.
+async fn replace_before_active(
+    volume: &Volume,
+    mut wtq: WhenToQuit,
+    di: &mut DiskInfo,
+    targets: Vec<SocketAddr>,
+    dsc_client: Client,
+    mut generation: u64,
+    log: Logger,
+) -> Result<()> {
+    assert!(targets.len() % 3 == 1);
+
+    info!(log, "Begin replacement before activation test");
+    // We need to start from a known state and be sure that all three of the
+    // current downstairs are consistent with each other. To guarantee this
+    // we write to every block, then flush, then read.  This way we know
+    // that the initial downstairs are all synced up on the same flush and
+    // generation numbers.
+    fill_workload(volume, di, true).await?;
+    let ds_total = targets.len() - 1;
+    let mut old_ds = 0;
+    let mut new_ds = targets.len() - 1;
+    for c in 1.. {
+        info!(log, "[{c}] Touch every extent");
+        fill_sparse_workload(volume, di).await?;
+
+        volume.deactivate().await.unwrap();
+        loop {
+            let is_active = volume.query_is_active().await.unwrap();
+            if !is_active {
+                break;
+            }
+            info!(log, "[{c}] Waiting for deactivation");
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        // Stop a downstairs, wait for dsc to confirm it is stopped.
+        dsc_client.dsc_stop(old_ds).await.unwrap();
+        loop {
+            let res = dsc_client.dsc_get_ds_state(old_ds).await.unwrap();
+            let state = res.into_inner();
+            if state == DownstairsState::Exit {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        info!(log, "[{c}] Request the upstairs activate");
+        // Spawn a task to re-activate, this will not finish till all three
+        // downstairs respond.
+        generation += 1;
+        let gc = volume.clone();
+        let handle =
+            tokio::spawn(async move { gc.activate_with_gen(generation).await });
+
+        //  Give the activation request time to percolate in the upstairs.
+        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        let is_active = volume.query_is_active().await.unwrap();
+        info!(log, "[{c}] activate should now be waiting {:?}", is_active);
+        assert!(!is_active);
+
+        info!(
+            log,
+            "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
+            targets[old_ds as usize],
+            targets[new_ds],
+        );
+        match volume
+            .replace_downstairs(
+                Uuid::new_v4(),
+                targets[old_ds as usize],
+                targets[new_ds],
+            )
+            .await
+        {
+            Ok(ReplaceResult::Started) => {}
+            x => {
+                bail!("Failed replace: {:?}", x);
+            }
+        }
+
+        info!(log, "[{c}] Wait for activation after replacement");
+        loop {
+            let is_active = volume.query_is_active().await.unwrap();
+            if is_active {
+                break;
+            }
+            info!(
+                log,
+                "[{c}] Upstairs query_is_active reports: {:?}", is_active
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        }
+
+        // Our activate request task should have ended.
+        if let Err(e) = handle.await.unwrap() {
+            bail!("Failure reported in activate task {:?}", e);
+        }
+
+        info!(log, "[{c}] Verify volume after replacement");
+        if let Err(e) = verify_volume(volume, di, false).await {
+            bail!("Requested volume verify failed: {:?}", e)
+        }
+
+        // Start up the old downstairs so it is ready for the next loop.
+        let res = dsc_client.dsc_start(old_ds).await;
+        info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
+
+        // Wait for all IO to finish before we continue
+        loop {
+            let wc = volume.show_work().await?;
+            info!(
+                log,
+                "[{c}] Jobs Up:{} Ds:{}  DS active:{}",
+                wc.up_count,
+                wc.ds_count,
+                wc.active_count
+            );
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
+                info!(log, "[{c}] All jobs finished, all DS active.");
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        old_ds = (old_ds + 1) % (ds_total as u32 + 1);
+        new_ds = (new_ds + 1) % (ds_total + 1);
+
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if c > count {
+                    break;
+                }
+            }
+            WhenToQuit::Signal {
+                ref mut shutdown_rx,
+            } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(volume, di, false).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {} // Ignore everything else
+                }
+            }
+        }
+    }
+
+    info!(log, "Test replace_before_active has completed");
     Ok(())
 }
 
