@@ -22,6 +22,7 @@ pub(crate) fn build_api() -> ApiDescription<Arc<DownstairsControl>> {
     api.register(dsc_all_running).unwrap();
     api.register(dsc_all_stopped).unwrap();
     api.register(dsc_get_ds_state).unwrap();
+    api.register(dsc_get_recreate_status).unwrap();
     api.register(dsc_get_pid).unwrap();
     api.register(dsc_get_port).unwrap();
     api.register(dsc_get_read_only).unwrap();
@@ -294,12 +295,13 @@ async fn dsc_get_uuid(
 }
 
 /**
- * Replace the region at the given client_id with a new empty region
+ * Start replacing the region at the given client_id with a new empty region
  *
- * The new region has the same geometry as the old one but with a new UUID,
- * which is returned.  The downstairs must currently be stopped with restart
- * disabled.  The downstairs remains stopped and must be started after
- * creation.
+ * The new region has the same geometry as the old one but with a new UUID.
+ * The downstairs must currently be stopped with restart disabled.  This
+ * returns once the recreate has started.  Creating a large region can take
+ * a long time, so poll GET /recreate/cid/{cid} to find out when it is done.
+ * The downstairs remains stopped and must be started after creation.
  */
 #[endpoint {
     method = POST,
@@ -308,7 +310,7 @@ async fn dsc_get_uuid(
 async fn dsc_recreate(
     rqctx: RequestContext<Arc<DownstairsControl>>,
     path: Path<Cid>,
-) -> Result<HttpResponseOk<Uuid>, HttpError> {
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let path = path.into_inner();
     let cid = path.cid;
     let api_context = rqctx.context();
@@ -326,30 +328,85 @@ async fn dsc_recreate(
         ));
     }
 
-    let (tx, rx) = oneshot::channel();
+    // Mark the recreate as in progress before it starts, so a caller that
+    // polls the status after this returns never sees an older result.
+    api_context
+        .dsci
+        .begin_recreate(cid)
+        .await
+        .map_err(|e| HttpError::for_bad_request(None, format!("{e:#}")))?;
+
+    let (started_tx, started_rx) = oneshot::channel();
+    let (done_tx, done_rx) = oneshot::channel();
     api_context
         .dsci
         .work
         .lock()
         .await
-        .add_cmd(DscCmd::Recreate(cid, tx));
+        .add_cmd(DscCmd::Recreate {
+            cid,
+            started: started_tx,
+            done: done_tx,
+        });
 
-    let uuid = rx
-        .await
-        .map_err(|e| {
-            HttpError::for_internal_error(format!(
-                "no reply recreating region {cid}: {e}"
-            ))
-        })?
-        .map_err(|e| {
-            HttpError::for_bad_request(
-                None,
-                format!("failed to recreate region {cid}: {e:#}"),
-            )
-        })?;
-    api_context.dsci.set_ds_uuid(cid, uuid).await;
+    // If the recreate did not start, record why as its result.
+    match started_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            let msg = format!("failed to recreate region {cid}: {e:#}");
+            api_context.dsci.end_recreate(cid, Err(e)).await;
+            return Err(HttpError::for_bad_request(None, msg));
+        }
+        Err(e) => {
+            let msg = format!("no reply recreating region {cid}: {e}");
+            api_context
+                .dsci
+                .end_recreate(cid, Err(anyhow!(msg.clone())))
+                .await;
+            return Err(HttpError::for_internal_error(msg));
+        }
+    }
 
-    Ok(HttpResponseOk(uuid))
+    // Record the result when the recreate finishes.
+    let dsci = api_context.dsci.clone();
+    tokio::spawn(async move {
+        let res = done_rx
+            .await
+            .unwrap_or_else(|e| Err(anyhow!("no recreate result: {e}")));
+        dsci.end_recreate(cid, res).await;
+    });
+
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+/**
+ * Get the status of the most recent region recreate at the given client_id
+ */
+#[endpoint {
+    method = GET,
+    path = "/recreate/cid/{cid}",
+}]
+async fn dsc_get_recreate_status(
+    rqctx: RequestContext<Arc<DownstairsControl>>,
+    path: Path<Cid>,
+) -> Result<HttpResponseOk<RecreateStatus>, HttpError> {
+    let path = path.into_inner();
+    let cid = path.cid;
+    let api_context = rqctx.context();
+
+    let status =
+        api_context
+            .dsci
+            .get_recreate_status(cid)
+            .await
+            .map_err(|e| {
+                HttpError::for_bad_request(
+                    None,
+                    format!("failed to get recreate status {cid}: {e:#}"),
+                )
+            })?;
+
+    Ok(HttpResponseOk(status))
 }
 
 /**

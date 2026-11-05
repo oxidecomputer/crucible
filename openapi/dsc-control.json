@@ -340,10 +340,9 @@
       }
     },
     "/recreate/cid/{cid}": {
-      "post": {
-        "summary": "Replace the region at the given client_id with a new empty region",
-        "description": "The new region has the same geometry as the old one but with a new UUID, which is returned.  The downstairs must currently be stopped with restart disabled.  The downstairs remains stopped and must be started after creation.",
-        "operationId": "dsc_recreate",
+      "get": {
+        "summary": "Get the status of the most recent region recreate at the given client_id",
+        "operationId": "dsc_get_recreate_status",
         "parameters": [
           {
             "in": "path",
@@ -362,12 +361,38 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Uuid",
-                  "type": "string",
-                  "format": "uuid"
+                  "$ref": "#/components/schemas/RecreateStatus"
                 }
               }
             }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "summary": "Start replacing the region at the given client_id with a new empty region",
+        "description": "The new region has the same geometry as the old one but with a new UUID. The downstairs must currently be stopped with restart disabled.  This returns once the recreate has started.  Creating a large region can take a long time, so poll GET /recreate/cid/{cid} to find out when it is done. The downstairs remains stopped and must be started after creation.",
+        "operationId": "dsc_recreate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -673,6 +698,80 @@
         "required": [
           "message",
           "request_id"
+        ]
+      },
+      "RecreateStatus": {
+        "description": "Status of the most recent recreate of a region.",
+        "oneOf": [
+          {
+            "description": "No recreate has been started.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "idle"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "A recreate is in progress.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "in_progress"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "The recreate finished, and the new region has this UUID.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "done"
+                ]
+              },
+              "uuid": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "required": [
+              "type",
+              "uuid"
+            ]
+          },
+          {
+            "description": "The recreate failed, and the old region is still in place.",
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "failed"
+                ]
+              }
+            },
+            "required": [
+              "error",
+              "type"
+            ]
+          }
         ]
       },
       "RegionExtentInfo": {

@@ -1,7 +1,8 @@
 // Copyright 2022 Oxide Computer Company
 
 use clap::Parser;
-use dsc_client::Client;
+use dsc_client::{Client, types::RecreateStatus};
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -52,7 +53,8 @@ pub enum ClientCommand {
     },
     /// Show whether downstairs are running read-only
     ReadOnly,
-    /// Replace the region of the given client ID with a new, empty region.
+    /// Replace the region of the given client ID with a new empty region,
+    /// and loop waiting for it to finish.
     /// The downstairs must be stopped with restart disabled.
     Recreate {
         #[clap(long, short, action)]
@@ -146,8 +148,19 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
             println!("{:?}", res);
         }
         ClientCommand::Recreate { cid } => {
-            let res = dsc.dsc_recreate(cid).await.unwrap();
-            println!("{:?}", res);
+            let _ = dsc.dsc_recreate(cid).await.unwrap();
+            loop {
+                let res = dsc
+                    .dsc_get_recreate_status(cid)
+                    .await
+                    .unwrap()
+                    .into_inner();
+                if !matches!(res, RecreateStatus::InProgress) {
+                    println!("{:?}", res);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
         ClientCommand::RegionInfo => {
             let res = dsc.dsc_get_region_info().await.unwrap();
