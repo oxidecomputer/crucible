@@ -28,6 +28,7 @@ pub(crate) fn build_api() -> ApiDescription<Arc<DownstairsControl>> {
     api.register(dsc_get_region_count).unwrap();
     api.register(dsc_get_region_info).unwrap();
     api.register(dsc_get_uuid).unwrap();
+    api.register(dsc_recreate).unwrap();
     api.register(dsc_stop).unwrap();
     api.register(dsc_stop_all).unwrap();
     api.register(dsc_stop_rand).unwrap();
@@ -288,6 +289,65 @@ async fn dsc_get_uuid(
             format!("failed to get UUID for downstairs {}: {:#}", cid, e),
         )
     })?;
+
+    Ok(HttpResponseOk(uuid))
+}
+
+/**
+ * Replace the region at the given client_id with a new empty region
+ *
+ * The new region has the same geometry as the old one but with a new UUID,
+ * which is returned.  The downstairs must currently be stopped with restart
+ * disabled.  The downstairs remains stopped and must be started after
+ * creation.
+ */
+#[endpoint {
+    method = POST,
+    path = "/recreate/cid/{cid}",
+}]
+async fn dsc_recreate(
+    rqctx: RequestContext<Arc<DownstairsControl>>,
+    path: Path<Cid>,
+) -> Result<HttpResponseOk<Uuid>, HttpError> {
+    let path = path.into_inner();
+    let cid = path.cid;
+    let api_context = rqctx.context();
+
+    if cid_bad(&api_context.dsci, cid).await {
+        return Err(HttpError::for_bad_request(
+            None,
+            format!("Invalid client id: {}", cid),
+        ));
+    }
+    if api_context.dsci.read_only {
+        return Err(HttpError::for_bad_request(
+            None,
+            "Can't recreate a region when downstairs are read only".into(),
+        ));
+    }
+
+    let (tx, rx) = oneshot::channel();
+    api_context
+        .dsci
+        .work
+        .lock()
+        .await
+        .add_cmd(DscCmd::Recreate(cid, tx));
+
+    let uuid = rx
+        .await
+        .map_err(|e| {
+            HttpError::for_internal_error(format!(
+                "no reply recreating region {cid}: {e}"
+            ))
+        })?
+        .map_err(|e| {
+            HttpError::for_bad_request(
+                None,
+                format!("failed to recreate region {cid}: {e:#}"),
+            )
+        })?;
+    api_context.dsci.set_ds_uuid(cid, uuid).await;
 
     Ok(HttpResponseOk(uuid))
 }

@@ -339,6 +339,45 @@
         }
       }
     },
+    "/recreate/cid/{cid}": {
+      "post": {
+        "summary": "Replace the region at the given client_id with a new empty region",
+        "description": "The new region has the same geometry as the old one but with a new UUID, which is returned.  The downstairs must currently be stopped with restart disabled.  The downstairs remains stopped and must be started after creation.",
+        "operationId": "dsc_recreate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Uuid",
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/regioncount": {
       "get": {
         "summary": "Get the count of regions.",
