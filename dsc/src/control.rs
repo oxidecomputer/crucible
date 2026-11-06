@@ -294,15 +294,13 @@ async fn dsc_get_uuid(
     Ok(HttpResponseOk(uuid))
 }
 
-/**
- * Start replacing the region at the given client_id with a new empty region
- *
- * The new region has the same geometry as the old one but with a new UUID.
- * The downstairs must currently be stopped with restart disabled.  This
- * returns once the recreate has started.  Creating a large region can take
- * a long time, so poll GET /recreate/cid/{cid} to find out when it is done.
- * The downstairs remains stopped and must be started after creation.
- */
+/// Start replacing the region at the given client_id with a new empty region
+///
+/// The new region has the same geometry as the old one but with a new UUID.
+/// The downstairs must currently be stopped with restart disabled.  This
+/// returns once the recreate has started.  Creating a large region can take
+/// a long time, so poll GET /recreate/cid/{cid} to find out when it is done.
+/// The downstairs remains stopped and must be started after creation.
 #[endpoint {
     method = POST,
     path = "/recreate/cid/{cid}",
@@ -379,9 +377,7 @@ async fn dsc_recreate(
     Ok(HttpResponseUpdatedNoContent())
 }
 
-/**
- * Get the status of the most recent region recreate at the given client_id
- */
+/// Get the status of the most recent region recreate at the given client_id
 #[endpoint {
     method = GET,
     path = "/recreate/cid/{cid}",

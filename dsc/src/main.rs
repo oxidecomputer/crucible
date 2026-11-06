@@ -2145,7 +2145,6 @@ mod test {
     /// For `create -d DIR ...` it waits while the file `hold` exists in
     /// `dir`, then makes DIR and writes its arguments to DIR/args, or exits
     /// 1 if `fail_create` is set.  For `run` it sleeps.
-    #[cfg(unix)]
     fn fake_ds_bin(dir: &Path, fail_create: bool) -> String {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2184,7 +2183,6 @@ mod test {
         fs::write(region_dir.join("old"), "old region").unwrap();
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn recreate_region_replaces_region() {
         // The old region is replaced by a new one, created with the old
@@ -2217,7 +2215,6 @@ mod test {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn recreate_region_create_fails() {
         // If the create fails, the old region is left as it was.
@@ -2233,7 +2230,6 @@ mod test {
         assert!(config_path(&region_dir).exists());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn recreate_region_no_config() {
         // A directory that is not a region can't be recreated.
@@ -2248,7 +2244,6 @@ mod test {
     }
 
     /// Starts a monitor for a downstairs on a fake binary in `dir`
-    #[cfg(unix)]
     fn start_fake_monitor(
         dir: &Path,
     ) -> (
@@ -2301,7 +2296,6 @@ mod test {
         while rx.recv().await.unwrap().state != state {}
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn recreate_only_when_stopped() {
         // The monitor only recreates a region when its downstairs is not
@@ -2344,7 +2338,6 @@ mod test {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn recreate_in_progress() {
         // While a recreate is in progress, another recreate is refused, and
