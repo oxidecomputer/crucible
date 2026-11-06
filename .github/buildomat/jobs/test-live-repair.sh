@@ -140,7 +140,7 @@ pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upstairs-info.tx
 
 banner LR
 ptime -m "$BINDIR"/crutest replace \
-  -t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830 \
+  --dsc 127.0.0.1:9998 \
   --replacement 127.0.0.1:8840 \
   -g 1 -c 10 --stable > /tmp/crutest-replace.log 2>&1
 
