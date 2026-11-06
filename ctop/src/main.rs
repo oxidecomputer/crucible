@@ -54,8 +54,22 @@ use tokio::sync::{Notify, RwLock};
 /// reports why on the way out.
 const DEFAULT_DTRACE_CMD: &str = r#"dtrace -Z -q -x strsize=2k -n 'crucible_upstairs*:::up-status { printf("{\"pid\":%d,\"status\":%s}\n", pid, json(copyinstr(arg1), "ok")); }'"#;
 
-/// How often the display loop wakes to look for keyboard input.
+/// How often the display loop wakes to look for keyboard input.  This
+/// only drains the input queue. The redraw is decided separately.
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How often the table is redrawn, showing whatever has arrived since
+/// the last time.
+///
+/// Each upstairs reports once a second, but at whatever point in the
+/// second it happens to fire, so redrawing as records land updates a
+/// different few rows each time and the table never settles.  Drawing
+/// on a tick of our own shows every row that reported, together.
+///
+/// It is also what keeps the clock and the stale marks honest: a
+/// session goes stale by not reporting, so nothing else would fire to
+/// mark it.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How many trailing lines of the dtrace command's stderr to keep.  We
 /// only need enough to say why it gave up.
@@ -99,6 +113,35 @@ struct Args {
     )]
     #[arg(value_enum)]
     output: Vec<DtraceDisplay>,
+}
+
+/// What the dtrace command is doing.
+///
+/// An empty table on its own is ambiguous, it means either that no
+/// upstairs is running, or that dtrace never started. Say which it is.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+enum ReaderStatus {
+    /// Started, but nothing has arrived yet.
+    #[default]
+    Waiting,
+
+    /// At least one record has been read.
+    Running,
+
+    /// The command is no longer running.  The string says why.
+    Stopped(String),
+}
+
+impl ReaderStatus {
+    /// What to show under the clock, or None once records are arriving
+    /// and the table speaks for itself.
+    fn line(&self) -> Option<&str> {
+        match self {
+            ReaderStatus::Waiting => Some("waiting for dtrace output..."),
+            ReaderStatus::Running => None,
+            ReaderStatus::Stopped(why) => Some(why),
+        }
+    }
 }
 
 /// What the sparklines are measured against.
@@ -172,13 +215,8 @@ struct CtopState {
     /// itself, rather than the table of every session.
     detail_mode: bool,
 
-    /// Set when the dtrace command is no longer running, which tells
-    /// the display to stop.  Otherwise a dtrace that never started
-    /// would leave an empty screen up with no explanation.
-    reader_done: bool,
-
-    /// Why the reader stopped, reported once the terminal is back.
-    reader_error: Option<String>,
+    /// What the dtrace command is doing, reported on screen.
+    reader_status: ReaderStatus,
 }
 
 /// Run `dtrace_cmd` and record what it produces.
@@ -256,6 +294,8 @@ async fn reader_loop(
         // This is scoped so the lock is dropped before the notify.
         {
             let mut state = state.write().await;
+            state.reader_status = ReaderStatus::Running;
+
             match state.sessions.get_mut(&wrapper.status.session_id) {
                 Some(session) => {
                     let delta = job_id.saturating_sub(session.last_job_id);
@@ -655,6 +695,7 @@ fn render_table_view(
     table_state: &mut TableState,
     now: Instant,
     spark_scale: SparkScale,
+    reader_status: &ReaderStatus,
 ) -> io::Result<()> {
     // The busiest sample on screen, which is what the Global setting
     // measures against.  Derived from the sessions being drawn rather
@@ -675,6 +716,7 @@ fn render_table_view(
         let chunks = Layout::default()
             .constraints([
                 Constraint::Length(1), // timestamp
+                Constraint::Length(1), // what dtrace is doing
                 Constraint::Min(0),    // session table
                 Constraint::Length(1), // key help
             ])
@@ -683,6 +725,10 @@ fn render_table_view(
         f.render_widget(
             Paragraph::new(format!("ctop - Unix timestamp: {timestamp}")),
             chunks[0],
+        );
+        f.render_widget(
+            Paragraph::new(reader_status.line().unwrap_or_default()),
+            chunks[1],
         );
 
         let selected = table_state.selected();
@@ -693,7 +739,7 @@ fn render_table_view(
 
         // Whatever width the columns do not use goes to the sparkline.
         let spark_width =
-            (chunks[1].width as usize).saturating_sub(header.chars().count());
+            (chunks[2].width as usize).saturating_sub(header.chars().count());
 
         let rows: Vec<Row> = sessions
             .iter()
@@ -732,7 +778,7 @@ fn render_table_view(
 
         // Rendering with the state lets the table scroll itself to keep
         // the cursor on screen when there are more sessions than rows.
-        f.render_stateful_widget(table, chunks[1], table_state);
+        f.render_stateful_widget(table, chunks[2], table_state);
 
         // Keys on the left, where the cursor is on the right.
         let position = match (selected, sessions.len()) {
@@ -746,7 +792,7 @@ fn render_table_view(
                 Constraint::Min(0),
                 Constraint::Length(position.chars().count() as u16),
             ])
-            .split(chunks[2]);
+            .split(chunks[3]);
 
         f.render_widget(
             Paragraph::new(format!(
@@ -771,13 +817,18 @@ async fn display_loop(
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut table_state = TableState::default();
 
+    let mut last_draw = Instant::now();
+
+    // The first pass paints, so there is something on screen before
+    // anything has happened.
+    let mut needs_draw = true;
+
     loop {
         // One instant for the whole frame, so every row is judged
         // against the same clock.
         let now = Instant::now();
 
-        // This is scoped so the lock is dropped before the wait below.
-        {
+        if needs_draw {
             let mut state = state.write().await;
 
             // Drop sessions that stopped reporting a while ago.  An
@@ -824,12 +875,11 @@ async fn display_loop(
                     &mut table_state,
                     now,
                     state.spark_scale,
+                    &state.reader_status,
                 )?,
             }
 
-            if state.reader_done {
-                return Ok(());
-            }
+            last_draw = Instant::now();
         }
 
         tokio::select! {
@@ -837,14 +887,31 @@ async fn display_loop(
             _ = tokio::time::sleep(INPUT_POLL_INTERVAL) => {}
         }
 
+        // Take everything the keyboard has already queued.  One key
+        // per pass would let a held arrow build a backlog that keeps
+        // scrolling after the key is released.
+        let mut input_pending = false;
         while event::poll(Duration::ZERO)? {
-            if let Event::Key(key_event) = event::read()? {
-                if is_quit(key_event) {
-                    return Ok(());
+            match event::read()? {
+                Event::Key(key_event) => {
+                    if is_quit(key_event) {
+                        return Ok(());
+                    }
+                    if handle_key(key_event, &mut *state.write().await) {
+                        input_pending = true;
+                    }
                 }
-                handle_key(key_event, &mut *state.write().await);
+                // ratatui resizes itself on the next draw; we only
+                // have to know that one is needed.
+                Event::Resize(..) => input_pending = true,
+                _ => {}
             }
         }
+
+        // Input is answered at once so the display keeps up with the
+        // keyboard.  Records are not: they wait for the next tick and
+        // are drawn together with everything else that arrived.
+        needs_draw = input_pending || last_draw.elapsed() >= REFRESH_INTERVAL;
     }
 }
 
@@ -896,30 +963,31 @@ async fn main() -> Result<()> {
     let reader_notify = Arc::clone(&notify);
     let dtrace_cmd = args.dtrace_cmd.clone();
     let reader = tokio::spawn(async move {
-        let error = reader_loop(&dtrace_cmd, &reader_state, &reader_notify)
-            .await
-            .err()
-            .map(|e| format!("{e:#}"));
+        let result =
+            reader_loop(&dtrace_cmd, &reader_state, &reader_notify).await;
 
-        let mut state = reader_state.write().await;
-        state.reader_error = error;
-        state.reader_done = true;
-        drop(state);
-
+        let why = match &result {
+            Ok(()) => "dtrace command finished".to_string(),
+            Err(e) => format!("{e:#}"),
+        };
+        reader_state.write().await.reader_status = ReaderStatus::Stopped(why);
         reader_notify.notify_one();
+
+        result
     });
 
     let display_result = display_task(&state, &notify, &args.output).await;
 
     // The reader is either finished already or about to be dropped
     // along with its child, so do not wait on it for long.
-    let _ = tokio::time::timeout(Duration::from_millis(100), reader).await;
+    let reader_result =
+        tokio::time::timeout(Duration::from_millis(100), reader).await;
 
     display_result?;
 
-    if let Some(error) = state.write().await.reader_error.take() {
-        bail!("{error}");
+    // Nested because of the timeout and the join.
+    match reader_result {
+        Ok(Ok(Err(e))) => Err(e),
+        _ => Ok(()),
     }
-
-    Ok(())
 }
