@@ -1270,9 +1270,12 @@ async fn ds_start_monitor(
                     println!("recv got error {:?}", a);
                 }
             }
-            c = cmd.wait() => {
+            // Once the downstairs has exited and we have reported it,
+            // only wait on it again if we are going to restart it.
+            // Otherwise, this would match every loop and delay actions.
+            c = cmd.wait(), if stop_notify || keep_running || start_once => {
                 // If the downstairs is not running, this will match
-                // every loop.
+                // every loop it is enabled.
                 match c {
                     Ok(status) => {
                         // Only notify we are down once,
@@ -1318,9 +1321,6 @@ async fn ds_start_monitor(
                     cmd = start_ds(&ds, &tx).await;
                     start_once = false;
                     stop_notify = true;
-                } else {
-                    // Don't loop too fast if we are not required to restart
-                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
         }
