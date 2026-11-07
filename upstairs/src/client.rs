@@ -1137,12 +1137,16 @@ impl DownstairsClient {
     /// If this is a read response, then the values in `responses` must
     /// _already_ be decrypted, with validated contexts stored in
     /// `responses.blocks`.
+    ///
+    /// `mismatch_trace` is added to the message if the read data does not
+    /// match the data from another client.
     pub(crate) fn process_io_completion(
         &mut self,
         ds_id: JobId,
         job: &mut DownstairsIO,
         responses: Result<RawReadResponse, CrucibleError>,
         extent_info: Option<ExtentInfo>,
+        mismatch_trace: Option<String>,
     ) {
         if job.state[self.client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
@@ -1169,7 +1173,7 @@ impl DownstairsClient {
                                 // XXX This will become the "force all
                                 // downstairs to stop and refuse to restart"
                                 // mode.
-                                let msg = format!(
+                                let mut msg = format!(
                                     "{} [{}] {} read hash mismatch\n\
                                         Expected {:x?}\n\
                                         Computed {:x?}\n\
@@ -1181,6 +1185,10 @@ impl DownstairsClient {
                                     read_data.blocks,
                                     job,
                                 );
+                                if let Some(trace) = mismatch_trace {
+                                    msg.push_str("\nextent trace:\n");
+                                    msg.push_str(&trace);
+                                }
                                 if job.replay {
                                     info!(self.log, "REPLAY {msg}");
                                 } else {
@@ -2051,7 +2059,7 @@ pub(crate) enum NegotiationResult {
 }
 
 /// Success value from [`DownstairsClient::should_send`]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) enum EnqueueResult {
     /// The given job should be marked as in progress and sent
     Send,
