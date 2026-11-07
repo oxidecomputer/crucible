@@ -2187,12 +2187,25 @@ impl Upstairs {
                 let unready_ds =
                     ClientId::iter().find(|i| !is_ready[*i]).unwrap();
 
-                info!(
-                    self.log,
-                    "Requiring {unready_ds} to connect through live-repair"
-                );
-                self.downstairs.clients[unready_ds]
-                    .set_connection_mode_faulted();
+                // If it is stopping (for example, because it is being
+                // replaced), it picks its connection mode when it restarts.
+                if matches!(
+                    self.downstairs.clients[unready_ds].state(),
+                    DsState::Stopping(..)
+                ) {
+                    info!(
+                        self.log,
+                        "{unready_ds} is stopping, it will pick its mode \
+                         when it restarts"
+                    );
+                } else {
+                    info!(
+                        self.log,
+                        "Requiring {unready_ds} to connect through live-repair"
+                    );
+                    self.downstairs.clients[unready_ds]
+                        .set_connection_mode_faulted();
+                }
             }
             Ok(false) => {
                 info!(self.log, "No downstairs reconciliation required");
@@ -2738,6 +2751,19 @@ pub(crate) mod test {
         cid: ClientId,
         been_active: Option<bool>,
     ) {
+        to_wait_quorum_flush(up, cid, been_active, 0);
+    }
+
+    /// Like `to_wait_quorum`, but the client reports `flush` as the flush
+    /// number of every extent
+    ///
+    /// Clients that report different flush numbers need reconciliation.
+    fn to_wait_quorum_flush(
+        up: &mut Upstairs,
+        cid: ClientId,
+        been_active: Option<bool>,
+        flush: u64,
+    ) {
         for state in [
             NegotiationStateData::Start,
             NegotiationStateData::WaitForPromote,
@@ -2745,7 +2771,7 @@ pub(crate) mod test {
             NegotiationStateData::GetExtentVersions,
             NegotiationStateData::WaitQuorum(RegionMetadata::new(
                 &[0; 4],
-                &[0; 4],
+                &[flush; 4],
                 &[false; 4],
             )),
         ] {
@@ -2933,6 +2959,143 @@ pub(crate) mod test {
             up.ds_state(ClientId::new(2)),
             DsState::Connecting {
                 mode: ConnectionMode::Faulted,
+                ..
+            }
+        ));
+    }
+
+    /// Sets up DS0 and DS1 in `WaitQuorum` for min-quorum, with targets
+    /// for all three so a downstairs can be replaced
+    ///
+    /// DS0 and DS1 have both been active.  If `need_work` is true they report
+    /// different flush numbers, so reconciliation has work to do.
+    fn min_quorum_replace_upstairs(
+        need_work: bool,
+    ) -> (Upstairs, BlockOpWaiter<()>) {
+        let (mut up, rx) = min_quorum_test_upstairs();
+        for cid in ClientId::iter() {
+            let c = &mut up.downstairs.clients[cid];
+            c.target_addr = Some(replace_test_addr(cid.get()));
+            c.repair_addr = Some("0.0.0.0:1".parse().unwrap());
+        }
+        to_wait_quorum_flush(&mut up, ClientId::new(0), Some(true), 1);
+        let flush = if need_work { 0 } else { 1 };
+        to_wait_quorum_flush(&mut up, ClientId::new(1), Some(true), flush);
+        assert!(min_quorum_deadline(&up).is_some());
+        (up, rx)
+    }
+
+    fn replace_test_addr(n: u8) -> std::net::SocketAddr {
+        format!("127.0.0.1:{}", 9100 + u16::from(n))
+            .parse()
+            .unwrap()
+    }
+
+    /// Asks to replace DS2 with a new downstairs
+    ///
+    /// The request may be refused.  Either way, DS2 must not become one of
+    /// the downstairs that activate.
+    fn replace_ds2(up: &mut Upstairs) {
+        let r = up.downstairs.replace(
+            Uuid::new_v4(),
+            replace_test_addr(2),
+            replace_test_addr(9),
+            &up.state,
+        );
+        info!(up.log, "replace DS2 returned {r:?}");
+    }
+
+    /// Checks that DS2 was left out of activation
+    fn assert_ds2_not_active(up: &Upstairs) {
+        let c = &up.downstairs.clients[ClientId::new(2)];
+        assert_ne!(c.state(), DsState::Active);
+        assert_ne!(c.been_active(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn min_quorum_replace_third_before_deadline() {
+        // DS2 is replaced while DS0 and DS1 wait for the min-quorum deadline,
+        // and the deadline fires before DS2 has finished stopping.  DS0 and
+        // DS1 start reconciliation without DS2.
+        let (mut up, _rx) = min_quorum_replace_upstairs(true);
+        replace_ds2(&mut up);
+        up.on_min_quorum();
+
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            assert!(matches!(
+                up.ds_state(cid),
+                DsState::Connecting {
+                    state: NegotiationState::Reconcile,
+                    ..
+                }
+            ));
+        }
+        assert_ds2_not_active(&up);
+
+        // When DS2's task stops, it restarts while DS0 and DS1 are still
+        // reconciling, so reconciliation is aborted.
+        up.downstairs.reinitialize(ClientId::new(2), &up.state);
+        assert!(!up.downstairs.reconcile_in_progress());
+    }
+
+    #[tokio::test]
+    async fn min_quorum_replace_third_before_deadline_no_work() {
+        // As above, but reconciliation has nothing to do, so DS0 and DS1 go
+        // active as soon as the deadline fires.
+        let (mut up, _rx) = min_quorum_replace_upstairs(false);
+        replace_ds2(&mut up);
+        up.on_min_quorum();
+
+        assert!(matches!(up.state, UpstairsState::Active));
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            assert_eq!(up.ds_state(cid), DsState::Active);
+        }
+        assert_ds2_not_active(&up);
+
+        // When DS2's task stops, the upstairs is active, so DS2 comes back
+        // through live-repair.
+        up.downstairs.reinitialize(ClientId::new(2), &up.state);
+        assert!(matches!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                mode: ConnectionMode::Replaced,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn min_quorum_replace_third_during_reconcile() {
+        // DS0 and DS1 are reconciling without DS2 when DS2 is replaced.
+        // Reconciliation finishes before DS2 has finished stopping.
+        let (mut up, _rx) = min_quorum_replace_upstairs(true);
+        up.on_min_quorum();
+        replace_ds2(&mut up);
+
+        // DS0 and DS1 finish each reconciliation job.
+        let mut done = false;
+        for _ in 0..100 {
+            done = up.downstairs.ack_reconciliation_job(&up.state);
+            if done {
+                break;
+            }
+        }
+        assert!(done);
+        up.on_reconciliation_done(true);
+
+        assert!(matches!(up.state, UpstairsState::Active));
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            assert_eq!(up.ds_state(cid), DsState::Active);
+        }
+        assert_ds2_not_active(&up);
+
+        // When DS2's task stops, the upstairs is active, so DS2 comes back
+        // through live-repair.
+        up.downstairs.reinitialize(ClientId::new(2), &up.state);
+        assert!(matches!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                mode: ConnectionMode::Replaced,
                 ..
             }
         ));

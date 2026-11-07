@@ -1986,6 +1986,31 @@ impl Downstairs {
         }
     }
 
+    /// Acks the current reconciliation job from every client still working
+    /// on it, as when their `RepairAckId` messages arrive
+    ///
+    /// Returns `true` if reconciliation is complete
+    #[cfg(test)]
+    pub(crate) fn ack_reconciliation_job(
+        &mut self,
+        up_state: &UpstairsState,
+    ) -> bool {
+        let job = self
+            .reconcile
+            .as_ref()
+            .and_then(|r| r.current_work.as_ref())
+            .expect("no reconciliation job in progress");
+        let id = job.id;
+        let waiting: Vec<ClientId> = ClientId::iter()
+            .filter(|i| job.state[*i] == crate::ReconcileIOState::InProgress)
+            .collect();
+        let mut done = false;
+        for cid in waiting {
+            done = self.on_reconciliation_ack(cid, id, up_state);
+        }
+        done
+    }
+
     /// Handles an `ExtentError` message during reconciliation
     ///
     /// Right now, we completely abort the repair operation on all clients if
@@ -2132,6 +2157,18 @@ impl Downstairs {
                     c.send_you_have_been_active();
                 }
                 DsState::Connecting { .. } => c.set_connection_mode_faulted(),
+                // A downstairs that did not take part in min-quorum
+                // reconciliation may be stopping (for example, because it is
+                // being replaced).  It picks its connection mode when it
+                // restarts, and we will be active by then, so it must come
+                // back through live-repair.
+                DsState::Stopping(
+                    ClientStopReason::Replacing
+                    | ClientStopReason::NegotiationFailed(..)
+                    | ClientStopReason::Fault(..),
+                ) => {
+                    info!(self.log, "client {i} is stopping, not activating");
+                }
                 s => panic!(
                     "invalid state in on_reconciliation_done \
                      for client {i}: {s:?}"
