@@ -307,16 +307,23 @@ pub(crate) struct ReconcileData {
 
     /// Number of extents needing repair during initial activation
     reconcile_repair_needed: usize,
+
+    /// Flags indicating whether a client is participating
+    participating: ClientData<bool>,
 }
 
 impl ReconcileData {
-    fn new<V: Into<VecDeque<ReconcileIO>>>(task_list: V) -> Self {
+    fn new<V: Into<VecDeque<ReconcileIO>>>(
+        task_list: V,
+        participating: ClientData<bool>,
+    ) -> Self {
         let task_list = task_list.into();
         Self {
             id: Uuid::new_v4(),
             current_work: None,
             reconcile_repair_needed: task_list.len(),
             task_list,
+            participating,
         }
     }
 }
@@ -441,7 +448,10 @@ impl Downstairs {
     /// Helper function to set all 3x clients as active, legally
     #[cfg(test)]
     pub fn force_active(&mut self) {
-        let up_state = UpstairsState::GoActive(BlockRes::dummy());
+        let up_state = UpstairsState::GoActive {
+            res: BlockRes::dummy(),
+            min_quorum_deadline: None,
+        };
         for cid in ClientId::iter() {
             for state in [
                 NegotiationStateData::Start,
@@ -889,14 +899,15 @@ impl Downstairs {
     pub(crate) fn collate(&mut self) -> Result<bool, NegotiationError> {
         let r = self.check_region_metadata()?;
         Ok(self.start_reconciliation(r, |data| {
-            let DsStateData::Connecting {
+            if let DsStateData::Connecting {
                 state: NegotiationStateData::WaitQuorum(r),
                 ..
             } = data
-            else {
-                panic!("client is not in WaitQuorum");
-            };
-            r
+            {
+                Some(r)
+            } else {
+                None
+            }
         }))
     }
 
@@ -914,8 +925,8 @@ impl Downstairs {
          * that code yet, we are making use of this loop to find our
          * max.
          */
-        let mut max_flush = 0;
-        let mut max_gen = 0;
+        let mut max_flush = None;
+        let mut max_gen = None;
         for (cid, rec) in ClientId::iter().filter_map(|i| {
             if let DsStateData::Connecting {
                 state: NegotiationStateData::WaitQuorum(r),
@@ -934,8 +945,8 @@ impl Downstairs {
             let mut dirty_log = Vec::with_capacity(MAX_LOG);
 
             for (i, m) in rec.iter().enumerate() {
-                max_flush = max_flush.max(m.flush + 1);
-                max_gen = max_gen.max(m.generation + 1);
+                max_flush = Some(max_flush.unwrap_or(0).max(m.flush + 1));
+                max_gen = Some(max_gen.unwrap_or(0).max(m.generation + 1));
                 if i < MAX_LOG {
                     flush_log.push(m.flush);
                     gen_log.push(m.generation);
@@ -952,6 +963,8 @@ impl Downstairs {
             info!(self.log, "[{cid}]R dirty{slice}: {dirty_log:?}",);
         }
 
+        let max_gen = max_gen.expect("no clients in WaitQuorum?");
+        let max_flush = max_flush.expect("no clients in WaitQuorum?");
         info!(self.log, "Max found gen is {}", max_gen);
         /*
          * Verify that the generation number that the guest has requested
@@ -1015,13 +1028,13 @@ impl Downstairs {
             else {
                 panic!("client is not in LiveRepairReady");
             };
-            r
+            Some(r)
         })
     }
 
     /// Begins reconciliation, using the given collation data
     #[must_use]
-    fn start_reconciliation<G: Fn(&DsStateData) -> &RegionMetadata>(
+    fn start_reconciliation<G: Fn(&DsStateData) -> Option<&RegionMetadata>>(
         &mut self,
         data: CollateData,
         getter: G,
@@ -1038,9 +1051,13 @@ impl Downstairs {
          * Determine what extents don't match and what to do
          * about that
          */
-        if let Some(reconcile_list) = self.mismatch_list(getter) {
-            for c in self.clients.iter_mut() {
-                c.begin_reconcile();
+        if let Some((reconcile_list, participating)) =
+            self.mismatch_list(getter)
+        {
+            for i in ClientId::iter() {
+                if participating[i] {
+                    self.clients[i].begin_reconcile();
+                }
             }
 
             let task_list = self.convert_rc_to_messages(
@@ -1049,7 +1066,7 @@ impl Downstairs {
                 max_gen,
             );
 
-            let reconcile = ReconcileData::new(task_list);
+            let reconcile = ReconcileData::new(task_list, participating);
 
             info!(
                 self.log,
@@ -1894,8 +1911,12 @@ impl Downstairs {
             reconcile.reconcile_repair_needed,
         );
 
-        for c in self.clients.iter_mut() {
-            c.send_next_reconciliation_req(&mut next);
+        for i in ClientId::iter() {
+            if reconcile.participating[i] {
+                self.clients[i].send_next_reconciliation_req(&mut next);
+            } else {
+                next.skip(i);
+            }
         }
 
         reconcile.current_work = Some(next);
@@ -1928,19 +1949,24 @@ impl Downstairs {
             return false;
         };
 
+        let Some(reconcile) = self.reconcile.as_mut() else {
+            unreachable!(); // checked above
+        };
+
         // Check to make sure that we're still in a repair-ready state
         //
         // If any client have dropped out of repair-readiness (e.g. due to
         // failed reconciliation, timeouts, etc), then we have to kick
         // everything else back to the beginning.
-        if self.clients.iter().any(|c| {
-            !matches!(
-                c.state(),
-                DsState::Connecting {
-                    state: NegotiationState::Reconcile,
-                    ..
-                }
-            )
+        if ClientId::iter().any(|i| {
+            reconcile.participating[i]
+                && !matches!(
+                    self.clients[i].state(),
+                    DsState::Connecting {
+                        state: NegotiationState::Reconcile,
+                        ..
+                    }
+                )
         }) {
             // Something has changed, so abort this repair.
             // Mark any downstairs that have not changed as failed and disable
@@ -1948,10 +1974,6 @@ impl Downstairs {
             self.abort_reconciliation(up_state);
             return false;
         }
-
-        let Some(reconcile) = self.reconcile.as_mut() else {
-            unreachable!(); // checked above
-        };
 
         let next = reconcile.current_work.as_mut().unwrap();
         if self.clients[client_id].on_reconciliation_job_done(repair_id, next) {
@@ -2018,6 +2040,32 @@ impl Downstairs {
         self.reconcile_repair_aborted += 1;
     }
 
+    /// Checks if all the ready clients in `is_ready` can activate with
+    /// min-quorum
+    ///
+    /// To be eligible for min-quorum, every ready client must have been
+    /// active before.  A downstairs that has never been active may be new
+    /// and missing data, so it can't count toward min-quorum.  A downstairs
+    /// that negotiated V13 can't tell us, so it can't count either.
+    pub(crate) fn min_quorum_allowed(
+        &self,
+        is_ready: &ClientData<bool>,
+    ) -> bool {
+        let mut allowed = true;
+        for cid in ClientId::iter().filter(|cid| is_ready[*cid]) {
+            let been_active = self.clients[cid].been_active();
+            if been_active != Some(true) {
+                info!(
+                    self.log,
+                    "{cid} been_active is {been_active:?}, \
+                     it can't count toward min-quorum"
+                );
+                allowed = false;
+            }
+        }
+        allowed
+    }
+
     /// Initial reconciliation was skipped, sets all WQ clients as Active
     pub(crate) fn on_reconciliation_skipped(&mut self, go_active: bool) {
         assert!(self.reconcile.is_none());
@@ -2054,6 +2102,10 @@ impl Downstairs {
 
     /// Asserts that initial reconciliation is done, and sets clients as Active
     ///
+    /// Specifically, clients that were in `NegotiationState::Reconcile` are set
+    /// as active; clients that are in other negotiation states are marked as
+    /// faulted.
+    ///
     /// # Panics
     /// If that isn't the case!
     pub(crate) fn on_reconciliation_done(&mut self, did_work: bool) {
@@ -2061,9 +2113,30 @@ impl Downstairs {
 
         // Every downstairs that took part in reconciliation has now been
         // active.
-        for c in self.clients.iter_mut() {
-            c.set_active();
-            c.send_you_have_been_active();
+        for (i, c) in self.clients.iter_mut().enumerate() {
+            match c.state() {
+                DsState::Connecting {
+                    state: NegotiationState::WaitQuorum,
+                    ..
+                } => {
+                    assert!(!did_work);
+                    c.set_active();
+                    c.send_you_have_been_active();
+                }
+                DsState::Connecting {
+                    state: NegotiationState::Reconcile,
+                    ..
+                } => {
+                    assert!(did_work);
+                    c.set_active();
+                    c.send_you_have_been_active();
+                }
+                DsState::Connecting { .. } => c.set_connection_mode_faulted(),
+                s => panic!(
+                    "invalid state in on_reconciliation_done \
+                     for client {i}: {s:?}"
+                ),
+            }
         }
 
         if did_work {
@@ -2078,16 +2151,20 @@ impl Downstairs {
     }
 
     /// Compares region metadata from all three clients and builds a mend list
-    fn mismatch_list<G: Fn(&DsStateData) -> &RegionMetadata>(
+    fn mismatch_list<G: Fn(&DsStateData) -> Option<&RegionMetadata>>(
         &self,
         getter: G,
-    ) -> Option<DownstairsMend> {
+    ) -> Option<(DownstairsMend, ClientData<bool>)> {
         let log = self.log.new(o!("" => "mend".to_string()));
         let mut meta = ClientMap::new();
+        let mut participating = ClientData::new(false);
         for i in ClientId::iter() {
-            meta.insert(i, getter(self.clients[i].state_data()));
+            if let Some(r) = getter(self.clients[i].state_data()) {
+                meta.insert(i, r);
+                participating[i] = true;
+            }
         }
-        DownstairsMend::new(&meta, log)
+        DownstairsMend::new(&meta, log).map(|m| (m, participating))
     }
 
     pub(crate) fn submit_flush(
@@ -4035,8 +4112,8 @@ struct DownstairsBackpressureConfig {
 #[cfg(test)]
 pub(crate) mod test {
     use super::{
-        ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
-        ConnectionMode, Downstairs, DsState, LiveRepairStart,
+        ClientData, ClientFaultReason, ClientNegotiationFailed,
+        ClientStopReason, ConnectionMode, Downstairs, DsState,
         NegotiationStateData, PendingJob,
     };
     use crate::{
@@ -4044,7 +4121,9 @@ pub(crate) mod test {
         ExtentFix, ExtentRepairIDs, IOState, IOop, ImpactedBlocks, JobId,
         RawReadResponse, ReconcileIO, ReconcileIOState, ReconciliationId,
         RegionMetadata, SnapshotDetails,
-        downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
+        downstairs::{
+            LiveRepairData, LiveRepairStart, LiveRepairState, ReconcileData,
+        },
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
     };
@@ -4133,9 +4212,33 @@ pub(crate) mod test {
         );
     }
 
+    /// Moves one client through negotiation to `WaitQuorum`
+    fn move_to_wait_quorum(ds: &mut Downstairs, cid: ClientId) {
+        let mode = ConnectionMode::New;
+        let up_state = UpstairsState::GoActive {
+            res: BlockRes::dummy(),
+            min_quorum_deadline: None,
+        };
+        for state in [
+            NegotiationStateData::Start,
+            NegotiationStateData::WaitForPromote,
+            NegotiationStateData::WaitForRegionInfo,
+            NegotiationStateData::GetExtentVersions,
+            NegotiationStateData::WaitQuorum(RegionMetadata::default()),
+        ] {
+            ds.clients[cid].checked_state_transition(
+                &up_state,
+                DsStateData::Connecting { state, mode },
+            );
+        }
+    }
+
     fn set_all_reconcile(ds: &mut Downstairs) {
         let mode = ConnectionMode::New;
-        let up_state = UpstairsState::GoActive(BlockRes::dummy());
+        let up_state = UpstairsState::GoActive {
+            res: BlockRes::dummy(),
+            min_quorum_deadline: None,
+        };
         for cid in ClientId::iter() {
             for state in [
                 NegotiationStateData::Start,
@@ -5535,6 +5638,9 @@ pub(crate) mod test {
         ds.clients[ClientId::new(0)].set_message_version(MessageVersion::V14);
         ds.clients[ClientId::new(1)].set_message_version(MessageVersion::V14);
         ds.clients[ClientId::new(2)].set_message_version(MessageVersion::V13);
+        for cid in ClientId::iter() {
+            move_to_wait_quorum(&mut ds, cid);
+        }
 
         ds.on_reconciliation_done(false);
 
@@ -5543,6 +5649,37 @@ pub(crate) mod test {
             assert_eq!(c.state(), DsState::Active);
             assert_eq!(c.been_active(), expected, "client {cid}");
         }
+    }
+
+    #[test]
+    fn min_quorum_reconciliation_done_sends_been_active() {
+        // With min-quorum, a downstairs that has not reached WaitQuorum
+        // when reconciliation is done did not take part.  Because of this
+        // we move the outlier to faulted and be sure that we don't
+        // count it as having been active.
+        let mut ds = Downstairs::test_default();
+        for cid in ClientId::iter() {
+            ds.clients[cid].set_message_version(MessageVersion::V14);
+        }
+        move_to_wait_quorum(&mut ds, ClientId::new(0));
+        move_to_wait_quorum(&mut ds, ClientId::new(1));
+
+        ds.on_reconciliation_done(false);
+
+        for cid in [0, 1] {
+            let c = &ds.clients[ClientId::new(cid)];
+            assert_eq!(c.state(), DsState::Active);
+            assert_eq!(c.been_active(), Some(true), "client {cid}");
+        }
+        let c = &ds.clients[ClientId::new(2)];
+        assert!(matches!(
+            c.state(),
+            DsState::Connecting {
+                mode: ConnectionMode::Faulted,
+                ..
+            }
+        ));
+        assert_eq!(c.been_active(), None);
     }
 
     #[test]
@@ -5791,7 +5928,7 @@ pub(crate) mod test {
         // No repairs on the queue, should return None
         let mut ds = Downstairs::test_default();
 
-        ds.reconcile = Some(ReconcileData::new([]));
+        ds.reconcile = Some(ReconcileData::new([], ClientData::new(true)));
 
         let w = ds.send_next_reconciliation_req();
         assert!(w); // reconciliation is "done", because there's nothing there
@@ -5809,22 +5946,25 @@ pub(crate) mod test {
         let rep_id = ReconciliationId(1);
 
         // Put two jobs on the todo list
-        ds.reconcile = Some(ReconcileData::new([
-            ReconcileIO::new(
-                close_id,
-                Message::ExtentClose {
-                    repair_id: close_id,
-                    extent_id: ExtentId(1),
-                },
-            ),
-            ReconcileIO::new(
-                rep_id,
-                Message::ExtentClose {
-                    repair_id: rep_id,
-                    extent_id: ExtentId(1),
-                },
-            ),
-        ]));
+        ds.reconcile = Some(ReconcileData::new(
+            [
+                ReconcileIO::new(
+                    close_id,
+                    Message::ExtentClose {
+                        repair_id: close_id,
+                        extent_id: ExtentId(1),
+                    },
+                ),
+                ReconcileIO::new(
+                    rep_id,
+                    Message::ExtentClose {
+                        repair_id: rep_id,
+                        extent_id: ExtentId(1),
+                    },
+                ),
+            ],
+            ClientData::new(true), // all clients are participating
+        ));
 
         // Send the first reconciliation req
         assert!(!ds.send_next_reconciliation_req());
@@ -5865,13 +6005,16 @@ pub(crate) mod test {
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(0);
 
-        ds.reconcile = Some(ReconcileData::new([ReconcileIO::new(
-            rep_id,
-            Message::ExtentClose {
-                repair_id: rep_id,
-                extent_id: ExtentId(1),
-            },
-        )]));
+        ds.reconcile = Some(ReconcileData::new(
+            [ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: ExtentId(1),
+                },
+            )],
+            ClientData::new(true), // all clients are participating
+        ));
 
         // Send that job
         ds.send_next_reconciliation_req();
@@ -5904,13 +6047,16 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         let rep_id = ReconciliationId(0);
-        ds.reconcile = Some(ReconcileData::new([ReconcileIO::new(
-            rep_id,
-            Message::ExtentClose {
-                repair_id: rep_id,
-                extent_id: ExtentId(1),
-            },
-        )]));
+        ds.reconcile = Some(ReconcileData::new(
+            [ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: ExtentId(1),
+                },
+            )],
+            ClientData::new(true), // all clients are participating
+        ));
 
         // Send that req
         assert!(!ds.send_next_reconciliation_req());
@@ -5926,22 +6072,25 @@ pub(crate) mod test {
         let close_id = ReconciliationId(0);
         let rep_id = ReconciliationId(1);
 
-        ds.reconcile = Some(ReconcileData::new([
-            ReconcileIO::new(
-                close_id,
-                Message::ExtentClose {
-                    repair_id: close_id,
-                    extent_id: ExtentId(1),
-                },
-            ),
-            ReconcileIO::new(
-                rep_id,
-                Message::ExtentClose {
-                    repair_id: rep_id,
-                    extent_id: ExtentId(1),
-                },
-            ),
-        ]));
+        ds.reconcile = Some(ReconcileData::new(
+            [
+                ReconcileIO::new(
+                    close_id,
+                    Message::ExtentClose {
+                        repair_id: close_id,
+                        extent_id: ExtentId(1),
+                    },
+                ),
+                ReconcileIO::new(
+                    rep_id,
+                    Message::ExtentClose {
+                        repair_id: rep_id,
+                        extent_id: ExtentId(1),
+                    },
+                ),
+            ],
+            ClientData::new(true), // all clients are participating
+        ));
 
         // Send the close job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req());
@@ -5974,19 +6123,22 @@ pub(crate) mod test {
         let rep_id = ReconciliationId(1);
 
         // Queue up a repair message, which will be skiped for client 0
-        ds.reconcile = Some(ReconcileData::new([ReconcileIO::new(
-            rep_id,
-            Message::ExtentRepair {
-                repair_id: rep_id,
-                extent_id: ExtentId(1),
-                source_client_id: ClientId::new(0),
-                source_repair_address: SocketAddr::new(
-                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                    803,
-                ),
-                dest_clients: vec![ClientId::new(1), ClientId::new(2)],
-            },
-        )]));
+        ds.reconcile = Some(ReconcileData::new(
+            [ReconcileIO::new(
+                rep_id,
+                Message::ExtentRepair {
+                    repair_id: rep_id,
+                    extent_id: ExtentId(1),
+                    source_client_id: ClientId::new(0),
+                    source_repair_address: SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                        803,
+                    ),
+                    dest_clients: vec![ClientId::new(1), ClientId::new(2)],
+                },
+            )],
+            ClientData::new(true), // all clients are participating
+        ));
 
         // Send the job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req());
@@ -6017,19 +6169,22 @@ pub(crate) mod test {
         let rep_id = ReconciliationId(1);
 
         // Queue up a repair message, which will be skiped for client 0
-        ds.reconcile = Some(ReconcileData::new([ReconcileIO::new(
-            rep_id,
-            Message::ExtentRepair {
-                repair_id: rep_id,
-                extent_id: ExtentId(1),
-                source_client_id: ClientId::new(0),
-                source_repair_address: SocketAddr::new(
-                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-                    803,
-                ),
-                dest_clients: vec![ClientId::new(1), ClientId::new(2)],
-            },
-        )]));
+        ds.reconcile = Some(ReconcileData::new(
+            [ReconcileIO::new(
+                rep_id,
+                Message::ExtentRepair {
+                    repair_id: rep_id,
+                    extent_id: ExtentId(1),
+                    source_client_id: ClientId::new(0),
+                    source_repair_address: SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                        803,
+                    ),
+                    dest_clients: vec![ClientId::new(1), ClientId::new(2)],
+                },
+            )],
+            ClientData::new(true), // all clients are participating
+        ));
 
         // Send the job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req());
@@ -6052,22 +6207,25 @@ pub(crate) mod test {
         let rep_id = ReconciliationId(1);
 
         // Queue up a repair message, which will be skiped for client 0
-        ds.reconcile = Some(ReconcileData::new([
-            ReconcileIO::new(
-                close_id,
-                Message::ExtentClose {
-                    repair_id: close_id,
-                    extent_id: ExtentId(1),
-                },
-            ),
-            ReconcileIO::new(
-                rep_id,
-                Message::ExtentClose {
-                    repair_id: rep_id,
-                    extent_id: ExtentId(1),
-                },
-            ),
-        ]));
+        ds.reconcile = Some(ReconcileData::new(
+            [
+                ReconcileIO::new(
+                    close_id,
+                    Message::ExtentClose {
+                        repair_id: close_id,
+                        extent_id: ExtentId(1),
+                    },
+                ),
+                ReconcileIO::new(
+                    rep_id,
+                    Message::ExtentClose {
+                        repair_id: rep_id,
+                        extent_id: ExtentId(1),
+                    },
+                ),
+            ],
+            ClientData::new(true), // all clients are participating
+        ));
 
         // Send the first req; reconciliation is not yet done
         assert!(!ds.send_next_reconciliation_req());
