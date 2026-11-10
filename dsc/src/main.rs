@@ -1384,13 +1384,6 @@ async fn start_ds(
     cmd
 }
 
-/// A region recreate running in another task, and where to send its
-/// result.
-struct RecreateTask {
-    handle: tokio::task::JoinHandle<Result<Uuid>>,
-    done: oneshot::Sender<Result<Uuid>>,
-}
-
 /// Start and monitor a specific downstairs.
 ///
 /// Start up a downstairs. Monitor that downstairs and send a message to
@@ -1407,7 +1400,11 @@ async fn ds_start_monitor(
     let mut keep_running = false;
     let mut start_once = false;
     let mut stop_notify = true;
-    let mut recreate: Option<RecreateTask> = None;
+    // Create the channel and oneshot which we use if we recreate a region
+    // and need to poll for it's completion.
+    // A spawned task will send its result to `recreate_rx` when it is done.
+    let mut recreate: Option<oneshot::Sender<Result<Uuid>>> = None;
+    let (recreate_tx, mut recreate_rx) = mpsc::channel(1);
     loop {
         tokio::select! {
             a = action_rx.recv() => {
@@ -1490,10 +1487,14 @@ async fn ds_start_monitor(
                                 // time, so do it in another task.
                                 let ds_bin = ds.ds_bin.clone();
                                 let region_dir = ds.region_dir.clone();
-                                let handle = tokio::spawn(async move {
-                                    recreate_region(&ds_bin, &region_dir).await
+                                let recreate_tx = recreate_tx.clone();
+                                tokio::spawn(async move {
+                                    let res =
+                                        recreate_region(&ds_bin, &region_dir)
+                                            .await;
+                                    let _ = recreate_tx.send(res).await;
                                 });
-                                recreate = Some(RecreateTask { handle, done });
+                                recreate = Some(done);
                             }
                             println!("[{}] Recreate starts {res:?}", ds.port);
                             let _ = started.send(res);
@@ -1503,13 +1504,8 @@ async fn ds_start_monitor(
                     println!("recv got error {:?}", a);
                 }
             }
-            res = async { (&mut recreate.as_mut().unwrap().handle).await },
-                if recreate.is_some() =>
-            {
-                let done = recreate.take().unwrap().done;
-                let res = res.unwrap_or_else(|e| {
-                    Err(anyhow!("recreate task failed: {e}"))
-                });
+            Some(res) = recreate_rx.recv(), if recreate.is_some() => {
+                let done = recreate.take().unwrap();
                 println!("[{}] Recreate returns {res:?}", ds.port);
                 let _ = done.send(res);
             }
