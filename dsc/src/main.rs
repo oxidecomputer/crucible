@@ -1206,11 +1206,30 @@ async fn recreate_region(ds_bin: &str, region_dir: &str) -> Result<Uuid> {
         );
     }
 
-    fs::remove_dir_all(region_dir)
-        .with_context(|| format!("failed to remove {region_dir}"))?;
-    fs::rename(&new_dir, region_dir).with_context(|| {
-        format!("failed to rename {new_dir} to {region_dir}")
+    let old_dir = format!("{region_dir}.old");
+    // Make sure the location is clear so we can move aside our
+    // current region directory.
+    if Path::new(&old_dir).exists() {
+        fs::remove_dir_all(&old_dir)
+            .with_context(|| format!("failed to remove {old_dir}"))?;
+    }
+    // Now move the old region aside.  Remove it once the new region
+    // is in place.  A failed swap leaves the old region where it was.
+    fs::rename(region_dir, &old_dir).with_context(|| {
+        format!("failed to rename {region_dir} to {old_dir}")
     })?;
+    if let Err(e) = fs::rename(&new_dir, region_dir) {
+        let _ = fs::rename(&old_dir, region_dir);
+        return Err(e).with_context(|| {
+            format!("failed to rename {new_dir} to {region_dir}")
+        });
+    }
+
+    // The new region is in place, remove the old region now.  If this
+    // does fail, we can still move forward.
+    if let Err(e) = fs::remove_dir_all(&old_dir) {
+        println!("Recreate failed to remove old region {old_dir}: {e}");
+    }
     Ok(uuid)
 }
 
@@ -2201,6 +2220,9 @@ mod test {
             assert!(
                 !Path::new(&format!("{}.recreate", region_dir.display()))
                     .exists()
+            );
+            assert!(
+                !Path::new(&format!("{}.old", region_dir.display())).exists()
             );
             let args = fs::read_to_string(region_dir.join("args")).unwrap();
             let mut expected = format!(

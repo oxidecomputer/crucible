@@ -4,7 +4,7 @@ use clap::Parser;
 use dsc_client::{Client, types::RecreateStatus};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Parser, PartialEq)]
@@ -157,6 +157,9 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
                     .into_inner();
                 if !matches!(res, RecreateStatus::InProgress) {
                     println!("{:?}", res);
+                    if let RecreateStatus::Failed { error } = res {
+                        bail!("recreate of client {cid} failed: {error}");
+                    }
                     break;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
