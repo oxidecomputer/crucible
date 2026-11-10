@@ -2512,6 +2512,10 @@ async fn wait_for_ds_state(
         if state == want {
             return Ok(());
         }
+        // These states are final so there is no point in waiting any longer..
+        if matches!(state, DownstairsState::Failed | DownstairsState::Error) {
+            bail!("downstairs {cid} is {state:?}, waiting for {want:?}");
+        }
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
     }
 }
