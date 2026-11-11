@@ -8,7 +8,13 @@
 //! wrote, what each downstairs was told to do with it, and how each
 //! downstairs finished it.  When a mismatch happens, the contexts each
 //! downstairs returned can be matched back to the write that produced them.
-use std::collections::BTreeMap;
+//!
+//! We keep the last few writes to each traced block, plus any write that was
+//! still active when live-repair closed its extent, so the writes behind a
+//! mismatch are still here even if it shows up long after the repair.  Each
+//! client's completions are numbered in the order they arrive, so we can tell
+//! whether a write finished on a client after live-repair closed its extent.
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::ops::Range;
 
@@ -27,8 +33,18 @@ use crate::{
 /// extent 0.
 pub(crate) const TRACED_EXTENTS: Range<u32> = 0..1;
 
-/// The most jobs to keep; the oldest are dropped first
-const TRACE_JOBS: usize = 4096;
+/// The most recent writes to keep for each traced block
+const WRITES_PER_BLOCK: usize = 4;
+
+/// The most live-repair jobs to keep
+const LR_JOBS: usize = 64;
+
+/// The most live-repair close acks to keep
+const CLOSE_ACKS: usize = 16;
+
+/// The most jobs to keep, whatever else says to keep them; the oldest are
+/// dropped first
+const MAX_JOBS: usize = 32768;
 
 /// Where live-repair was when a job was enqueued
 #[derive(Debug, Copy, Clone)]
@@ -81,13 +97,56 @@ struct TracedJob {
     repair: Option<RepairPoint>,
     /// The job's replay flag and per-client states when it was retired
     retired: Option<(bool, ClientData<IOState>)>,
+    /// How each client completed the job
+    done: ClientData<Option<Completion>>,
+    /// How many traced blocks list this job among their recent writes
+    refs: usize,
+    /// Keep this job even when no block lists it: it was active when
+    /// live-repair closed its extent
+    pinned: bool,
+}
+
+/// One client's completion of a traced job
+#[derive(Debug, Copy, Clone)]
+struct Completion {
+    /// Place in that client's completion order (the latest, if the job
+    /// completed more than once)
+    seq: u64,
+    time: DateTime<Utc>,
+    ok: bool,
+    /// How many times the client completed the job
+    count: usize,
+}
+
+/// A client's ack of a live-repair close of a traced extent, and the writes
+/// to that extent enqueued before the close that the client had not finished
+#[derive(Debug)]
+struct CloseAck {
+    close_id: JobId,
+    extent: ExtentId,
+    client_id: ClientId,
+    time: DateTime<Utc>,
+    ok: bool,
+    /// Each unfinished write, its state on this client, and whether it is
+    /// in the close's dependencies
+    unfinished: Vec<(JobId, IOState, bool)>,
 }
 
 pub(crate) struct ExtentTrace {
     extents: Range<u32>,
     jobs: BTreeMap<JobId, TracedJob>,
-    /// Set once we have had to drop a job to stay under `TRACE_JOBS`
+    /// Set once we have had to drop a job to stay under `MAX_JOBS`
     dropped: bool,
+    /// The last `WRITES_PER_BLOCK` writes to each traced block, oldest first
+    writers: BTreeMap<u64, Vec<JobId>>,
+    /// Traced blocks that have had older writes dropped
+    evicted: BTreeSet<u64>,
+    /// The last `LR_JOBS` live-repair jobs, oldest first
+    lr_jobs: VecDeque<JobId>,
+    /// The next completion number for each client
+    seq: ClientData<u64>,
+    /// The last `CLOSE_ACKS` acks of live-repair closes, oldest first
+    close_acks: VecDeque<CloseAck>,
 }
 
 /// Returns the range of blocks a read or write touches
@@ -136,6 +195,11 @@ impl ExtentTrace {
             extents,
             jobs: BTreeMap::new(),
             dropped: false,
+            writers: BTreeMap::new(),
+            evicted: BTreeSet::new(),
+            lr_jobs: VecDeque::new(),
+            seq: ClientData::new(0),
+            close_acks: VecDeque::new(),
         }
     }
 
@@ -240,6 +304,14 @@ impl ExtentTrace {
             _ => unreachable!(),
         };
 
+        let written = match &work {
+            TracedWork::Write {
+                start_block,
+                contexts,
+                ..
+            } => Some(*start_block..start_block + contexts.len() as u64),
+            _ => None,
+        };
         self.jobs.insert(
             ds_id,
             TracedJob {
@@ -251,11 +323,100 @@ impl ExtentTrace {
                 sent: ClientData::new(None),
                 repair,
                 retired: None,
+                done: ClientData::new(None),
+                refs: 0,
+                pinned: false,
             },
         );
-        while self.jobs.len() > TRACE_JOBS {
+
+        if let Some(written) = written {
+            for block in written {
+                let list = self.writers.entry(block).or_default();
+                list.push(ds_id);
+                let old =
+                    (list.len() > WRITES_PER_BLOCK).then(|| list.remove(0));
+                self.jobs.get_mut(&ds_id).unwrap().refs += 1;
+                if let Some(old) = old {
+                    self.evicted.insert(block);
+                    self.release(old);
+                }
+            }
+        } else {
+            self.lr_jobs.push_back(ds_id);
+            if self.lr_jobs.len() > LR_JOBS {
+                let old = self.lr_jobs.pop_front().unwrap();
+                if self.jobs.get(&old).is_some_and(|j| !j.pinned) {
+                    self.jobs.remove(&old);
+                }
+            }
+        }
+
+        while self.jobs.len() > MAX_JOBS {
             self.jobs.pop_first();
             self.dropped = true;
+        }
+    }
+
+    /// Drops one block's reference to a write, and the write itself if
+    /// nothing else keeps it
+    fn release(&mut self, ds_id: JobId) {
+        if let Some(j) = self.jobs.get_mut(&ds_id) {
+            j.refs = j.refs.saturating_sub(1);
+            if j.refs == 0 && !j.pinned {
+                self.jobs.remove(&ds_id);
+            }
+        }
+    }
+
+    /// Keeps a traced job, even after newer writes replace it
+    pub(crate) fn pin(&mut self, ds_id: JobId) {
+        if let Some(j) = self.jobs.get_mut(&ds_id) {
+            j.pinned = true;
+        }
+    }
+
+    /// Records that a client completed a job
+    ///
+    /// This must be called for every completion, traced or not, so that the
+    /// numbers give each client's completion order.
+    pub(crate) fn completed(
+        &mut self,
+        ds_id: JobId,
+        client_id: ClientId,
+        ok: bool,
+    ) {
+        let seq = self.seq[client_id];
+        self.seq[client_id] += 1;
+        if let Some(j) = self.jobs.get_mut(&ds_id) {
+            let count = j.done[client_id].map(|c| c.count).unwrap_or(0);
+            j.done[client_id] = Some(Completion {
+                seq,
+                time: Utc::now(),
+                ok,
+                count: count + 1,
+            });
+        }
+    }
+
+    /// Records a client's ack of a live-repair close of a traced extent
+    pub(crate) fn close_ack(
+        &mut self,
+        close_id: JobId,
+        extent: ExtentId,
+        client_id: ClientId,
+        ok: bool,
+        unfinished: Vec<(JobId, IOState, bool)>,
+    ) {
+        self.close_acks.push_back(CloseAck {
+            close_id,
+            extent,
+            client_id,
+            time: Utc::now(),
+            ok,
+            unfinished,
+        });
+        if self.close_acks.len() > CLOSE_ACKS {
+            self.close_acks.pop_front();
         }
     }
 
@@ -378,6 +539,25 @@ impl ExtentTrace {
                 write!(s, " sent[{cid}]x{count}:{deps:?}").unwrap();
             }
         }
+        write!(
+            s,
+            " done:{}",
+            client_list(&j.done, |d| match d {
+                Some(d) => format!(
+                    "#{}@{}{}{}",
+                    d.seq,
+                    d.time.format("%H:%M:%S%.6f"),
+                    if d.ok { "" } else { "!err" },
+                    if d.count > 1 {
+                        format!("x{}", d.count)
+                    } else {
+                        String::new()
+                    },
+                ),
+                None => "-".to_string(),
+            })
+        )
+        .unwrap();
         if let Some(r) = &j.repair {
             write!(
                 s,
@@ -408,12 +588,78 @@ impl ExtentTrace {
         s
     }
 
+    /// Returns lines that point out writes to `block` that live-repair's
+    /// close of its extent did not wait for
+    ///
+    /// For each traced close of the extent, and each client that completed
+    /// it, a write enqueued before the close should have finished on that
+    /// client before the close did.  We list each one that finished later,
+    /// or that was sent and had not finished when the close did.
+    fn late_writes<'a>(
+        &self,
+        block: u64,
+        extent: ExtentId,
+        active: &impl Fn(JobId) -> Option<&'a DownstairsIO>,
+    ) -> Vec<String> {
+        let mut out = vec![];
+        let closes = self.jobs.iter().filter(|(_, j)| {
+            matches!(j.work, TracedWork::Close { extent: x, .. } if x == extent)
+        });
+        for (close_id, close) in closes {
+            for cid in ClientId::iter() {
+                let Some(cd) = close.done[cid] else {
+                    continue;
+                };
+                let writes = self.jobs.range(..close_id).filter(|(_, j)| {
+                    matches!(&j.work, TracedWork::Write { start_block, contexts, .. }
+                        if (*start_block..start_block + contexts.len() as u64)
+                            .contains(&block))
+                });
+                for (id, w) in writes {
+                    match w.done[cid] {
+                        Some(wd) if wd.seq > cd.seq => out.push(format!(
+                            "block {block} LATE: write {id} finished on \
+                             [{cid}] (#{}) after close {close_id} (#{})",
+                            wd.seq, cd.seq
+                        )),
+                        Some(_) => (),
+                        None => {
+                            let state = match (&w.retired, active(*id)) {
+                                (Some((_, s)), _) => Some(s[cid].clone()),
+                                (None, Some(job)) => {
+                                    Some(job.state[cid].clone())
+                                }
+                                (None, None) => None,
+                            };
+                            if matches!(
+                                w.enqueue[cid],
+                                Some(EnqueueResult::Send)
+                            ) && state != Some(IOState::Skipped)
+                            {
+                                out.push(format!(
+                                    "block {block} LATE: write {id} not \
+                                     finished on [{cid}] when close \
+                                     {close_id} finished (#{}), state {:?}",
+                                    cd.seq, state
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Returns log lines tracing each mismatched block in a read
     ///
     /// For every mismatched block in a traced extent, this lists each traced
     /// write to that block and each live-repair job for its extent, oldest
     /// first, and marks which write produced the expected and the computed
-    /// contexts.  `active` looks up a job that has not been retired.
+    /// contexts.  It then points out any write to that block that finished
+    /// after live-repair closed its extent, and lists the writes each client
+    /// had not finished when it acked the close.  `active` looks up a job
+    /// that has not been retired.
     pub(crate) fn mismatch_report<'a>(
         &self,
         ddef: &RegionDefinition,
@@ -428,11 +674,12 @@ impl ExtentTrace {
         let mut out = vec![];
         match (self.jobs.first_key_value(), self.jobs.last_key_value()) {
             (Some((first, _)), Some((last, _))) => out.push(format!(
-                "trace holds {} jobs {first}..={last} for extents {:?}{}",
+                "trace holds {} jobs {first}..={last} for extents {:?}, \
+                 last {WRITES_PER_BLOCK} writes per block{}",
                 self.jobs.len(),
                 self.extents,
                 if self.dropped {
-                    ", older jobs dropped"
+                    ", older jobs dropped at limit"
                 } else {
                     ""
                 },
@@ -445,6 +692,7 @@ impl ExtentTrace {
 
         let traced = self.blocks(ddef);
         let es = ddef.extent_size().value;
+        let mut extents = BTreeSet::new();
         let mismatched = expected
             .iter()
             .zip(computed)
@@ -466,6 +714,10 @@ impl ExtentTrace {
                 continue;
             }
             let extent = ExtentId((block / es) as u32);
+            extents.insert(extent);
+            if self.evicted.contains(&block) {
+                out.push(format!("block {block} older writes dropped"));
+            }
             for (id, j) in &self.jobs {
                 let touches = match &j.work {
                     TracedWork::Write {
@@ -484,6 +736,24 @@ impl ExtentTrace {
                     out.push(format!("block {block} {line}"));
                 }
             }
+            out.extend(self.late_writes(block, extent, &active));
+        }
+
+        for a in self
+            .close_acks
+            .iter()
+            .filter(|a| extents.contains(&a.extent))
+        {
+            out.push(format!(
+                "close ack {} extent {} from [{}] {} ok:{} unfinished \
+                 writes enqueued before it (id, state, in close deps): {:?}",
+                a.close_id,
+                a.extent,
+                a.client_id,
+                a.time.format("%H:%M:%S%.6f"),
+                a.ok,
+                a.unfinished,
+            ));
         }
         out
     }
