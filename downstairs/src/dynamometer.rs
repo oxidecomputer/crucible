@@ -197,7 +197,7 @@ pub async fn repair_dynamometer(clone_source: SocketAddr) -> Result<()> {
 
     let url = format!("http://{:?}", clone_source);
     println!("using {url}");
-    let repair = repair_client::Client::new(&url);
+    let repair = repair_client::Client::new(&url)?;
 
     let source_def = match repair.get_region_info().await {
         Ok(def) => def.into_inner(),

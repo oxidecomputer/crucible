@@ -442,8 +442,10 @@ async fn handle_dsc(
     } else if let DscCommand::Connect { server } = dsc_cmd {
         let url = format!("http://{}", server).to_string();
         println!("Connecting to {:?}", url);
-        let rs = Client::new(&url);
-        *dsc_client = Some(rs);
+        match Client::new(&url) {
+            Ok(rs) => *dsc_client = Some(rs),
+            Err(e) => println!("Failed to create dsc client: {e}"),
+        }
     } else {
         println!("dsc: Need to be connected first");
     }

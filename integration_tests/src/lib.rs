@@ -3394,7 +3394,7 @@ mod integration_tests {
         let repair_addr = new_ds.repair_address();
 
         let url = format!("http://{:?}", repair_addr);
-        let repair_server = Client::new(&url);
+        let repair_server = Client::new(&url)?;
 
         // Extent are open, so the repair ready request should return false.
         let rc = repair_server.extent_repair_ready(0).await;
@@ -3429,7 +3429,7 @@ mod integration_tests {
         let repair_addr = new_ds.repair_address();
 
         let url = format!("http://{:?}", repair_addr);
-        let repair_server = Client::new(&url);
+        let repair_server = Client::new(&url)?;
 
         // Extent are not open, but the region is read only, so the requests
         // should all return true.
@@ -5043,7 +5043,8 @@ mod integration_tests {
         };
 
         let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr))
+                .unwrap();
 
         client
             .attach(
@@ -5604,7 +5605,8 @@ mod integration_tests {
         .unwrap();
 
         let client =
-            CruciblePantryClient::new(&format!("http://{}", pantry_addr));
+            CruciblePantryClient::new(&format!("http://{}", pantry_addr))
+                .unwrap();
 
         let vcr = VolumeConstructionRequest::Volume {
             id: volume_id,
