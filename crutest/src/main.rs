@@ -1,6 +1,6 @@
 // Copyright 2026 Oxide Computer Company
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use clap::Parser;
 use futures::StreamExt;
@@ -41,7 +41,10 @@ use crucible_client_types::RegionExtentInfo;
 use crucible_client_types::UpstairsInfoStatus;
 use crucible_client_types::VolumeInfo;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
-use dsc_client::{Client, types::DownstairsState};
+use dsc_client::{
+    Client,
+    types::{DownstairsState, RecreateStatus},
+};
 use repair_client::Client as repair_client;
 
 /*
@@ -116,6 +119,7 @@ enum Workload {
     /// Test the downstairs replacement path.
     /// Run IO to the upstairs, then replace a downstairs, then run
     /// more IO and verify it all works as expected.
+    /// This test requires a dsc server to control the downstairs.
     Replace {
         /// Before each replacement, do a fill of the disk so the replace will
         /// have to copy the entire disk..
@@ -788,7 +792,7 @@ async fn make_a_volume(
             warn!(test_log, "targets are ignored when dsc option is provided");
         }
         let dsc_url = format!("http://{}", dsc);
-        let dsc_client = Client::new(&dsc_url);
+        let dsc_client = Client::new(&dsc_url)?;
         let ri = match dsc_client.dsc_get_region_info().await {
             Ok(res) => res.into_inner(),
             Err(e) => {
@@ -874,7 +878,7 @@ async fn make_a_volume(
             let addr = SocketAddr::new(target.ip(), port);
             let repair_url = format!("http://{addr}");
             info!(test_log, "look at: {repair_url}");
-            let repair_client = repair_client::new(&repair_url);
+            let repair_client = repair_client::new(&repair_url)?;
             match repair_client.get_region_info().await {
                 Ok(ri) => {
                     info!(test_log, "RI is: {:?}", ri);
@@ -1284,7 +1288,7 @@ async fn main() -> Result<()> {
             let dsc_client = match opt.dsc {
                 Some(dsc_addr) => {
                     let dsc_url = format!("http://{}", dsc_addr);
-                    Client::new(&dsc_url)
+                    Client::new(&dsc_url)?
                 }
                 None => {
                     bail!("Replay workload requires a dsc endpoint");
@@ -1303,6 +1307,15 @@ async fn main() -> Result<()> {
             fast_fill,
             replacement,
         } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)?
+                }
+                None => {
+                    bail!("Replace requires a dsc endpoint");
+                }
+            };
             // Either we have a count, or we run until we get a signal.
             let mut wtq = {
                 if opt.continuous {
@@ -1322,6 +1335,8 @@ async fn main() -> Result<()> {
                 &mut disk_info,
                 targets,
                 fast_fill,
+                dsc_client,
+                test_log.clone(),
             )
             .await?;
         }
@@ -1330,7 +1345,7 @@ async fn main() -> Result<()> {
             let dsc_client = match opt.dsc {
                 Some(dsc_addr) => {
                     let dsc_url = format!("http://{}", dsc_addr);
-                    Client::new(&dsc_url)
+                    Client::new(&dsc_url)?
                 }
                 None => {
                     bail!("Replace before active requires a dsc endpoint");
@@ -1376,7 +1391,7 @@ async fn main() -> Result<()> {
             let dsc_client = match opt.dsc {
                 Some(dsc_addr) => {
                     let dsc_url = format!("http://{}", dsc_addr);
-                    Client::new(&dsc_url)
+                    Client::new(&dsc_url)?
                 }
                 None => {
                     bail!("Replace reconcile requires a dsc endpoint");
@@ -2530,6 +2545,86 @@ async fn replay_workload(
     Ok(())
 }
 
+// Wait for dsc to report the given state for a downstairs
+async fn wait_for_ds_state(
+    dsc_client: &Client,
+    cid: u32,
+    want: DownstairsState,
+) -> Result<()> {
+    loop {
+        let state = dsc_client
+            .dsc_get_ds_state(cid)
+            .await
+            .context("failed to get downstairs state")?
+            .into_inner();
+        if state == want {
+            return Ok(());
+        }
+        // These states are final so there is no point in waiting any longer..
+        if matches!(state, DownstairsState::Failed | DownstairsState::Error) {
+            bail!("downstairs {cid} is {state:?}, waiting for {want:?}");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+    }
+}
+
+// Give a downstairs that has been replaced a new, empty region, then start it
+//
+// These tests reuse a downstairs that was replaced as a new replacement in a
+// later loop.  In the product a replacement region is always new.  The
+// region is empty and has never been active.  Recreating the region here
+// makes the "reused" downstairs look like that.  This allows the same cid
+// to be reused by clients without having to make new regions.
+async fn recreate_downstairs(
+    dsc_client: &Client,
+    cid: u32,
+    log: &Logger,
+) -> Result<()> {
+    // We have to be sure the current downstairs has stopped and will remain
+    // stopped so we can recreate it.
+    dsc_client
+        .dsc_disable_restart(cid)
+        .await
+        .context("failed to disable restart")?;
+    dsc_client.dsc_stop(cid).await.context("failed to stop")?;
+    wait_for_ds_state(dsc_client, cid, DownstairsState::Exit).await?;
+
+    dsc_client
+        .dsc_recreate(cid)
+        .await
+        .context("failed to start region recreate")?;
+
+    // Creating a large region can take many minutes, so there is no limit
+    // on how long we wait here.
+    let mut polls = 0;
+    let uuid = loop {
+        let status = dsc_client
+            .dsc_get_recreate_status(cid)
+            .await
+            .context("failed to get recreate status")?
+            .into_inner();
+        match status {
+            RecreateStatus::Done { uuid } => break uuid,
+            RecreateStatus::Failed { error } => {
+                bail!("failed to recreate region {cid}: {error}");
+            }
+            RecreateStatus::InProgress => {}
+            RecreateStatus::Idle => {
+                bail!("recreate of region {cid} did not start");
+            }
+        }
+        polls += 1;
+        if polls % 30 == 0 {
+            info!(log, "Waiting for recreate of downstairs {cid}");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    };
+    info!(log, "Recreated downstairs {cid} with new region {uuid}");
+
+    dsc_client.dsc_start(cid).await.context("failed to start")?;
+    wait_for_ds_state(dsc_client, cid, DownstairsState::Running).await
+}
+
 // Test that a downstairs can be replaced while the initial reconciliation
 // is underway.
 //
@@ -2695,6 +2790,12 @@ async fn replace_while_reconcile(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
+        // Recreate a new region at the old client for the downstairs we just
+        // replaced.  This gives us a brand new set of extents and no old
+        // data.  When this is used as a replacement it will look like the
+        // new region the control plane would provide.
+        recreate_downstairs(&dsc_client, old_ds, &log).await?;
+
         old_ds = (old_ds + 1) % (ds_total as u32 + 1);
         new_ds = (new_ds + 1) % (ds_total + 1);
 
@@ -2836,9 +2937,11 @@ async fn replace_before_active(
             bail!("Requested volume verify failed: {:?}", e)
         }
 
-        // Start up the old downstairs so it is ready for the next loop.
-        let res = dsc_client.dsc_start(old_ds).await;
-        info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
+        // Recreate a new region at the old client for the downstairs we just
+        // replaced.  This gives us a brand new set of extents and no old
+        // data.  When this is used as a replacement it will look like the
+        // new region the control plane would provide.
+        recreate_downstairs(&dsc_client, old_ds, &log).await?;
 
         // Wait for all IO to finish before we continue
         loop {
@@ -2900,6 +3003,8 @@ async fn replace_workload(
     di: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     fill: bool,
+    dsc_client: Client,
+    log: Logger,
 ) -> Result<()> {
     assert!(targets.len() % 3 == 1);
 
@@ -2964,6 +3069,12 @@ async fn replace_workload(
                 tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
                 wc = volume_c.show_work().await?;
             }
+
+            // The old downstairs is no longer part of the volume.  Give it a
+            // new region, so when it is used as a replacement it is like the
+            // new region the product would provide.
+            recreate_downstairs(&dsc_client, old_ds as u32, &log).await?;
+
             // Tell the global thread that a repair is done and what count we
             // are at.
             work_count_tx.send(c).await.expect("Failed to send count");
@@ -2999,6 +3110,13 @@ async fn replace_workload(
 
         let io_count = work_count_rx.try_recv().unwrap_or(0);
         println!("IO task with {io_count} replacements ");
+
+        // If the replace task has ended, stop the IO.  If the task ended
+        // with an error, we report it below.
+        if handle.is_finished() {
+            println!("IO task shutting down as replace task has ended");
+            break;
+        }
 
         match wtq {
             WhenToQuit::Count { count } => {

@@ -51,7 +51,7 @@ enum Action {
 
 // Show the downstairs work queue
 async fn show_work_queue(args: Args) {
-    let ca = Client::new(&args.control);
+    let ca = Client::new(&args.control).unwrap();
     loop {
         clearscreen::clear().unwrap();
         match ca.downstairs_work_queue().await {
@@ -92,7 +92,7 @@ async fn show_work_queue(args: Args) {
 
 // Show LiveRepair stats
 async fn show_repair_stats(args: Args) {
-    let ca = Client::new(&args.control);
+    let ca = Client::new(&args.control).unwrap();
     let mut count = 20;
     loop {
         if count == 20 {

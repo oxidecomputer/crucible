@@ -916,6 +916,7 @@ impl Region {
     fn validate_hashes(
         &self,
         write: &RegionWrite,
+        job_id: JobId,
     ) -> Result<(), CrucibleError> {
         let block_size = self.def().block_size() as usize;
         for req in write.iter() {
@@ -924,7 +925,8 @@ impl Region {
             if w.data.len() / block_size != w.block_contexts.len() {
                 panic!("invalid write; block count must match context count");
             }
-            for (block, ctx) in w.data.chunks(block_size).zip(&w.block_contexts)
+            for (block_index, (block, ctx)) in
+                w.data.chunks(block_size).zip(&w.block_contexts).enumerate()
             {
                 let computed_hash =
                     if let Some(encryption_context) = &ctx.encryption_context {
@@ -938,8 +940,16 @@ impl Region {
                     };
 
                 if computed_hash != ctx.hash {
-                    error!(self.log, "Failed write hash validation");
-                    // TODO: print out the extent and block where this failed!!
+                    error!(
+                        self.log,
+                        "Failed write hash validation";
+                        "region_uuid" => self.def.uuid().to_string(),
+                        "extent_id" => req.extent.0,
+                        "block_offset" => w.offset.0 + block_index as u64,
+                        "supplied_hash" => ctx.hash,
+                        "computed_hash" => computed_hash,
+                        "job_id" => job_id.0,
+                    );
                     crucible_bail!(HashMismatch);
                 }
             }
@@ -962,7 +972,7 @@ impl Region {
         /*
          * Before anything, validate hashes
          */
-        self.validate_hashes(writes)?;
+        self.validate_hashes(writes, job_id)?;
 
         if only_write_unwritten {
             cdt::os__writeunwritten__start!(|| job_id.0);
