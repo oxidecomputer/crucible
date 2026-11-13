@@ -116,6 +116,7 @@ enum Workload {
     /// Test the downstairs replacement path.
     /// Run IO to the upstairs, then replace a downstairs, then run
     /// more IO and verify it all works as expected.
+    /// This test requires a dsc server to control the downstairs.
     Replace {
         /// Before each replacement, do a fill of the disk so the replace will
         /// have to copy the entire disk..
@@ -1301,6 +1302,15 @@ async fn main() -> Result<()> {
             fast_fill,
             replacement,
         } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)?
+                }
+                None => {
+                    bail!("Replace requires a dsc endpoint");
+                }
+            };
             // Either we have a count, or we run until we get a signal.
             let mut wtq = {
                 if opt.continuous {
@@ -1320,6 +1330,8 @@ async fn main() -> Result<()> {
                 &mut disk_info,
                 targets,
                 fast_fill,
+                dsc_client,
+                test_log.clone(),
             )
             .await?;
         }
@@ -2955,6 +2967,8 @@ async fn replace_workload(
     di: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     fill: bool,
+    dsc_client: Client,
+    log: Logger,
 ) -> Result<()> {
     assert!(targets.len() % 3 == 1);
 
@@ -3019,6 +3033,12 @@ async fn replace_workload(
                 tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
                 wc = volume_c.show_work().await?;
             }
+
+            // The old downstairs is no longer part of the volume.  Give it a
+            // new region, so when it is used as a replacement it is like the
+            // new region the product would provide.
+            recreate_downstairs(&dsc_client, old_ds as u32, &log).await?;
+
             // Tell the global thread that a repair is done and what count we
             // are at.
             work_count_tx.send(c).await.expect("Failed to send count");
@@ -3054,6 +3074,13 @@ async fn replace_workload(
 
         let io_count = work_count_rx.try_recv().unwrap_or(0);
         println!("IO task with {io_count} replacements ");
+
+        // If the replace task has ended, stop the IO.  If the task ended
+        // with an error, we report it below.
+        if handle.is_finished() {
+            println!("IO task shutting down as replace task has ended");
+            break;
+        }
 
         match wtq {
             WhenToQuit::Count { count } => {
