@@ -783,7 +783,7 @@ async fn make_a_volume(
             warn!(test_log, "targets are ignored when dsc option is provided");
         }
         let dsc_url = format!("http://{}", dsc);
-        let dsc_client = Client::new(&dsc_url);
+        let dsc_client = Client::new(&dsc_url)?;
         let ri = match dsc_client.dsc_get_region_info().await {
             Ok(res) => res.into_inner(),
             Err(e) => {
@@ -869,7 +869,7 @@ async fn make_a_volume(
             let addr = SocketAddr::new(target.ip(), port);
             let repair_url = format!("http://{addr}");
             info!(test_log, "look at: {repair_url}");
-            let repair_client = repair_client::new(&repair_url);
+            let repair_client = repair_client::new(&repair_url)?;
             match repair_client.get_region_info().await {
                 Ok(ri) => {
                     info!(test_log, "RI is: {:?}", ri);
@@ -1279,7 +1279,7 @@ async fn main() -> Result<()> {
             let dsc_client = match opt.dsc {
                 Some(dsc_addr) => {
                     let dsc_url = format!("http://{}", dsc_addr);
-                    Client::new(&dsc_url)
+                    Client::new(&dsc_url)?
                 }
                 None => {
                     bail!("Replay workload requires a dsc endpoint");
@@ -1324,7 +1324,7 @@ async fn main() -> Result<()> {
             let dsc_client = match opt.dsc {
                 Some(dsc_addr) => {
                     let dsc_url = format!("http://{}", dsc_addr);
-                    Client::new(&dsc_url)
+                    Client::new(&dsc_url)?
                 }
                 None => {
                     bail!("Replace before active requires a dsc endpoint");
@@ -1370,7 +1370,7 @@ async fn main() -> Result<()> {
             let dsc_client = match opt.dsc {
                 Some(dsc_addr) => {
                     let dsc_url = format!("http://{}", dsc_addr);
-                    Client::new(&dsc_url)
+                    Client::new(&dsc_url)?
                 }
                 None => {
                     bail!("Replace reconcile requires a dsc endpoint");
