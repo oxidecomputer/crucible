@@ -916,6 +916,7 @@ impl Region {
     fn validate_hashes(
         &self,
         write: &RegionWrite,
+        job_id: JobId,
     ) -> Result<(), CrucibleError> {
         let block_size = self.def().block_size() as usize;
         for req in write.iter() {
@@ -924,7 +925,8 @@ impl Region {
             if w.data.len() / block_size != w.block_contexts.len() {
                 panic!("invalid write; block count must match context count");
             }
-            for (block, ctx) in w.data.chunks(block_size).zip(&w.block_contexts)
+            for (block_index, (block, ctx)) in
+                w.data.chunks(block_size).zip(&w.block_contexts).enumerate()
             {
                 let computed_hash =
                     if let Some(encryption_context) = &ctx.encryption_context {
@@ -938,8 +940,16 @@ impl Region {
                     };
 
                 if computed_hash != ctx.hash {
-                    error!(self.log, "Failed write hash validation");
-                    // TODO: print out the extent and block where this failed!!
+                    error!(
+                        self.log,
+                        "Failed write hash validation";
+                        "region_uuid" => self.def.uuid().to_string(),
+                        "extent_id" => req.extent.0,
+                        "block_offset" => w.offset.0 + block_index as u64,
+                        "supplied_hash" => ctx.hash,
+                        "computed_hash" => computed_hash,
+                        "job_id" => job_id.0,
+                    );
                     crucible_bail!(HashMismatch);
                 }
             }
@@ -962,7 +972,7 @@ impl Region {
         /*
          * Before anything, validate hashes
          */
-        self.validate_hashes(writes)?;
+        self.validate_hashes(writes, job_id)?;
 
         if only_write_unwritten {
             cdt::os__writeunwritten__start!(|| job_id.0);
@@ -3963,6 +3973,103 @@ pub(crate) mod test {
             _ => {
                 panic!("Incorrect error with hash mismatch");
             }
+        }
+    }
+
+    #[test]
+    fn test_hash_mismatch_diagnostics() {
+        use slog::{Drain, KV, Serializer};
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Fields(BTreeMap<String, String>);
+
+        impl Serializer for Fields {
+            fn emit_arguments(
+                &mut self,
+                key: slog::Key,
+                value: &std::fmt::Arguments<'_>,
+            ) -> slog::Result {
+                self.0.insert(key.to_string(), value.to_string());
+                Ok(())
+            }
+        }
+
+        struct CaptureErrors(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+
+        impl Drain for CaptureErrors {
+            type Ok = ();
+            type Err = slog::Error;
+
+            fn log(
+                &self,
+                record: &slog::Record<'_>,
+                values: &slog::OwnedKVList,
+            ) -> Result<(), Self::Err> {
+                if record.level() == slog::Level::Error {
+                    let mut fields = Fields::default();
+                    record.kv().serialize(record, &mut fields)?;
+                    values.serialize(record, &mut fields)?;
+                    self.0.lock().unwrap().push(fields.0);
+                }
+                Ok(())
+            }
+        }
+
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let log = Logger::root(CaptureErrors(errors.clone()).fuse(), o!());
+        let dir = tempdir().unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), log).unwrap();
+        region.extend(8, Backend::RawFile).unwrap();
+
+        let data = Bytes::from(
+            (0..6 * 512).map(|i| (i / 512) as u8).collect::<Vec<_>>(),
+        );
+        let job_id = JobId(1234);
+
+        // Extents contain ten blocks. Check a nonzero starting offset, then
+        // a write spanning extents 6 and 7 whose mismatch is in extent 7.
+        for (start, first_bad, block_offset) in [(74, 2, 6u64), (68, 4, 2)] {
+            let mut contexts = data
+                .chunks(512)
+                .map(|block| BlockContext {
+                    encryption_context: None,
+                    hash: integrity_hash(&[block]),
+                })
+                .collect::<Vec<_>>();
+            let computed_hash = contexts[first_bad].hash;
+            contexts[first_bad].hash ^= 1;
+            contexts[first_bad + 1].hash ^= 1;
+            let supplied_hash = contexts[first_bad].hash;
+            let writes = RegionWrite::new(
+                BlockIndex(start),
+                &contexts,
+                data.clone(),
+                &region.def(),
+            )
+            .unwrap();
+
+            assert!(matches!(
+                region.region_write(&writes, job_id, false),
+                Err(CrucibleError::HashMismatch)
+            ));
+            assert!(region.dirty_extents.is_empty());
+
+            let mut errors = errors.lock().unwrap();
+            assert_eq!(errors.len(), 1);
+            assert_eq!(
+                errors.pop().unwrap(),
+                BTreeMap::from([
+                    ("region_uuid".to_string(), test_uuid().to_string()),
+                    ("extent_id".to_string(), "7".to_string()),
+                    ("block_offset".to_string(), block_offset.to_string()),
+                    ("supplied_hash".to_string(), supplied_hash.to_string()),
+                    ("computed_hash".to_string(), computed_hash.to_string()),
+                    ("job_id".to_string(), job_id.0.to_string()),
+                ]),
+            );
         }
     }
 
