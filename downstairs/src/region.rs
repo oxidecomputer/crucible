@@ -3996,7 +3996,12 @@ pub(crate) mod test {
             }
         }
 
-        struct CaptureErrors(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+        struct CapturedError {
+            message: String,
+            fields: BTreeMap<String, String>,
+        }
+
+        struct CaptureErrors(Arc<Mutex<Vec<CapturedError>>>);
 
         impl Drain for CaptureErrors {
             type Ok = ();
@@ -4011,14 +4016,20 @@ pub(crate) mod test {
                     let mut fields = Fields::default();
                     record.kv().serialize(record, &mut fields)?;
                     values.serialize(record, &mut fields)?;
-                    self.0.lock().unwrap().push(fields.0);
+                    self.0.lock().unwrap().push(CapturedError {
+                        message: record.msg().to_string(),
+                        fields: fields.0,
+                    });
                 }
                 Ok(())
             }
         }
 
         let errors = Arc::new(Mutex::new(Vec::new()));
-        let log = Logger::root(CaptureErrors(errors.clone()).fuse(), o!());
+        let log = Logger::root(
+            CaptureErrors(errors.clone()).fuse(),
+            o!("test_context" => "hash validation"),
+        );
         let dir = tempdir().unwrap();
         let mut region =
             Region::create(&dir, new_region_options(), log).unwrap();
@@ -4031,7 +4042,9 @@ pub(crate) mod test {
 
         // Extents contain ten blocks. Check a nonzero starting offset, then
         // a write spanning extents 6 and 7 whose mismatch is in extent 7.
-        for (start, first_bad, block_offset) in [(74, 2, 6u64), (68, 4, 2)] {
+        for (start, first_bad, expected_block_offset) in
+            [(74, 2, 6u64), (68, 4, 2)]
+        {
             let mut contexts = data
                 .chunks(512)
                 .map(|block| BlockContext {
@@ -4040,6 +4053,7 @@ pub(crate) mod test {
                 })
                 .collect::<Vec<_>>();
             let computed_hash = contexts[first_bad].hash;
+            // Corrupt two blocks to verify that only the first mismatch is logged.
             contexts[first_bad].hash ^= 1;
             contexts[first_bad + 1].hash ^= 1;
             let supplied_hash = contexts[first_bad].hash;
@@ -4059,17 +4073,18 @@ pub(crate) mod test {
 
             let mut errors = errors.lock().unwrap();
             assert_eq!(errors.len(), 1);
-            assert_eq!(
-                errors.pop().unwrap(),
-                BTreeMap::from([
-                    ("region_uuid".to_string(), test_uuid().to_string()),
-                    ("extent_id".to_string(), "7".to_string()),
-                    ("block_offset".to_string(), block_offset.to_string()),
-                    ("supplied_hash".to_string(), supplied_hash.to_string()),
-                    ("computed_hash".to_string(), computed_hash.to_string()),
-                    ("job_id".to_string(), job_id.0.to_string()),
-                ]),
-            );
+            let error = errors.pop().unwrap();
+            assert_eq!(error.message, "Failed write hash validation");
+            for (key, expected) in [
+                ("region_uuid", test_uuid().to_string()),
+                ("extent_id", "7".to_string()),
+                ("block_offset", expected_block_offset.to_string()),
+                ("supplied_hash", supplied_hash.to_string()),
+                ("computed_hash", computed_hash.to_string()),
+                ("job_id", job_id.0.to_string()),
+            ] {
+                assert_eq!(error.fields.get(key), Some(&expected), "{key}");
+            }
         }
     }
 
