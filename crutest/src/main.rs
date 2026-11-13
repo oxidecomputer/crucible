@@ -1437,7 +1437,7 @@ async fn main() -> Result<()> {
             let dsc_client = match opt.dsc {
                 Some(dsc_addr) => {
                     let dsc_url = format!("http://{}", dsc_addr);
-                    Client::new(&dsc_url)
+                    Client::new(&dsc_url)?
                 }
                 None => {
                     bail!("Replace reconcile requires a dsc endpoint");
