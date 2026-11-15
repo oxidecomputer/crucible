@@ -564,6 +564,17 @@ mod integration_tests {
             self.downstairs.as_ref().unwrap().address()
         }
 
+        /// Returns whether this downstairs has recorded that an upstairs
+        /// told it it was active
+        ///
+        /// This reads the region's private file, which the downstairs
+        /// writes atomically.
+        pub fn been_active(&self) -> Result<bool> {
+            let pp = private_path(self.dataset.path_buf()?);
+            let state: RegionPrivateState = read_json(&pp)?;
+            Ok(state.been_active())
+        }
+
         // Return the repair address for a running downstairs
         pub fn repair_address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
@@ -768,6 +779,22 @@ mod integration_tests {
             let _join_handle = up_main(self.opts(), 1, None, io, None)?;
             guest.activate().await?;
             guest.deactivate().await?;
+
+            // The upstairs does not wait for a reply to YouHaveBeenActive,
+            // so a downstairs may still be recording it after we have
+            // deactivated.  Wait until all three have recorded it.
+            for ds in [&self.downstairs1, &self.downstairs2, &self.downstairs3]
+            {
+                let mut tries = 0;
+                while !ds.been_active()? {
+                    tries += 1;
+                    if tries > 100 {
+                        bail!("{} has not recorded been_active", ds.address());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100))
+                        .await;
+                }
+            }
             Ok(())
         }
 
