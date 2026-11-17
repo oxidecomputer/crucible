@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
     let log = build_logger();
 
     let pantry_url = format!("http://{}", args.pantry);
-    let pantry = Client::new(&pantry_url);
+    let pantry = Client::new(&pantry_url)?;
 
     match args.cmd {
         Cmd::Status => cmd_status(&log, &pantry).await?,
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
             generation,
         } => {
             let volume_id = volume_id.unwrap_or_else(Uuid::new_v4);
-            let dsc_client = DscClient::new(&format!("http://{dsc}"));
+            let dsc_client = DscClient::new(&format!("http://{dsc}"))?;
             cmd_attach(
                 &log,
                 &pantry,

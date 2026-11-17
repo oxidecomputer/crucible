@@ -1,9 +1,10 @@
 // Copyright 2022 Oxide Computer Company
 
 use clap::Parser;
-use dsc_client::Client;
+use dsc_client::{Client, types::RecreateStatus};
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Parser, PartialEq)]
@@ -52,6 +53,13 @@ pub enum ClientCommand {
     },
     /// Show whether downstairs are running read-only
     ReadOnly,
+    /// Replace the region of the given client ID with a new empty region,
+    /// and loop waiting for it to finish.
+    /// The downstairs must be stopped with restart disabled.
+    Recreate {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
     /// Get count of regions.
     RegionCount,
     /// Get region info.
@@ -89,7 +97,7 @@ pub enum ClientCommand {
 // Connect to the DSC and run a command.
 #[tokio::main]
 pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
-    let dsc = Client::new(&server);
+    let dsc = Client::new(&server)?;
     match cmd {
         ClientCommand::AllRunning => {
             let res = dsc.dsc_all_running().await.unwrap();
@@ -138,6 +146,24 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
         ClientCommand::RegionCount => {
             let res = dsc.dsc_get_region_count().await.unwrap();
             println!("{:?}", res);
+        }
+        ClientCommand::Recreate { cid } => {
+            let _ = dsc.dsc_recreate(cid).await.unwrap();
+            loop {
+                let res = dsc
+                    .dsc_get_recreate_status(cid)
+                    .await
+                    .unwrap()
+                    .into_inner();
+                if !matches!(res, RecreateStatus::InProgress) {
+                    println!("{:?}", res);
+                    if let RecreateStatus::Failed { error } = res {
+                        bail!("recreate of client {cid} failed: {error}");
+                    }
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
         ClientCommand::RegionInfo => {
             let res = dsc.dsc_get_region_info().await.unwrap();
