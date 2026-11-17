@@ -2187,10 +2187,10 @@ impl Upstairs {
                 let unready_ds =
                     ClientId::iter().find(|i| !is_ready[*i]).unwrap();
 
-                // If it is stopping (for example, because it is being
-                // replaced), it picks its connection mode when it restarts.
-                // These are the stop reasons that `on_reconciliation_done`
-                // also allows.
+                // If the unready Downstairs is stopping (for example, because
+                // of a replacement), the Downstairs picks its connection mode
+                // on restart.  These are the stop reasons that
+                // `on_reconciliation_done` also allows.
                 if matches!(
                     self.downstairs.clients[unready_ds].state(),
                     DsState::Stopping(
@@ -3049,7 +3049,9 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn min_quorum_replace_third_before_deadline_no_work() {
-        // As above, but reconciliation has nothing to do, so DS0 and DS1 go
+        // DS2 is replaced while DS0 and DS1 wait for the min-quorum deadline,
+        // and the deadline fires before DS2 has finished stopping.
+        // Reconciliation has nothing to do, so DS0 and DS1 go
         // active as soon as the deadline fires.
         let (mut up, _rx) = min_quorum_replace_upstairs(false);
         replace_ds2(&mut up);

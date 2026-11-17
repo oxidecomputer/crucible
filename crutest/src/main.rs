@@ -36,6 +36,8 @@ pub use stats::*;
 use crucible::volume::VolumeBuilder;
 use crucible::volume::VolumeExtentInfo;
 use crucible::*;
+use crucible_client_types::DownstairsInfo;
+use crucible_client_types::DownstairsInfoNegotiationStatus;
 use crucible_client_types::DownstairsInfoStatus;
 use crucible_client_types::RegionExtentInfo;
 use crucible_client_types::UpstairsInfoStatus;
@@ -1355,8 +1357,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Add to the list of targets for our volume the replacement
-            // target provided on the command line
+            // Add the replacement target provided on the command line to the
+            // list of targets for our volume.
             targets.push(replacement);
 
             // Verify the number of targets dsc has matches what the number
@@ -2573,12 +2575,138 @@ async fn recreate_downstairs(
     wait_for_ds_state(dsc_client, cid, DownstairsState::Running).await
 }
 
+/// Which downstairs were reconciling when `replace_while_reconcile` replaced
+/// one.
+#[derive(Debug)]
+enum ReconcileKind {
+    /// All three downstairs.
+    ThreeWay,
+    /// Min-quorum reconciliation that included the downstairs we replaced.
+    TwoWayWithOld,
+    /// Min-quorum reconciliation without the downstairs we replaced.
+    TwoWayWithoutOld,
+}
+
+/// How the new downstairs joined after `replace_while_reconcile` replaced
+/// one.
+#[derive(Debug)]
+enum JoinedBy {
+    /// Reconciliation with the other downstairs, before the upstairs went
+    /// active.
+    Reconcile,
+    /// Live-repair, after the upstairs went active without it.
+    LiveRepair,
+}
+
+/// Counts of the paths `replace_while_reconcile` has taken.
+///
+/// The test was written to cover the intended path: replace a downstairs
+/// during a three-way reconciliation, before the upstairs is active, and
+/// the new downstairs joins through reconciliation.  The other paths are
+/// fine, but they are not what this test was written to cover.
+#[derive(Debug, Default)]
+struct ReplaceReconcilePaths {
+    /// Loops that took the intended path.
+    intended: usize,
+    /// Loops where the upstairs went active before we saw reconciliation.
+    missed: usize,
+    /// Replaced during reconciliation with all three downstairs.
+    three_way: usize,
+    /// Replaced during min-quorum reconciliation that included the old
+    /// downstairs.
+    two_way_with_old: usize,
+    /// Replaced during min-quorum reconciliation without the old downstairs.
+    two_way_without_old: usize,
+    /// The upstairs was already active when the replace returned.
+    active_at_replace: usize,
+    /// The new downstairs joined through reconciliation.
+    joined_by_reconcile: usize,
+    /// The new downstairs joined through live-repair.
+    joined_by_live_repair: usize,
+}
+
+impl ReplaceReconcilePaths {
+    /// Log the totals, with the intended path first.
+    fn log_totals(&self, log: &Logger, prefix: &str) {
+        let loops =
+            self.three_way + self.two_way_with_old + self.two_way_without_old;
+        info!(
+            log,
+            "{prefix} Intended path (three-way reconcile, replaced before \
+             active, joined by reconcile): {} of {loops} loops",
+            self.intended,
+        );
+        // A single loop can count toward more than one of these.
+        info!(
+            log,
+            "{prefix} Other paths (fine, but not what this test covers): \
+             missed reconcile: {}, two-way reconcile with old: {}, \
+             two-way reconcile without old: {}, active at replace: {}, \
+             joined by live-repair: {}",
+            self.missed,
+            self.two_way_with_old,
+            self.two_way_without_old,
+            self.active_at_replace,
+            self.joined_by_live_repair,
+        );
+    }
+}
+
+/// Find the sub-volume that has `target` as one of its downstairs.
+///
+/// Returns the sub-volume's state, whether reconciliation is in progress,
+/// and its downstairs.
+fn sub_volume_status(
+    vi: &VolumeInfo,
+    target: SocketAddr,
+) -> Result<(UpstairsInfoStatus, bool, Vec<DownstairsInfo>)> {
+    let VolumeInfo::Volume { sub_volumes, .. } = vi else {
+        bail!("expected top-level VolumeInfo::Volume");
+    };
+
+    for sv in sub_volumes {
+        let VolumeInfo::Upstairs {
+            state,
+            reconcile_in_progress,
+            targets,
+            ..
+        } = sv
+        else {
+            bail!("expected sub_volume to be Upstairs");
+        };
+
+        if targets.iter().any(|t| t.target_addr == Some(target)) {
+            return Ok((
+                state.clone(),
+                *reconcile_in_progress,
+                targets.clone(),
+            ));
+        }
+    }
+
+    bail!("no sub_volume has target {target}");
+}
+
 // Test that a downstairs can be replaced while the initial reconciliation
 // is underway.
 //
 // This test makes use of the dsc client to stop and start downstairs that
 // will allow us to create a mismatch between downstairs which will then
 // trigger a reconcile.
+//
+// With min-quorum, a loop can take different paths: reconciliation may be
+// between two or three downstairs, and after the replace the new downstairs
+// may join through reconciliation or live-repair.  We log the path each loop
+// takes, and the totals at the end.  See ReplaceReconcilePaths for the
+// intended path.
+//
+// We can't exactly control what happens during this test, because the path
+// a loop takes depends on timing inside the upstairs.  What we can do is
+// tell which path each loop ended up taking.  This test is expected to take
+// the intended path: replace a downstairs during a three-way reconciliation,
+// before the upstairs is active, and the new downstairs joins through
+// reconciliation.  When the test completes, we report how many loops took
+// the intended path, and which other paths (if any) were taken.
 async fn replace_while_reconcile(
     volume: &Volume,
     mut wtq: WhenToQuit,
@@ -2595,8 +2723,9 @@ async fn replace_while_reconcile(
     let mut old_ds = 0;
     let mut new_ds = targets.len() - 1;
     let mut c = 1;
-    // How long we wait for reconcile to start before we replace
-    let mut active_wait = 6;
+    let mut paths = ReplaceReconcilePaths::default();
+    // Loops in a row where reconciliation finished before we saw it
+    let mut consecutive_misses = 0;
 
     info!(log, "Begin replacement while reconciliation test");
     loop {
@@ -2628,8 +2757,9 @@ async fn replace_while_reconcile(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        // We now have touched every extent with one downstairs missing,
-        // so on restart of that downstairs we will require reconciliation.
+        // We touched every extent with one downstairs missing, and now
+        // deactivated.  This means that downstairs will require full
+        // reconciliation when we activate.
 
         // Start a downstairs, wait for dsc to confirm it is started.
         info!(log, "[{c}] Deactivate complete, now Start a downstairs");
@@ -2651,32 +2781,70 @@ async fn replace_while_reconcile(
         let handle =
             tokio::spawn(async move { gc.activate_with_gen(generation).await });
 
-        info!(log, "[{c}] wait {active_wait} for reconcile to start");
-        tokio::time::sleep(tokio::time::Duration::from_secs(active_wait)).await;
+        // Wait until the upstairs reports reconciliation in progress, so we
+        // know the replace happens during reconciliation and not while the
+        // downstairs are still negotiating.
+        info!(log, "[{c}] Wait for reconcile to start");
+        let old_target = targets[old_ds as usize];
+        let mut polls = 0;
+        let reconcile_kind = loop {
+            let vi = volume.query_volume_info().await?;
+            let (state, reconciling, ds) = sub_volume_status(&vi, old_target)?;
+            if reconciling {
+                let in_reconcile = |t: &DownstairsInfo| {
+                    matches!(
+                        t.state,
+                        DownstairsInfoStatus::Connecting {
+                            state: DownstairsInfoNegotiationStatus::Reconcile,
+                            ..
+                        }
+                    )
+                };
+                let count = ds.iter().filter(|t| in_reconcile(t)).count();
+                let old_in = ds.iter().any(|t| {
+                    t.target_addr == Some(old_target) && in_reconcile(t)
+                });
+                break Some(if count == 3 {
+                    ReconcileKind::ThreeWay
+                } else if old_in {
+                    ReconcileKind::TwoWayWithOld
+                } else {
+                    ReconcileKind::TwoWayWithoutOld
+                });
+            }
+            if state == UpstairsInfoStatus::Active {
+                break None;
+            }
+            polls += 1;
+            if polls > 600 {
+                bail!("[{c}] Reconcile did not start after 60 seconds");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        };
 
-        //  Give the activation request time to percolate in the upstairs.
-        let is_active = volume.query_is_active().await.unwrap();
-        info!(log, "[{c}] activate should now be waiting {:?}", is_active);
-        // If this check fails, then the reconciliation has finished
-        // before we had a chance to replace our downstairs. We try here to
-        // reduce the wait time and do another loop.
-        if is_active {
-            if active_wait > 1 {
-                active_wait -= 1;
-                warn!(
-                    log,
-                    "[{c}] Adjusting wait time smaller to catch reconcile",
-                );
-                continue;
-            } else {
-                // A second was not long enough to catch the reconcile, so
+        // If the upstairs went active before we saw reconciliation, then it
+        // finished before we had a chance to replace our downstairs.  Try
+        // again with another loop.
+        let Some(reconcile_kind) = reconcile_kind else {
+            if let Err(e) = handle.await.unwrap() {
+                bail!("Failure reported in activate task {:?}", e);
+            }
+            paths.missed += 1;
+            consecutive_misses += 1;
+            if consecutive_misses >= 5 {
+                // Polling was not fast enough to catch the reconcile, so
                 // the downstairs region size is too small for this test.
-                panic!(
+                bail!(
                     "Downstairs reconciliation too fast for this test, \
                     consider making a larger downstairs region"
                 );
             }
-        }
+            warn!(log, "[{c}] Upstairs went active before we saw reconcile");
+            paths.log_totals(&log, &format!("[{c}]"));
+            continue;
+        };
+        consecutive_misses = 0;
+        info!(log, "[{c}] Reconcile in progress: {reconcile_kind:?}");
 
         info!(
             log,
@@ -2698,17 +2866,59 @@ async fn replace_while_reconcile(
             }
         }
 
+        // Reconciliation can finish between our check above and the
+        // replace.  If so, the upstairs is already active and this was a
+        // replace of an active upstairs instead.
+        let new_target = targets[new_ds];
+        let vi = volume.query_volume_info().await?;
+        let (state, _, _) = sub_volume_status(&vi, new_target)?;
+        let active_at_replace = state == UpstairsInfoStatus::Active;
+
+        // When the upstairs goes active, the new downstairs is already
+        // active if it joined through reconciliation.  If the other two
+        // activated without it, it joins through live-repair.  A live-repair
+        // that finished between two polls would be counted as reconciliation,
+        // but we poll often enough that this should be rare.
         info!(log, "[{c}] Wait for activation after replacement");
-        loop {
-            let is_active = volume.query_is_active().await.unwrap();
-            if is_active {
-                break;
+        let mut polls = 0;
+        let joined_by = loop {
+            let vi = volume.query_volume_info().await?;
+            let (state, _, ds) = sub_volume_status(&vi, new_target)?;
+            if state == UpstairsInfoStatus::Active {
+                let new_active = ds.iter().any(|t| {
+                    t.target_addr == Some(new_target)
+                        && t.state == DownstairsInfoStatus::Active
+                });
+                break if new_active {
+                    JoinedBy::Reconcile
+                } else {
+                    JoinedBy::LiveRepair
+                };
             }
-            info!(
-                log,
-                "[{c}] Upstairs query_is_active reports: {:?}", is_active
-            );
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            polls += 1;
+            if polls % 100 == 0 {
+                info!(log, "[{c}] Upstairs state is {state:?}");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        };
+
+        match reconcile_kind {
+            ReconcileKind::ThreeWay => paths.three_way += 1,
+            ReconcileKind::TwoWayWithOld => paths.two_way_with_old += 1,
+            ReconcileKind::TwoWayWithoutOld => paths.two_way_without_old += 1,
+        }
+        if active_at_replace {
+            paths.active_at_replace += 1;
+        }
+        match joined_by {
+            JoinedBy::Reconcile => paths.joined_by_reconcile += 1,
+            JoinedBy::LiveRepair => paths.joined_by_live_repair += 1,
+        }
+        let intended = matches!(reconcile_kind, ReconcileKind::ThreeWay)
+            && !active_at_replace
+            && matches!(joined_by, JoinedBy::Reconcile);
+        if intended {
+            paths.intended += 1;
         }
 
         // Our activate request task should have ended.
@@ -2744,6 +2954,19 @@ async fn replace_while_reconcile(
         // new region the control plane would provide.
         recreate_downstairs(&dsc_client, old_ds, &log).await?;
 
+        let route = if intended {
+            "intended path"
+        } else {
+            "other path, fine but not what this test covers"
+        };
+        info!(
+            log,
+            "[{c}] Path ({route}): replaced during {reconcile_kind:?} \
+             reconcile, active at replace: {active_at_replace}, \
+             new downstairs joined by {joined_by:?}"
+        );
+        paths.log_totals(&log, &format!("[{c}]"));
+
         old_ds = (old_ds + 1) % (ds_total as u32 + 1);
         new_ds = (new_ds + 1) % (ds_total + 1);
 
@@ -2774,6 +2997,7 @@ async fn replace_while_reconcile(
         }
     }
 
+    paths.log_totals(&log, "Test replace_while_reconcile totals:");
     info!(log, "Test replace_while_reconcile has completed");
     Ok(())
 }

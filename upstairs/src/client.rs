@@ -1528,9 +1528,8 @@ impl DownstairsClient {
                                 region_def.uuid(),
                             );
                         } else {
-                            // If we are not yet active (and, as such, we have
-                            // not finished reconciliation), we can replace a
-                            // downstairs here.
+                            // We can replace a downstairs before we are active,
+                            // but it does require special handling.
                             match up_state {
                                 UpstairsState::Initializing
                                 | UpstairsState::GoActive { .. } => {

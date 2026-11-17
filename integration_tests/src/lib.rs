@@ -6745,7 +6745,7 @@ mod integration_tests {
     async fn min_quorum_replace_before_active() {
         // Test that a Downstairs can be replaced before activation while it
         // is offline. Verify the new Downstairs cannot be used for a
-        // min-quorum activation  The new region has never been active, it must
+        // min-quorum activation.  The new region has never been active, it must
         // not count toward the two needed for min-quorum.
         const BLOCK_SIZE: usize = 512;
 
