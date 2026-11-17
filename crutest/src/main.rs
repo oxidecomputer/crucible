@@ -1388,7 +1388,7 @@ async fn main() -> Result<()> {
                     Client::new(&dsc_url)?
                 }
                 None => {
-                    bail!("Replace reconcile requires a dsc endpoint");
+                    bail!("Two of three requires a dsc endpoint");
                 }
             };
             // Either we have a count, or we run until we get a signal.
@@ -3096,7 +3096,7 @@ async fn two_of_three(
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         dsc_client.dsc_start(new_ds).await.unwrap();
         loop {
-            let res = dsc_client.dsc_get_ds_state(downrev_ds).await.unwrap();
+            let res = dsc_client.dsc_get_ds_state(new_ds).await.unwrap();
             let state = res.into_inner();
             if state == DownstairsState::Running {
                 break;
