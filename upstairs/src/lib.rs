@@ -89,6 +89,7 @@ pub(crate) mod notify;
 mod client;
 mod downstairs;
 mod upstairs;
+pub use upstairs::NEGOTIATION_DELAY;
 use upstairs::{UpCounters, UpstairsAction};
 
 mod io_limits;

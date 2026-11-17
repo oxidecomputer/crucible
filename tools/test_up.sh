@@ -446,20 +446,6 @@ else
 fi
 
 ((gen += 20))
-echo "Now do the replace-before-active test"
-echo "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
-    (( res += 1 ))
-    echo ""
-    echo "Failed crutest replace-before-active"
-    echo "Failed crutest replace-before-active" >> "${log_prefix}_out.txt"
-    echo "Failed crutest replace-before-active" >> "$fail_log"
-    echo ""
-else
-    echo "Completed test: replace-before-active"
-fi
-
-((gen += 20))
 echo "Now do the two_of_three test"
 echo "$ct" two-of-three -c 5 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
 if ! "$ct" two-of-three -c 5 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then

@@ -47,7 +47,7 @@ use uuid::Uuid;
 const STAT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long to delay before negotiating with 2/3 Downstairs
-const NEGOTIATION_DELAY: Duration = Duration::from_millis(500);
+pub const NEGOTIATION_DELAY: Duration = Duration::from_millis(500);
 
 /// Minimum IO size (in bytes) before encryption / decryption is done off-thread
 const MIN_DEFER_SIZE_BYTES: u64 = 8192;

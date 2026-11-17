@@ -12,6 +12,7 @@ mod integration_tests {
     use crucible::volume::VolumeBuilder;
     use crucible::*;
     use crucible_client_types::DownstairsInfo;
+    use crucible_client_types::DownstairsInfoNegotiationStatus;
     use crucible_client_types::DownstairsInfoStatus;
     use crucible_client_types::RegionExtentInfo;
     use crucible_client_types::UpstairsInfoStatus;
@@ -6722,14 +6723,14 @@ mod integration_tests {
         let _join_handle = up_main(opts, 2, None, io, None).unwrap();
         let s = tokio::spawn(async move { guest.activate().await });
 
-        // Get into our min-quorum wait, which is 500 ms
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Get into our min-quorum wait, which is NEGOTIATION_DELAY
+        tokio::time::sleep(NEGOTIATION_DELAY / 5).await;
 
         // Stop DS2
         tds.downstairs2.stop().await.unwrap();
 
         // Wait for the min-quorum timer to go off; it shouldn't panic!
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(NEGOTIATION_DELAY * 2).await;
 
         // Restart DS1, we're now eligible for min-quorum negotiation again
         tds.downstairs1
@@ -6738,6 +6739,101 @@ mod integration_tests {
             .unwrap();
 
         s.await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn min_quorum_replace_before_active() {
+        // Test that a Downstairs can be replaced before activation while it
+        // is offline. Verify the new Downstairs cannot be used for a
+        // min-quorum activation  The new region has never been active, it must
+        // not count toward the two needed for min-quorum.
+        const BLOCK_SIZE: usize = 512;
+
+        let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Activate the first time with all three present so all downstairs
+        // will have been active and can count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
+
+        // Stop DS1 and DS2, This leaves just DS3 ready and we wont be
+        // able to activate with just one.
+        let old_addr = tds.downstairs1_address();
+        tds.downstairs1.stop().await.unwrap();
+        let (port, rport) = tds.downstairs2.stop().await.unwrap();
+
+        let (guest, io) = Guest::new(None);
+        let guest = Arc::new(guest);
+        let opts = tds.opts();
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
+        let gc = guest.clone();
+        let s = tokio::spawn(async move { gc.activate().await });
+
+        // Wait longer than the min-quorum delay.  With one Downstairs ready,
+        // we should still not be active.
+        tokio::time::sleep(NEGOTIATION_DELAY * 4).await;
+        assert!(!guest.query_is_active().await.unwrap());
+
+        // Replace DS1 with a new Downstairs.
+        let new_downstairs = tds.new_downstairs().await.unwrap();
+        let res = guest
+            .replace_downstairs(
+                tds.opts().id,
+                old_addr,
+                new_downstairs.address(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res, ReplaceResult::Started);
+
+        // Wait for the new Downstairs to be ready.  We want to be sure it
+        // has gotten to WQ.  If we don't be sure it is the later tests
+        // might not be testing what we want.
+        let mut tries = 0;
+        loop {
+            let VolumeInfo::Upstairs { targets, .. } =
+                guest.query_volume_info().await.unwrap()
+            else {
+                panic!("expected VolumeInfo::Upstairs");
+            };
+            if matches!(
+                targets[0].state,
+                DownstairsInfoStatus::Connecting {
+                    state: DownstairsInfoNegotiationStatus::WaitQuorum,
+                    ..
+                }
+            ) {
+                break;
+            }
+            tries += 1;
+            assert!(tries < 100, "new downstairs not ready: {:?}", targets[0]);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Two Downstairs are now ready, but the new one has never been
+        // active.  After the min-quorum delay we should still not be active.
+        tokio::time::sleep(NEGOTIATION_DELAY * 4).await;
+        assert!(!guest.query_is_active().await.unwrap());
+
+        // Restart DS2.  With all three ready, we now activate through
+        // reconciliation which includes the new Downstairs.
+        tds.downstairs2
+            .reboot_read_write_with_ports(port, rport)
+            .await
+            .unwrap();
+
+        // Getting past here means we have gone active.
+        s.await.unwrap().unwrap();
+
+        guest
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
+            )
+            .await
+            .unwrap();
+        let mut buf = Buffer::new(2, BLOCK_SIZE);
+        guest.read(BlockIndex(0), &mut buf).await.unwrap();
+        assert_eq!(buf.to_vec(), vec![0x55; BLOCK_SIZE * 2]);
     }
 
     /// Validate the VolumeInfo from the Pantry
