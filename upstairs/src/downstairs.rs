@@ -17,7 +17,7 @@ use crate::{
     client::{
         ClientAction, ClientFaultReason, ClientNegotiationFailed,
         ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
-        NegotiationStateData, ShouldSendError,
+        MismatchContext, NegotiationStateData, ShouldSendError,
     },
     format_job_list,
     guest::GuestBlockRes,
@@ -117,6 +117,12 @@ pub(crate) struct Downstairs {
 
     /// A queue to send notifications to Nexus
     notify: Option<NotifyQueue>,
+
+    /// Writes and flushes each client has finished, to check live-repair's
+    /// comparison of extents against
+    ///
+    /// Used to help track down issue #1987.
+    finished: FinishedIo,
 }
 
 /// Tuple storing a job and an optional result
@@ -197,6 +203,115 @@ impl LiveRepairState {
             | LiveRepairState::Noop { noop_job: j, .. }
             | LiveRepairState::Reopening { reopen_job: j, .. }
             | LiveRepairState::FinalFlush { flush_job: j } => j.result.take(),
+        }
+    }
+}
+
+/// A client's last finished write to extent 0, and the number of the last
+/// flush that client had finished at the time
+///
+/// Used to help track down issue #1987.
+type FinishedWrite = (JobId, Option<u64>);
+
+/// The last write to extent 0, and the last flush, that each client has
+/// finished
+///
+/// If a client finished a write to an extent, then live-repair should find
+/// that extent either still dirty from the write, or clean with a flush
+/// number newer than the last flush the client had finished before the
+/// write (a later flush cleared it).  If we find it clean with an older
+/// flush number, the write is not reflected on the extent.  This lets us
+/// check what live-repair is told about an extent against what we know was
+/// written to it.  We only track extent 0, since every read mismatch so far
+/// has been there.
+///
+/// Used to help track down issue #1987.
+#[derive(Debug)]
+struct FinishedIo {
+    /// Each client's last finished write to extent 0, and the number of the
+    /// last flush that client had finished at the time
+    writes: ClientData<Option<FinishedWrite>>,
+    /// Each client's last finished flush: job ID and flush number
+    flushes: ClientData<Option<(JobId, u64)>>,
+    /// Each client's last finished job
+    jobs: ClientData<Option<JobId>>,
+}
+
+impl FinishedIo {
+    fn new() -> Self {
+        Self {
+            writes: ClientData::new(None),
+            flushes: ClientData::new(None),
+            jobs: ClientData::new(None),
+        }
+    }
+
+    /// Records a job that a client finished successfully
+    fn record(
+        &mut self,
+        ds_id: JobId,
+        client_id: ClientId,
+        work: &IOop,
+        extent_size: Option<u64>,
+    ) {
+        if self.jobs[client_id].is_none_or(|j| j < ds_id) {
+            self.jobs[client_id] = Some(ds_id);
+        }
+        match work {
+            IOop::Write {
+                start_block,
+                blocks,
+                ..
+            }
+            | IOop::WriteUnwritten {
+                start_block,
+                blocks,
+                ..
+            } if !blocks.is_empty() => {
+                let Some(es) = extent_size else {
+                    return;
+                };
+                if start_block.0 >= es {
+                    return;
+                }
+                let flush = self.flushes[client_id].map(|(_, f)| f);
+                if self.writes[client_id].is_none_or(|(j, _)| j < ds_id) {
+                    self.writes[client_id] = Some((ds_id, flush));
+                }
+            }
+            IOop::Flush { flush_number, .. }
+                if self.flushes[client_id].is_none_or(|(j, _)| j < ds_id) =>
+            {
+                self.flushes[client_id] = Some((ds_id, *flush_number));
+            }
+            _ => (),
+        }
+    }
+
+    /// Describes what a client has finished for an extent, and checks it
+    /// against the extent info that client reported
+    ///
+    /// Returns a short description for the log, starting with a space, and
+    /// whether the extent info is not possible given what the client
+    /// finished: a clean extent whose flush number is not newer than a flush
+    /// the client finished before its last write to the extent.  For an
+    /// extent other than 0, which we don't track, returns an empty
+    /// description.
+    fn check(
+        &self,
+        extent: ExtentId,
+        client_id: ClientId,
+        ei: &ExtentInfo,
+    ) -> (String, bool) {
+        if extent != ExtentId(0) {
+            return (String::new(), false);
+        }
+        match self.writes[client_id] {
+            None => (" w:-".to_string(), false),
+            Some((job, None)) => (format!(" w:{job}/-"), false),
+            Some((job, Some(f))) => {
+                (format!(" w:{job}/f{f}"), !ei.dirty && ei.flush_number <= f)
+            }
         }
     }
 }
@@ -390,6 +505,7 @@ impl Downstairs {
             ddef: None,
             stats,
             notify,
+            finished: FinishedIo::new(),
         }
     }
 
@@ -1420,6 +1536,17 @@ impl Downstairs {
         let mut need_repair = Vec::new();
         debug!(self.log, "Get repair info for {} source", source);
         let good_ei = self.clients[source].repair_info.take().unwrap();
+        // What we compared, for the log.  Used to help track down issue #1987.
+        let (source_finished, source_bad) =
+            self.finished.check(extent, source, &good_ei);
+        let mut compared = format!(
+            "source [{source}] g:{} f:{} d:{}{source_finished}",
+            good_ei.generation, good_ei.flush_number, good_ei.dirty
+        );
+        let mut impossible = vec![];
+        if source_bad {
+            impossible.push(source);
+        }
         for broken_extent in repair.iter() {
             // TODO: should this implementation be in DownstairsClient?
             debug!(self.log, "Get repair info for {} bad", broken_extent);
@@ -1433,10 +1560,30 @@ impl Downstairs {
             } else {
                 repair_ei.flush_number != good_ei.flush_number
             };
+            // Used to help track down issue #1987.
+            let (finished, bad) =
+                self.finished.check(extent, *broken_extent, &repair_ei);
+            compared += &format!(
+                ", [{broken_extent}] g:{} f:{} d:{}{finished}",
+                repair_ei.generation, repair_ei.flush_number, repair_ei.dirty
+            );
+            if bad {
+                impossible.push(*broken_extent);
+            }
 
             if repair {
                 need_repair.push(*broken_extent);
             }
+        }
+
+        // Used to help track down issue #1987.
+        if !impossible.is_empty() {
+            warn!(
+                self.log,
+                "extent {extent} info from {impossible:?} is clean with a \
+                 flush number no newer than a flush finished before its last \
+                 write: {compared}"
+            );
         }
 
         // Now that we have consumed the contents, be sure to clear
@@ -1445,8 +1592,13 @@ impl Downstairs {
             c.repair_info = None;
         }
 
+        // The compared part of these two messages is used to help track
+        // down issue #1987.
         if need_repair.is_empty() {
-            info!(self.log, "No repair needed for extent {}", extent);
+            info!(
+                self.log,
+                "No repair needed for extent {} {}", extent, compared
+            );
             for &cid in repair.iter() {
                 self.clients[cid].stats.extents_confirmed += 1;
             }
@@ -1456,7 +1608,11 @@ impl Downstairs {
         } else {
             info!(
                 self.log,
-                "Repair for extent {} s:{} d:{:?}", extent, source, need_repair
+                "Repair for extent {} s:{} d:{:?} {}",
+                extent,
+                source,
+                need_repair,
+                compared
             );
             for &cid in repair.iter() {
                 self.clients[cid].stats.extents_repaired += 1;
@@ -1599,6 +1755,64 @@ impl Downstairs {
                 &repair_downstairs,
             )
         };
+    }
+
+    /// Returns writes to an extent, enqueued before live-repair's close of
+    /// that extent, that the client has not finished even though it has
+    /// finished the close
+    ///
+    /// This should always be empty: the close waits for every earlier write
+    /// to its extent.  A write that finishes after the close could change
+    /// the extent after live-repair compared it.  Returns nothing if `ds_id`
+    /// is not a close that `client_id` has finished.
+    ///
+    /// Used to help track down issue #1987.
+    fn live_close_unfinished_writes(
+        &self,
+        ds_id: JobId,
+        client_id: ClientId,
+    ) -> Vec<JobId> {
+        // We only scan when this job is a live-repair close that this
+        // client has finished.  If the job is gone, is not a close, or is
+        // not Done on this client, we return an empty vec.
+        let Some(job) = self.ds_active.get(&ds_id) else {
+            return vec![];
+        };
+        let IOop::ExtentFlushClose { extent, .. } = job.work else {
+            return vec![];
+        };
+        if job.state[client_id] != IOState::Done {
+            return vec![];
+        }
+        // Turn the extent into its block range, walk ds_active from the
+        // oldest job up to the close, keep jobs still InProgress on this
+        // client, keep writes whose blocks overlap that range, and return
+        // their IDs.
+        let es = self.ddef.as_ref().unwrap().extent_size().value;
+        let extent_blocks = extent.0 as u64 * es..(extent.0 as u64 + 1) * es;
+        self.ds_active
+            .into_iter()
+            .take_while(|(id, _)| **id < ds_id)
+            .filter(|(_, w)| w.state[client_id] == IOState::InProgress)
+            .filter(|(_, w)| match &w.work {
+                IOop::Write {
+                    start_block,
+                    blocks,
+                    ..
+                }
+                | IOop::WriteUnwritten {
+                    start_block,
+                    blocks,
+                    ..
+                } => {
+                    start_block.0 < extent_blocks.end
+                        && start_block.0 + blocks.len() as u64
+                            > extent_blocks.start
+                }
+                _ => false,
+            })
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Creates a [DownstairsIO] job for an [IOop::ExtentLiveReopen], and
@@ -2789,6 +3003,13 @@ impl Downstairs {
             client_id,
             number_jobs_skipped
         );
+        // Used to help track down issue #1987.
+        info!(
+            self.log,
+            "[{client_id}] last finished job {:?}, last finished flush {:?}",
+            self.finished.jobs[client_id],
+            self.finished.flushes[client_id],
+        );
 
         for ds_id in ack_check {
             self.ack_check(ds_id, false);
@@ -3436,6 +3657,24 @@ impl Downstairs {
          */
         let deactivate = matches!(up_state, UpstairsState::Deactivating { .. });
 
+        // If this read already has data from another client, collect what we
+        // would want to know if this client's data does not match it.
+        // Used to help track down issue #1987.
+        let mismatch = self
+            .ds_active
+            .get(&ds_id)
+            .is_some_and(|j| {
+                matches!(j.work, IOop::Read { .. }) && j.data.is_some()
+            })
+            .then(|| MismatchContext {
+                states: ClientData::from_fn(|cid| self.clients[cid].state()),
+                repair: self
+                    .repair
+                    .as_ref()
+                    .map(|r| (r.source_downstairs, r.active_extent, r.min_id)),
+                extent_size: self.ddef.as_ref().map(|d| d.extent_size().value),
+            });
+
         let Some(job) = self.ds_active.get_mut(&ds_id) else {
             error!(
                 self.clients[client_id].log,
@@ -3460,7 +3699,30 @@ impl Downstairs {
             job,
             responses,
             extent_info,
+            mismatch,
         );
+
+        // Used to help track down issue #1987.
+        if let Some(job) = self.ds_active.get(&ds_id)
+            && job.state[client_id] == IOState::Done
+        {
+            self.finished.record(
+                ds_id,
+                client_id,
+                &job.work,
+                self.ddef.as_ref().map(|d| d.extent_size().value),
+            );
+        }
+
+        // Used to help track down issue #1987.
+        let unfinished = self.live_close_unfinished_writes(ds_id, client_id);
+        if !unfinished.is_empty() {
+            warn!(
+                self.clients[client_id].log,
+                "live-repair close {ds_id} finished before earlier writes to \
+                 its extent: {unfinished:?}"
+            );
+        }
 
         // Decide what to do when we have an error from this IO.
         // Mark this downstairs as bad if this was a write or flush
