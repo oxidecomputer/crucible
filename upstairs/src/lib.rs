@@ -68,8 +68,8 @@ use guest::{GuestBlockRes, GuestIoHandle};
 mod stats;
 
 pub use client::{
-    ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
-    NegotiationState, NegotiationStateData,
+    CLIENT_RECONNECT_DELAY, ClientFaultReason, ClientNegotiationFailed,
+    ClientStopReason, NegotiationState, NegotiationStateData,
 };
 pub use crucible_common::impacted_blocks::*;
 

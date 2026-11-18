@@ -6788,7 +6788,11 @@ mod integration_tests {
         // Wait for the new Downstairs to be ready.  We want to be sure it
         // has gotten to WQ.  If we don't be sure it is the later tests
         // might not be testing what we want.
-        let mut tries = 0;
+        //
+        // After the replacement, the client waits CLIENT_RECONNECT_DELAY
+        // before it connects to the new Downstairs, so we must wait longer
+        // than that.
+        let deadline = tokio::time::Instant::now() + CLIENT_RECONNECT_DELAY * 2;
         loop {
             let VolumeInfo::Upstairs { targets, .. } =
                 guest.query_volume_info().await.unwrap()
@@ -6804,8 +6808,11 @@ mod integration_tests {
             ) {
                 break;
             }
-            tries += 1;
-            assert!(tries < 100, "new downstairs not ready: {:?}", targets[0]);
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "new downstairs not ready: {:?}",
+                targets[0]
+            );
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
