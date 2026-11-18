@@ -2133,10 +2133,35 @@ impl Downstairs {
     /// as active; clients that are in other negotiation states are marked as
     /// faulted.
     ///
+    /// If all three clients need live-repair, we switch to reconciliation.
+    /// If reconciliation looks at all the extents and sees nothing to do,
+    /// then we can move all downstairs to Active.
+    ///
     /// # Panics
     /// If that isn't the case!
     pub(crate) fn on_reconciliation_done(&mut self, did_work: bool) {
         assert!(self.ds_active.is_empty());
+
+        // If all three downstairs needed live-repair (see
+        // LiveRepairStart::AllNeedRepair), we did reconciliation instead.  If
+        // it compared their extents and found nothing to repair, did_work is
+        // false and all three are still in LiveRepairReady.
+        //
+        // We only set them active when all three are in LiveRepairReady.
+        // A downstairs left out of a min-quorum activation could also be in
+        // LiveRepairReady here, and it must still go through live-repair.
+        // Because the other two downstairs that took part in the min-quorum
+        // reconciliation will be in WaitQuorum or Reconcile, it wont have all
+        // three in LiveRepair and all_need_repair will not be set.
+        let all_need_repair = self.clients.iter().all(|c| {
+            matches!(
+                c.state(),
+                DsState::Connecting {
+                    state: NegotiationState::LiveRepairReady,
+                    ..
+                }
+            )
+        });
 
         // Every downstairs that took part in reconciliation has now been
         // active.
@@ -2155,6 +2180,14 @@ impl Downstairs {
                     ..
                 } => {
                     assert!(did_work);
+                    c.set_active();
+                    c.send_you_have_been_active();
+                }
+                DsState::Connecting {
+                    state: NegotiationState::LiveRepairReady,
+                    ..
+                } if all_need_repair => {
+                    assert!(!did_work);
                     c.set_active();
                     c.send_you_have_been_active();
                 }

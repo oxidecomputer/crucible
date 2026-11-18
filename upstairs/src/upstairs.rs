@@ -5567,6 +5567,52 @@ pub(crate) mod test {
     }
 
     #[test]
+    fn test_downstairs_three_live_repair_no_work() {
+        // Like test_downstairs_three_live_repair, but all three downstairs
+        // have matching extents, so reconciliation has no work to do.  All
+        // three should go back to active, instead of staying in
+        // LiveRepairReady.
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef), false);
+        up.force_active().unwrap();
+
+        for id in ClientId::iter() {
+            active_to_faulted(&mut up, id);
+        }
+
+        // Every client reports the same clean extents
+        for id in ClientId::iter() {
+            faulted_to_live_repair_ready_with(
+                &mut up,
+                id,
+                RegionMetadata::new(
+                    &[1; 12],     // generation
+                    &[1; 12],     // flush
+                    &[false; 12], // dirty
+                ),
+            );
+            up.downstairs.clients[id].repair_addr =
+                Some("0.0.0.0:1".parse().unwrap());
+        }
+
+        // Send it an event, which notices that all three downstairs need
+        // live-repair, does reconciliation instead, and finds that the extents
+        // already match.
+        up.apply(UpstairsAction::NoOp);
+
+        assert!(!up.downstairs.reconcile_in_progress());
+        assert!(matches!(up.state, UpstairsState::Active));
+        for id in ClientId::iter() {
+            assert_eq!(up.ds_state(id), DsState::Active);
+        }
+    }
+
+    #[test]
     fn test_downstairs_three_live_repair_failed_reconcile() {
         // Regression test for crucible#1980.  Start with all three downstairs
         // active, put all three into live-repair so that we fall back to
