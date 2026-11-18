@@ -700,6 +700,18 @@ impl Downstairs {
             DsState::Stopping(ClientStopReason::Fault(..))
         );
 
+        // Check whether this client was left out of a min-quorum
+        // reconciliation that is in progress, and whether it is being
+        // replaced.  We need both before the client restarts.
+        let left_out_of_reconcile = self
+            .reconcile
+            .as_ref()
+            .is_some_and(|r| !r.participating[client_id]);
+        let replacing = matches!(
+            self.clients[client_id].state(),
+            DsState::Stopping(ClientStopReason::Replacing)
+        );
+
         // Restart the IO task for that specific client, transitioning to a new
         // state.  We can replay as long as all jobs since the last flush are
         // buffered (indicated by `self.can_replay`), and there's no live-repair
@@ -742,7 +754,32 @@ impl Downstairs {
                 }
             )
         }) {
-            self.abort_reconciliation(up_state);
+            if left_out_of_reconcile && !replacing {
+                // A downstairs that was left out of a min-quorum
+                // reconciliation does not affect that reconciliation.  If
+                // the left-out downstairs is offline, the downstairs will
+                // keep failing to connect, and aborting reconciliation each
+                // time would mean reconciliation never finishes.
+                //
+                // The left-out downstairs must come back through
+                // live-repair, so the downstairs can't restart in
+                // ConnectionMode::New (as a downstairs would after a failed
+                // negotiation) and reach WaitQuorum while reconciliation is
+                // running.
+                //
+                // A downstairs being replaced still aborts reconciliation.
+                // The replacement's new region has a different UUID, and a
+                // client in the Faulted mode panics on a UUID change once we
+                // are active.
+                info!(
+                    self.log,
+                    "client {client_id} is not part of reconciliation, \
+                     it must come back through live-repair"
+                );
+                self.clients[client_id].set_connection_mode_faulted();
+            } else {
+                self.abort_reconciliation(up_state);
+            }
         }
     }
 

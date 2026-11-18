@@ -3112,6 +3112,122 @@ pub(crate) mod test {
         ));
     }
 
+    /// Checks that DS0 and DS1 are still reconciling and DS2 will come back
+    /// through live-repair
+    fn assert_reconciling_without_ds2(up: &Upstairs) {
+        assert!(up.downstairs.reconcile_in_progress());
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            assert!(matches!(
+                up.ds_state(cid),
+                DsState::Connecting {
+                    state: NegotiationState::Reconcile,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::Start,
+                mode: ConnectionMode::Faulted,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn min_quorum_offline_third_does_not_abort_reconcile() {
+        // DS2 is offline, so DS0 and DS1 start min-quorum reconciliation
+        // without it.  Each time DS2 fails to connect, its IO task stops and
+        // restarts.  That must not abort reconciliation, or reconciliation
+        // could never finish while DS2 is offline.
+        let (mut up, _rx) = min_quorum_replace_upstairs(true);
+        up.on_min_quorum();
+        assert!(up.downstairs.reconcile_in_progress());
+
+        for _ in 0..3 {
+            up.apply_client_action(
+                ClientId::new(2),
+                ClientAction::TaskStopped(ClientRunResult::ConnectionTimeout),
+            );
+            // This is the key assertion for this test.
+            assert_reconciling_without_ds2(&up);
+        }
+
+        // DS0 and DS1 finish reconciliation and go active without DS2.
+        let mut done = false;
+        for _ in 0..100 {
+            done = up.downstairs.ack_reconciliation_job(&up.state);
+            if done {
+                break;
+            }
+        }
+        assert!(done);
+        up.on_reconciliation_done(true);
+
+        assert!(matches!(up.state, UpstairsState::Active));
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            assert_eq!(up.ds_state(cid), DsState::Active);
+        }
+        assert_ds2_not_active(&up);
+    }
+
+    #[tokio::test]
+    async fn min_quorum_third_negotiation_failed_does_not_abort_reconcile() {
+        // DS0 and DS1 are reconciling without DS2 when DS2 fails
+        // negotiation.  A failed negotiation while we are not yet active
+        // would normally restart DS2 in ConnectionMode::New.  Here it must
+        // restart in ConnectionMode::Faulted instead, so it can't reach
+        // WaitQuorum while reconciliation is running, and reconciliation
+        // must keep going.
+        let (mut up, _rx) = min_quorum_replace_upstairs(true);
+        up.on_min_quorum();
+
+        up.downstairs.clients[ClientId::new(2)].abort_negotiation(
+            &up.state,
+            ClientNegotiationFailed::BadNegotiationOrder,
+        );
+        up.apply_client_action(
+            ClientId::new(2),
+            ClientAction::TaskStopped(ClientRunResult::RequestedStop),
+        );
+
+        assert_reconciling_without_ds2(&up);
+    }
+
+    #[tokio::test]
+    async fn min_quorum_replace_third_during_reconcile_aborts() {
+        // DS0 and DS1 are reconciling without DS2 when DS2 is replaced, and
+        // DS2's task stops before reconciliation finishes.  This aborts
+        // reconciliation, because DS2's new region has a different UUID and
+        // can't come back in ConnectionMode::Faulted.  DS2 restarts from
+        // New, as DS0 and DS1 will when their tasks stop.
+        let (mut up, _rx) = min_quorum_replace_upstairs(true);
+        up.on_min_quorum();
+        replace_ds2(&mut up);
+
+        up.apply_client_action(
+            ClientId::new(2),
+            ClientAction::TaskStopped(ClientRunResult::RequestedStop),
+        );
+
+        assert!(!up.downstairs.reconcile_in_progress());
+        for cid in [ClientId::new(0), ClientId::new(1)] {
+            assert_eq!(
+                up.ds_state(cid),
+                DsState::Stopping(ClientStopReason::NegotiationFailed(
+                    ClientNegotiationFailed::FailedReconcile
+                ))
+            );
+        }
+        assert_eq!(
+            up.ds_state(ClientId::new(2)),
+            DsState::Connecting {
+                state: NegotiationState::Start,
+                mode: ConnectionMode::New,
+            }
+        );
+    }
+
     #[test]
     fn reconcile_ro_ready_with_one() {
         // Verify we can activate with just one downstairs ready on a read only
