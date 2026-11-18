@@ -815,6 +815,10 @@ impl DownstairsClient {
             );
         };
         *mode = ConnectionMode::Faulted;
+        // No current caller does this, but if this downstairs is already in
+        // WaitQuorum, it is past the point where the mode picks its path, so
+        // move it to LiveRepairReady (keeping its region metadata) as the
+        // faulted path would have.
         if let NegotiationStateData::WaitQuorum(r) = state {
             // yoink
             let r = std::mem::replace(r, RegionMetadata::new(&[], &[], &[]));
