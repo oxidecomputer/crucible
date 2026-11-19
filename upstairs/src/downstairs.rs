@@ -19,6 +19,7 @@ use crate::{
         ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
         NegotiationStateData, ShouldSendError,
     },
+    extent_trace::{ExtentTrace, RepairPoint, TRACED_EXTENTS, job_blocks},
     format_job_list,
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
@@ -117,6 +118,9 @@ pub(crate) struct Downstairs {
 
     /// A queue to send notifications to Nexus
     notify: Option<NotifyQueue>,
+
+    /// Recent jobs that touch the traced extents
+    trace: ExtentTrace,
 }
 
 /// Tuple storing a job and an optional result
@@ -390,6 +394,7 @@ impl Downstairs {
             ddef: None,
             stats,
             notify,
+            trace: ExtentTrace::new(TRACED_EXTENTS),
         }
     }
 
@@ -1437,6 +1442,21 @@ impl Downstairs {
             } else {
                 repair_ei.flush_number != good_ei.flush_number
             };
+            info!(
+                self.log,
+                "RE:{} source [{}] g:{} f:{} d:{} target [{}] g:{} f:{} d:{} \
+                 repair:{}",
+                extent,
+                source,
+                good_ei.generation,
+                good_ei.flush_number,
+                good_ei.dirty,
+                broken_extent,
+                repair_ei.generation,
+                repair_ei.flush_number,
+                repair_ei.dirty,
+                repair,
+            );
 
             if repair {
                 need_repair.push(*broken_extent);
@@ -1587,6 +1607,9 @@ impl Downstairs {
             reopen_id,
             deps,
         );
+        if self.trace.covers(extent) {
+            self.log_extent_backlog(extent, close_id, &close_deps);
+        }
 
         let repair = self.repair.as_mut().unwrap(); // reborrow
         repair.state = LiveRepairState::Closing {
@@ -1608,6 +1631,124 @@ impl Downstairs {
                 &repair_downstairs,
             )
         };
+    }
+
+    /// Here we log the full close dependencies and every active job that
+    /// touches the given extent
+    /// Called when live-repair is about to close it.  TEMP for 1987
+    /// Those jobs are also pinned in the trace, so they are kept however
+    /// many writes follow them.
+    fn log_extent_backlog(
+        &mut self,
+        extent: ExtentId,
+        close_id: JobId,
+        close_deps: &[JobId],
+    ) {
+        let mut backlog = vec![];
+        let ddef = self.ddef.as_ref().unwrap();
+        let es = ddef.extent_size().value;
+        let blocks = extent.0 as u64 * es..(extent.0 as u64 + 1) * es;
+        info!(
+            self.log,
+            "RE:{} close {} full deps:{:?} active jobs:{}",
+            extent,
+            close_id,
+            close_deps,
+            self.ds_active.len(),
+        );
+        for (id, job) in &self.ds_active {
+            let Some(r) = job_blocks(&job.work) else {
+                continue;
+            };
+            if r.start >= blocks.end || r.end <= blocks.start {
+                continue;
+            }
+            backlog.push(*id);
+            let (job_type, _, deps) = job.work.ioop_summary();
+            let state: Vec<String> =
+                job.state.iter().map(|s| s.to_string()).collect();
+            info!(
+                self.log,
+                "RE:{} active {} {} blocks {:?} in close deps:{} acked:{} \
+                 replay:{} state:{:?} deps:{:?}",
+                extent,
+                id,
+                job_type,
+                r,
+                close_deps.contains(id),
+                job.acked,
+                job.replay,
+                state,
+                deps,
+            );
+        }
+        for id in backlog {
+            self.trace.pin(id);
+        }
+    }
+
+    /// When a client acks live-repair's close of a traced extent, log and
+    /// record every write to that extent, enqueued before the close, that
+    /// the client has not finished.  On the source, any such write that is
+    /// not in the close's dependencies could land after the extent was
+    /// flushed and closed.  TEMP for 1987
+    fn log_close_ack_backlog(
+        &mut self,
+        ds_id: JobId,
+        client_id: ClientId,
+        ok: bool,
+    ) {
+        let Some(job) = self.ds_active.get(&ds_id) else {
+            return;
+        };
+        let IOop::ExtentFlushClose {
+            extent,
+            dependencies,
+            ..
+        } = &job.work
+        else {
+            return;
+        };
+        let extent = *extent;
+        if !self.trace.covers(extent) {
+            return;
+        }
+        let ddef = self.ddef.as_ref().unwrap();
+        let es = ddef.extent_size().value;
+        let blocks = extent.0 as u64 * es..(extent.0 as u64 + 1) * es;
+        let mut unfinished = vec![];
+        for (id, w) in self
+            .ds_active
+            .into_iter()
+            .take_while(|(id, _)| **id < ds_id)
+        {
+            let Some(r) = job_blocks(&w.work) else {
+                continue;
+            };
+            if r.start >= blocks.end || r.end <= blocks.start {
+                continue;
+            }
+            if matches!(w.work, IOop::Read { .. }) {
+                continue;
+            }
+            let state = w.state[client_id].clone();
+            if matches!(state, IOState::Done | IOState::Skipped) {
+                continue;
+            }
+            unfinished.push((*id, state, dependencies.contains(id)));
+        }
+        info!(
+            self.log,
+            "RE:{} close {} ack from [{}] ok:{} unfinished writes enqueued \
+             before it (id, state, in close deps): {:?}",
+            extent,
+            ds_id,
+            client_id,
+            ok,
+            unfinished,
+        );
+        self.trace
+            .close_ack(ds_id, extent, client_id, ok, unfinished);
     }
 
     /// Creates a [DownstairsIO] job for an [IOop::ExtentLiveReopen], and
@@ -2366,6 +2507,19 @@ impl Downstairs {
             .map(ClientMap::from)
             .unwrap_or_else(ClientMap::new);
 
+        let repair = self.repair.as_ref().map(|r| RepairPoint {
+            active_extent: r.active_extent,
+            last_extent: last_repair_extent,
+            min_id: r.min_id,
+        });
+        self.trace.enqueue(
+            ds_id,
+            &io,
+            self.ddef.as_ref(),
+            ClientData::from_fn(|cid| self.clients[cid].state()),
+            repair,
+        );
+
         // Send the job to each client!
         let state = ClientData::from_fn(|cid| {
             let client = &mut self.clients[cid];
@@ -2383,6 +2537,7 @@ impl Downstairs {
                 }
             };
             client.apply_enqueue_result(ds_id, &io, r);
+            self.trace.enqueue_result(ds_id, cid, r);
             match r {
                 EnqueueResult::Send => self.send(ds_id, io.clone(), cid),
                 EnqueueResult::Hold => (),
@@ -2433,6 +2588,7 @@ impl Downstairs {
             io,
             self.repair.as_ref().map(|r| r.min_id),
         );
+        self.trace.sent(ds_id, client_id, &job);
         let message = match job {
             IOop::Write {
                 dependencies,
@@ -2930,6 +3086,7 @@ impl Downstairs {
                 assert!(job.acked);
 
                 retired.push(id);
+                self.trace.retire(id, job);
                 self.retired_ids.enqueue(id);
                 let summary = job.io_summarize(id);
                 self.retired_jobs.enqueue(summary);
@@ -3375,6 +3532,48 @@ impl Downstairs {
         Ok(())
     }
 
+    /// Returns the extent trace for a read whose data does not match the
+    /// data that another client already returned, or `None` if the data
+    /// matches
+    ///
+    /// The client stuffs this in its read hash panic mismatch message.  The
+    /// panic happens fast enough that we need to put it here or risk not
+    /// seeing it printed.
+    fn read_mismatch_trace(
+        &self,
+        ds_id: JobId,
+        client_id: ClientId,
+        responses: &Result<RawReadResponse, CrucibleError>,
+    ) -> Option<String> {
+        let (Some(job), Ok(read_data), Some(ddef)) =
+            (self.ds_active.get(&ds_id), responses, self.ddef.as_ref())
+        else {
+            return None;
+        };
+        let (IOop::Read { start_block, .. }, Some(job_data)) =
+            (&job.work, &job.data)
+        else {
+            return None;
+        };
+        if job.state[client_id] == IOState::Skipped
+            || job_data.blocks == read_data.blocks
+        {
+            return None;
+        }
+        let done: Vec<ClientId> = ClientId::iter()
+            .filter(|&c| c != client_id && job.state[c] == IOState::Done)
+            .collect();
+        let mut report = vec![format!("expected data from {done:?}")];
+        report.extend(self.trace.mismatch_report(
+            ddef,
+            start_block.0,
+            &job_data.blocks,
+            &read_data.blocks,
+            |id| self.ds_active.get(&id),
+        ));
+        Some(report.join("\n"))
+    }
+
     /// Returns a client error associated with the given job
     ///
     /// Returns `None` if that job is no longer active or has no error
@@ -3448,6 +3647,9 @@ impl Downstairs {
          */
         let deactivate = matches!(up_state, UpstairsState::Deactivating { .. });
 
+        let mismatch_trace =
+            self.read_mismatch_trace(ds_id, client_id, &responses);
+
         let Some(job) = self.ds_active.get_mut(&ds_id) else {
             error!(
                 self.clients[client_id].log,
@@ -3467,12 +3669,16 @@ impl Downstairs {
             return;
         };
 
+        let ok = responses.is_ok();
         self.clients[client_id].process_io_completion(
             ds_id,
             job,
             responses,
             extent_info,
+            mismatch_trace,
         );
+        self.trace.completed(ds_id, client_id, ok);
+        self.log_close_ack_backlog(ds_id, client_id, ok);
 
         // Decide what to do when we have an error from this IO.
         // Mark this downstairs as bad if this was a write or flush
@@ -5250,6 +5456,215 @@ pub(crate) mod test {
             None
         ));
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
+    }
+
+    #[test]
+    fn extent_trace_finds_mismatched_writes() {
+        // The trace should match each side of a read mismatch on a traced
+        // extent to the write that produced it, and skip writes elsewhere.
+        let mut ds = Downstairs::test_default();
+        ds.force_active();
+
+        let write = |ds: &mut Downstairs, block, hash| {
+            let request = crate::RawWrite {
+                data: bytes::BytesMut::from(vec![1].as_slice()),
+                blocks: vec![crucible_protocol::BlockContext {
+                    encryption_context: None,
+                    hash,
+                }],
+            };
+            let iblocks =
+                ImpactedBlocks::new(BlockIndex(block), BlockIndex(block));
+            ds.create_and_enqueue_write_eob(
+                iblocks,
+                request,
+                false,
+                crate::io_limits::IOLimitGuard::dummy(),
+            )
+        };
+        // Extents are 3 blocks, and only extent 0 is traced
+        let w1 = write(&mut ds, 1, 0x11);
+        let w2 = write(&mut ds, 1, 0x22);
+        write(&mut ds, 7, 0x33);
+
+        let report = ds.trace.mismatch_report(
+            ds.ddef.as_ref().unwrap(),
+            1,
+            &[ReadBlockContext::Unencrypted { hash: 0x11 }],
+            &[ReadBlockContext::Unencrypted { hash: 0x22 }],
+            |id| ds.ds_active.get(&id),
+        );
+        assert!(report[0].starts_with("trace holds 2 jobs"), "{report:?}");
+        assert_eq!(report[1], "block 1 expected hash:11 computed hash:22");
+        assert!(report[2].starts_with(&format!("block 1 {w1} ")));
+        assert!(report[2].contains(" Write EXPECTED hash:11 "));
+        assert!(report[2].contains(" enqueue:[Send, Send, Send]"));
+        assert!(report[3].starts_with(&format!("block 1 {w2} ")));
+        assert!(report[3].contains(" Write COMPUTED hash:22 "));
+        assert_eq!(report.len(), 4, "{report:?}");
+    }
+
+    #[test]
+    #[should_panic(expected = "Write COMPUTED")]
+    fn extent_trace_in_read_mismatch_panic() {
+        // The read hash mismatch panic should carry the extent trace, since
+        // log records queued at the time of the panic may never be written.
+        let mut ds = Downstairs::test_default();
+        ds.force_active();
+
+        for data in [[1u8], [2u8]] {
+            let request = crate::RawWrite {
+                data: bytes::BytesMut::from(data.as_slice()),
+                blocks: vec![crucible_protocol::BlockContext {
+                    encryption_context: None,
+                    hash: crucible_common::integrity_hash(&[&data]),
+                }],
+            };
+            ds.create_and_enqueue_write_eob(
+                ImpactedBlocks::new(BlockIndex(1), BlockIndex(1)),
+                request,
+                false,
+                crate::io_limits::IOLimitGuard::dummy(),
+            );
+        }
+
+        let read_id = ds.next_id();
+        let iblocks = ImpactedBlocks::new(BlockIndex(1), BlockIndex(1));
+        let dependencies = ds.ds_active.deps_for_read(read_id, iblocks);
+        let read = IOop::Read {
+            dependencies,
+            start_block: BlockIndex(1),
+            count: 1,
+            block_size: 512,
+        };
+        ds.enqueue(read_id, read, None, None);
+
+        // Client 0 returns the first write's data, client 1 the second
+        ds.process_ds_completion(
+            read_id,
+            ClientId::new(0),
+            Ok(build_read_response(&[1])),
+            &UpstairsState::Active,
+            None,
+        );
+        ds.process_ds_completion(
+            read_id,
+            ClientId::new(1),
+            Ok(build_read_response(&[2])),
+            &UpstairsState::Active,
+            None,
+        );
+    }
+
+    #[test]
+    fn extent_trace_keeps_recent_and_pinned_writes() {
+        // The trace keeps the last few writes to each block, plus any write
+        // that was pinned, and says when older writes were dropped.
+        let mut ds = Downstairs::repair_test_all_active();
+        let write = |ds: &mut Downstairs| {
+            ds.submit_test_write_block(ExtentId(0), BlockOffset(1), false)
+        };
+        let first = write(&mut ds);
+        let second = write(&mut ds);
+        ds.trace.pin(first);
+        let rest: Vec<JobId> = (0..6).map(|_| write(&mut ds)).collect();
+
+        let ctx = ReadBlockContext::Empty;
+        let report = ds.trace.mismatch_report(
+            ds.ddef.as_ref().unwrap(),
+            1,
+            &[ctx],
+            &[ReadBlockContext::Unencrypted { hash: 1 }],
+            |id| ds.ds_active.get(&id),
+        );
+        let listed: Vec<String> = [first, second]
+            .iter()
+            .chain(&rest)
+            .filter(|id| {
+                report
+                    .iter()
+                    .any(|l| l.starts_with(&format!("block 1 {id} ")))
+            })
+            .map(|id| id.to_string())
+            .collect();
+        let mut expected = vec![first.to_string()];
+        expected.extend(rest[2..].iter().map(|id| id.to_string()));
+        assert_eq!(listed, expected, "{report:?}");
+        assert!(
+            report.contains(&"block 1 older writes dropped".to_string()),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn extent_trace_finds_write_finished_after_close() {
+        // A write to a traced extent that finishes on a client after
+        // live-repair's close of that extent did should be called out, and
+        // the client's close ack should list the write as unfinished.
+        let mut ds = Downstairs::repair_test_all_active();
+        let up_state = UpstairsState::Active;
+        let write_id =
+            ds.submit_test_write_block(ExtentId(0), BlockOffset(1), false);
+
+        to_live_repair_ready(&mut ds, ClientId::new(1));
+        assert_eq!(
+            ds.check_live_repair_start(&up_state),
+            LiveRepairStart::Started
+        );
+        let close_id = *ds
+            .ds_active
+            .keys()
+            .find(|id| {
+                matches!(
+                    ds.ds_active.get(id).unwrap().work,
+                    IOop::ExtentFlushClose { .. }
+                )
+            })
+            .unwrap();
+
+        // Client 0 finishes the close, then the write
+        let ei = ExtentInfo {
+            generation: 1,
+            flush_number: 1,
+            dirty: false,
+        };
+        ds.process_ds_completion(
+            close_id,
+            ClientId::new(0),
+            Ok(Default::default()),
+            &up_state,
+            Some(ei),
+        );
+        ds.process_ds_completion(
+            write_id,
+            ClientId::new(0),
+            Ok(Default::default()),
+            &up_state,
+            None,
+        );
+
+        let report = ds.trace.mismatch_report(
+            ds.ddef.as_ref().unwrap(),
+            1,
+            &[ReadBlockContext::Empty],
+            &[ReadBlockContext::Unencrypted { hash: 1 }],
+            |id| ds.ds_active.get(&id),
+        );
+        let late = format!(
+            "block 1 LATE: write {write_id} finished on [0] (#1) after \
+             close {close_id} (#0)"
+        );
+        assert!(report.contains(&late), "{report:?}");
+        let ack = format!("close ack {close_id} extent 0 from [0] ");
+        let ack_line = report.iter().find(|l| l.starts_with(&ack));
+        assert!(
+            ack_line
+                .is_some_and(|l| l
+                    .ends_with(&format!("[({write_id:?}, InProgress, true)]"))),
+            "{report:?}"
+        );
+        // Client 2 has not finished either job, so nothing to say there
+        assert!(!report.iter().any(|l| l.contains("[2]")), "{report:?}");
     }
 
     // XXX another test that does read replay for the first IO
