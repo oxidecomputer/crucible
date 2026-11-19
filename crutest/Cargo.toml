@@ -27,6 +27,7 @@ rand.workspace = true
 rand_chacha.workspace = true
 reedline.workspace = true
 repair-client.workspace = true
+reqwest.workspace = true
 ringbuffer.workspace = true
 schemars.workspace = true
 serde.workspace = true
