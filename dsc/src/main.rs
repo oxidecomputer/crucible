@@ -16,10 +16,11 @@ use rand_chacha::rand_core::SeedableRng;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::runtime::Builder;
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
-use tokio::time::{Duration, Instant, sleep_until};
+use tokio::time::{Duration, Instant, sleep, sleep_until};
 use uuid::Uuid;
 
 pub mod client;
@@ -992,7 +993,7 @@ async fn start_dsc(
     drop(rs);
 
     // Wait here for all downstairs to start
-    let mut running = 0;
+    let mut started = 0;
     loop {
         let res = rx.recv().await;
         if let Some(mi) = res {
@@ -1001,15 +1002,23 @@ async fn start_dsc(
                 mi.port, mi.client_id, mi.state
             );
             let mut rs = dsci.rs.lock().await;
-            if mi.state == DownstairsState::Running {
-                running += 1;
+            // A downstairs that exits before it is listening will never be
+            // running, so stop waiting for it.
+            if matches!(
+                mi.state,
+                DownstairsState::Running
+                    | DownstairsState::Exit
+                    | DownstairsState::Failed
+                    | DownstairsState::Error
+            ) {
+                started += 1;
             }
 
             rs.ds_state[mi.client_id] = mi.state;
             rs.ds_pid[mi.client_id] = mi.pid;
 
-            if running == rs.ds_state.len() {
-                println!("All downstairs are running");
+            if started == rs.ds_state.len() {
+                println!("All downstairs have started");
                 break;
             }
         } else {
@@ -1356,7 +1365,8 @@ enum DscCmd {
 
 /// Start a process for a downstairs.
 ///
-/// Returns the <Child> of the spawned process.
+/// Returns the <Child> of the spawned process.  The caller reports the
+/// downstairs as running once it is listening.
 async fn start_ds(
     ds: &Arc<DownstairsInfo>,
     tx: &mpsc::Sender<MonitorInfo>,
@@ -1371,17 +1381,26 @@ async fn start_ds(
     .await
     .unwrap();
 
-    // Create a new process that will run the downstairs
-    let cmd = ds.start().unwrap();
-    tx.send(MonitorInfo {
-        port: ds.port,
-        client_id: ds.client_id,
-        state: DownstairsState::Running,
-        pid: cmd.id(),
-    })
-    .await
-    .unwrap();
-    cmd
+    // Create a new process that will run the downstairs.  We report it as
+    // running once it is listening, see wait_for_listen.
+    ds.start().unwrap()
+}
+
+/// Wait until something accepts connections on `port` at 127.0.0.1.
+///
+/// A downstairs process has to open its region before it listens, which
+/// can take a while for a large region.  Anything that connects before then
+/// is refused, and an Upstairs will wait before it tries that downstairs
+/// again.  So we don't report a downstairs as running until it is
+/// listening.
+async fn wait_for_listen(port: u32) {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port as u16));
+    loop {
+        if TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Start and monitor a specific downstairs.
@@ -1396,6 +1415,8 @@ async fn ds_start_monitor(
 ) {
     // Start by starting.
     let mut cmd = start_ds(&ds, &tx).await;
+    // True while the downstairs process is running, but not yet listening.
+    let mut wait_listen = true;
 
     let mut keep_running = false;
     let mut start_once = false;
@@ -1504,6 +1525,15 @@ async fn ds_start_monitor(
                     println!("recv got error {:?}", a);
                 }
             }
+            _ = wait_for_listen(ds.port), if wait_listen => {
+                wait_listen = false;
+                let _ = tx.send(MonitorInfo {
+                    port: ds.port,
+                    client_id: ds.client_id,
+                    state: DownstairsState::Running,
+                    pid: cmd.id(),
+                }).await;
+            }
             Some(res) = recreate_rx.recv(), if recreate.is_some() => {
                 let done = recreate.take().unwrap();
                 println!("[{}] Recreate returns {res:?}", ds.port);
@@ -1515,6 +1545,7 @@ async fn ds_start_monitor(
             c = cmd.wait(), if stop_notify || keep_running || start_once => {
                 // If the downstairs is not running, this will match
                 // every loop it is enabled.
+                wait_listen = false;
                 match c {
                     Ok(status) => {
                         // Only notify we are down once,
@@ -1558,6 +1589,7 @@ async fn ds_start_monitor(
                 if keep_running || start_once {
                     println!("[{}] I am going to restart", ds.port);
                     cmd = start_ds(&ds, &tx).await;
+                    wait_listen = true;
                     start_once = false;
                     stop_notify = true;
                 }
@@ -2262,8 +2294,12 @@ mod test {
     }
 
     /// Starts a monitor for a downstairs on a fake binary in `dir`
+    ///
+    /// The fake downstairs never listens, so the monitor only reports it as
+    /// `DownstairsState::Running` if something else is listening on `port`.
     fn start_fake_monitor(
         dir: &Path,
+        port: u32,
     ) -> (
         PathBuf,
         mpsc::Receiver<MonitorInfo>,
@@ -2275,7 +2311,7 @@ mod test {
         let ds = Arc::new(DownstairsInfo::new(
             ds_bin,
             region_dir.to_str().unwrap().to_string(),
-            8810,
+            port,
             Uuid::new_v4(),
             String::new(),
             dir.join("downstairs-8810.txt"),
@@ -2315,14 +2351,44 @@ mod test {
     }
 
     #[tokio::test]
+    async fn running_once_listening() {
+        // The monitor reports a downstairs as running only once something
+        // accepts connections on its port.  Find a free port, and don't
+        // listen on it yet.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let dir = tempdir().unwrap();
+        let (_region_dir, mut rx, action_tx) =
+            start_fake_monitor(dir.path(), port as u32);
+        wait_for_state(&mut rx, DownstairsState::Starting).await;
+
+        // Nothing is listening, so the downstairs is not running yet.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(rx.try_recv().is_err());
+
+        // Once we listen on the port, the monitor reports it as running.
+        let _listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        wait_for_state(&mut rx, DownstairsState::Running).await;
+
+        action_tx.send(DownstairsAction::Stop).await.unwrap();
+        wait_for_state(&mut rx, DownstairsState::Exit).await;
+    }
+
+    #[tokio::test]
     async fn recreate_only_when_stopped() {
         // The monitor only recreates a region when its downstairs is not
         // running and will not be restarted.
         let dir = tempdir().unwrap();
-        let (region_dir, mut rx, action_tx) = start_fake_monitor(dir.path());
+        let (region_dir, mut rx, action_tx) =
+            start_fake_monitor(dir.path(), 8810);
 
         // Running: refused, and the old region is still there.
-        wait_for_state(&mut rx, DownstairsState::Running).await;
+        wait_for_state(&mut rx, DownstairsState::Starting).await;
         assert!(start_recreate(&action_tx).await.0.is_err());
         assert!(region_dir.join("old").exists());
 
@@ -2361,8 +2427,9 @@ mod test {
         // While a recreate is in progress, another recreate is refused, and
         // the downstairs is not started.
         let dir = tempdir().unwrap();
-        let (region_dir, mut rx, action_tx) = start_fake_monitor(dir.path());
-        wait_for_state(&mut rx, DownstairsState::Running).await;
+        let (region_dir, mut rx, action_tx) =
+            start_fake_monitor(dir.path(), 8810);
+        wait_for_state(&mut rx, DownstairsState::Starting).await;
         action_tx.send(DownstairsAction::Stop).await.unwrap();
         wait_for_state(&mut rx, DownstairsState::Exit).await;
 
