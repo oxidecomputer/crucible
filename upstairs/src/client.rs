@@ -1,13 +1,15 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    ClientIOStateCount, ClientId, ConnectionMode, CrucibleDecoder,
+    ClientData, ClientIOStateCount, ClientId, ConnectionMode, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, DsStateData, EncryptionContext,
     IOState, IOop, JobId, Message, RawReadResponse, ReconcileIO,
     ReconcileIOState, RegionDefinitionStatus, RegionMetadata, cdt,
     format_job_list, integrity_hash, io_limits::ClientIOLimits,
     live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
 };
-use crucible_common::{NegotiationError, VerboseTimeout, x509::TLSContext};
+use crucible_common::{
+    ExtentId, NegotiationError, VerboseTimeout, x509::TLSContext,
+};
 use crucible_protocol::{
     CRUCIBLE_MESSAGE_VERSION, MessageVersion, MessageWriter, ReconciliationId,
 };
@@ -1137,12 +1139,16 @@ impl DownstairsClient {
     /// If this is a read response, then the values in `responses` must
     /// _already_ be decrypted, with validated contexts stored in
     /// `responses.blocks`.
+    ///
+    /// `mismatch` is added to the message if the read data does not match the
+    /// data from another client.  Used to help track down issue #1987.
     pub(crate) fn process_io_completion(
         &mut self,
         ds_id: JobId,
         job: &mut DownstairsIO,
         responses: Result<RawReadResponse, CrucibleError>,
         extent_info: Option<ExtentInfo>,
+        mismatch: Option<MismatchContext>,
     ) {
         if job.state[self.client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
@@ -1169,7 +1175,7 @@ impl DownstairsClient {
                                 // XXX This will become the "force all
                                 // downstairs to stop and refuse to restart"
                                 // mode.
-                                let msg = format!(
+                                let mut msg = format!(
                                     "{} [{}] {} read hash mismatch\n\
                                         Expected {:x?}\n\
                                         Computed {:x?}\n\
@@ -1181,6 +1187,11 @@ impl DownstairsClient {
                                     read_data.blocks,
                                     job,
                                 );
+                                // Used to help track down issue #1987.
+                                if let Some(m) = mismatch {
+                                    msg.push('\n');
+                                    msg.push_str(&m.describe(&job.work));
+                                }
                                 if job.replay {
                                     info!(self.log, "REPLAY {msg}");
                                 } else {
@@ -1620,6 +1631,35 @@ impl DownstairsClient {
                     error!(self.log, "Received ExtentVersions out of order!");
                     return Err(NegotiationError::OutOfOrder);
                 }
+                if matches!(
+                    mode,
+                    ConnectionMode::Faulted | ConnectionMode::Replaced
+                ) {
+                    // Log the first extents, as startup reconcile does, so
+                    // we can see what this downstairs came back with before
+                    // live-repair compares it.
+                    //
+                    // Used to help track down issue #1987.
+                    const MAX_LOG: usize = 12;
+                    let n = flush_numbers.len().min(MAX_LOG);
+                    let cid = self.client_id;
+                    info!(
+                        self.log,
+                        "[{cid}]LR flush_numbers[0..{n}]: {:?}",
+                        &flush_numbers[..n]
+                    );
+                    info!(
+                        self.log,
+                        "[{cid}]LR generation[0..{n}]: {:?}",
+                        &gen_numbers[..n]
+                    );
+                    info!(
+                        self.log,
+                        "[{cid}]LR dirty[0..{n}]: {:?}",
+                        &dirty_bits[..n]
+                    );
+                }
+
                 /*
                  * Record this downstairs region info for later
                  * comparison with the other downstairs in this
@@ -2048,6 +2088,50 @@ pub(crate) enum NegotiationResult {
     WaitQuorum,
     Replay,
     LiveRepair,
+}
+
+/// The state of the other clients and of live-repair.  We use this when a
+/// read's data does not match the data from another client.
+///
+/// Used to help track down issue #1987.
+#[derive(Debug)]
+pub(crate) struct MismatchContext {
+    pub states: ClientData<DsState>,
+    /// The live-repair source, the extent being repaired, and the lowest job
+    /// ID the clients under repair consider, if live-repair is running
+    pub repair: Option<(ClientId, ExtentId, JobId)>,
+    /// Blocks per extent
+    pub extent_size: Option<u64>,
+}
+
+impl MismatchContext {
+    fn describe(&self, work: &IOop) -> String {
+        let states: Vec<String> =
+            self.states.iter().map(|s| s.to_string()).collect();
+        let repair = match self.repair {
+            Some((source, extent, min_id)) => {
+                format!("source {source} extent {extent} min_id {min_id}")
+            }
+            None => "none".to_string(),
+        };
+        let extents = match (work, self.extent_size) {
+            (
+                IOop::Read {
+                    start_block, count, ..
+                },
+                Some(es),
+            ) if *count > 0 => format!(
+                "{}..={}",
+                start_block.0 / es,
+                (start_block.0 + count - 1) / es
+            ),
+            _ => "unknown".to_string(),
+        };
+        format!(
+            "clients: [{}] live-repair: {repair} read extents: {extents}",
+            states.join(", ")
+        )
+    }
 }
 
 /// Success value from [`DownstairsClient::should_send`]
