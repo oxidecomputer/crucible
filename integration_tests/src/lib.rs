@@ -12,6 +12,7 @@ mod integration_tests {
     use crucible::volume::VolumeBuilder;
     use crucible::*;
     use crucible_client_types::DownstairsInfo;
+    use crucible_client_types::DownstairsInfoNegotiationStatus;
     use crucible_client_types::DownstairsInfoStatus;
     use crucible_client_types::RegionExtentInfo;
     use crucible_client_types::UpstairsInfoStatus;
@@ -501,7 +502,24 @@ mod integration_tests {
             Ok(())
         }
 
+        /// Stops the downstairs task, return a `(port, rport)` tuple
+        pub async fn stop(&mut self) -> Result<(u16, u16)> {
+            let ds = self.downstairs.take().unwrap();
+            let port = ds.address().port();
+            let rport = ds.repair_address().port();
+            ds.stop().await?;
+            Ok((port, rport))
+        }
+
         pub async fn reboot_read_write(&mut self) -> Result<()> {
+            self.reboot_read_write_with_ports(0, 0).await
+        }
+
+        pub async fn reboot_read_write_with_ports(
+            &mut self,
+            port: u16,
+            rport: u16,
+        ) -> Result<()> {
             let downstairs = with_max_message_version(
                 Downstairs::new_builder(&self.path()?, false),
                 self.max_message_version,
@@ -514,6 +532,8 @@ mod integration_tests {
                     downstairs,
                     DownstairsClientSettings {
                         address: self.address,
+                        port,
+                        rport,
                         ..DownstairsClientSettings::default()
                     },
                 )
@@ -540,20 +560,20 @@ mod integration_tests {
             downstairs.clone_region(source).await
         }
 
-        // Stop this downstairs, freeing the port it was listening on.  Used
-        // to simulate a downstairs that is not running.  The address that was
-        // assigned during spawn is still recorded in any CrucibleOpts we
-        // handed out, so the upstairs will try (and fail) to connect to it.
-        pub async fn stop(&mut self) -> Result<()> {
-            if let Some(downstairs) = self.downstairs.take() {
-                downstairs.stop().await?;
-            }
-            Ok(())
-        }
-
         pub fn address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
             self.downstairs.as_ref().unwrap().address()
+        }
+
+        /// Returns whether this downstairs has recorded that an upstairs
+        /// told it it was active
+        ///
+        /// This reads the region's private file, which the downstairs
+        /// writes atomically.
+        pub fn been_active(&self) -> Result<bool> {
+            let pp = private_path(self.dataset.path_buf()?);
+            let state: RegionPrivateState = read_json(&pp)?;
+            Ok(state.been_active())
         }
 
         // Return the repair address for a running downstairs
@@ -748,6 +768,35 @@ mod integration_tests {
 
         pub fn extent_count(&self) -> u32 {
             self.extent_count
+        }
+
+        /// Activates an upstairs with all three downstairs, then deactivates
+        ///
+        /// Each downstairs records that it has been active, so it can count
+        /// toward min-quorum.  This uses generation 1, so later activations
+        /// must use generation 2 or higher.
+        pub async fn activate_all_once(&self) -> Result<()> {
+            let (guest, io) = Guest::new(None);
+            let _join_handle = up_main(self.opts(), 1, None, io, None)?;
+            guest.activate().await?;
+            guest.deactivate().await?;
+
+            // The upstairs does not wait for a reply to YouHaveBeenActive,
+            // so a downstairs may still be recording it after we have
+            // deactivated.  Wait until all three have recorded it.
+            for ds in [&self.downstairs1, &self.downstairs2, &self.downstairs3]
+            {
+                let mut tries = 0;
+                while !ds.been_active()? {
+                    tries += 1;
+                    if tries > 100 {
+                        bail!("{} has not recorded been_active", ds.address());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100))
+                        .await;
+                }
+            }
+            Ok(())
         }
 
         pub async fn reboot_read_only(&mut self) -> Result<()> {
@@ -6522,6 +6571,276 @@ mod integration_tests {
         }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn connect_two_ds_then_deactivate() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Activate with all three once, so each has been active and can
+        // count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
+        let opts = tds.opts();
+        tds.downstairs1.stop().await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let (guest, io) = Guest::new(None);
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
+        guest.activate().await.unwrap();
+
+        let res = guest
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
+            )
+            .await;
+        assert!(res.is_ok());
+
+        guest.deactivate().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_two_ds_then_another() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Activate with all three once, so each has been active and can
+        // count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
+        let opts = tds.opts();
+        let (ds1_port, ds1_rport) = tds.downstairs1.stop().await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let (guest, io) = Guest::new(None);
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
+        guest.activate().await.unwrap();
+
+        let res = guest
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
+            )
+            .await;
+        assert!(res.is_ok());
+
+        // Restart downstairs1, which should use live-repair to join the quorum
+        //
+        // We have to wait a while here, because there's a 10-second reconnect
+        // delay.
+        tds.downstairs1
+            .reboot_read_write_with_ports(ds1_port, ds1_rport)
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+        guest.deactivate().await.unwrap();
+
+        // Reconnect with only ds1 running, then confirm that it received the
+        // writes.  We'll come up in read-only mode so that we can connect with
+        // just a single Downstairs, to make sure the reads go to DS1.
+        tds.downstairs1.reboot_read_only().await.unwrap();
+        tds.downstairs2.stop().await.unwrap();
+        tds.downstairs3.stop().await.unwrap();
+        tds.crucible_opts.read_only = true;
+        tds.crucible_opts.target[0] = tds.downstairs1.address();
+        let opts = tds.opts();
+        let (guest, io) = Guest::new(None);
+        let _join_handle = up_main(opts, 1, None, io, None).unwrap();
+        guest.activate().await.unwrap();
+        let mut buf = Buffer::new(2, BLOCK_SIZE);
+        guest.read(BlockIndex(0), &mut buf).await.unwrap();
+
+        assert_eq!(buf.to_vec(), vec![0x55; BLOCK_SIZE * 2]);
+    }
+
+    #[tokio::test]
+    async fn min_quorum_live_repair() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Activate with all three once, so each has been active and can
+        // count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
+
+        // Stop downstairs 1 before constructing the guest, so it won't be
+        // included and we'll do min-quorum reconciliation.
+        let (port, rport) = tds.downstairs1.stop().await.unwrap();
+
+        // Start the guest and do a write to ds 2 and 3.
+        let (guest, io) = Guest::new(None);
+        let opts = tds.opts();
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
+        guest.activate().await.unwrap();
+        let res = guest
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
+            )
+            .await;
+        assert!(res.is_ok());
+
+        // Deactivate the guest, all without downstairs 1 participating
+        guest.deactivate().await.unwrap();
+
+        // At this point, the data has been written to DS 2 and 3.  We'll start
+        // up again with DS 1 and 2, so min-quorum should do reconciliation.
+
+        tds.downstairs1
+            .reboot_read_write_with_ports(port, rport)
+            .await
+            .unwrap();
+        tds.downstairs2.stop().await.unwrap();
+        guest.activate_with_gen(3).await.unwrap();
+
+        let mut buf = Buffer::new(2, BLOCK_SIZE);
+        guest.read(BlockIndex(0), &mut buf).await.unwrap();
+
+        assert_eq!(buf.to_vec(), vec![0x55; BLOCK_SIZE * 2]);
+    }
+
+    #[tokio::test]
+    async fn min_quorum_cancel() {
+        // Spin off three downstairs, build our Crucible struct.
+        let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Activate with all three once, so each has been active and can
+        // count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
+
+        // Stop downstairs 1 before constructing the guest, so it won't be
+        // included and we'll do min-quorum reconciliation.
+        let (port, rport) = tds.downstairs1.stop().await.unwrap();
+
+        // Start the guest and do a write to ds 2 and 3.
+        let (guest, io) = Guest::new(None);
+        let opts = tds.opts();
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
+        let s = tokio::spawn(async move { guest.activate().await });
+
+        // Get into our min-quorum wait, which is NEGOTIATION_DELAY
+        tokio::time::sleep(NEGOTIATION_DELAY / 5).await;
+
+        // Stop DS2
+        tds.downstairs2.stop().await.unwrap();
+
+        // Wait for the min-quorum timer to go off; it shouldn't panic!
+        tokio::time::sleep(NEGOTIATION_DELAY * 2).await;
+
+        // Restart DS1, we're now eligible for min-quorum negotiation again
+        tds.downstairs1
+            .reboot_read_write_with_ports(port, rport)
+            .await
+            .unwrap();
+
+        s.await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn min_quorum_replace_before_active() {
+        // Test that a Downstairs can be replaced before activation while it
+        // is offline. Verify the new Downstairs cannot be used for a
+        // min-quorum activation.  The new region has never been active, it must
+        // not count toward the two needed for min-quorum.
+        const BLOCK_SIZE: usize = 512;
+
+        let mut tds = DefaultTestDownstairsSet::small(false).await.unwrap();
+
+        // Activate the first time with all three present so all downstairs
+        // will have been active and can count toward min-quorum.
+        tds.activate_all_once().await.unwrap();
+
+        // Stop DS1 and DS2, This leaves just DS3 ready and we wont be
+        // able to activate with just one.
+        let old_addr = tds.downstairs1_address();
+        tds.downstairs1.stop().await.unwrap();
+        let (port, rport) = tds.downstairs2.stop().await.unwrap();
+
+        let (guest, io) = Guest::new(None);
+        let guest = Arc::new(guest);
+        let opts = tds.opts();
+        let _join_handle = up_main(opts, 2, None, io, None).unwrap();
+        let gc = guest.clone();
+        let s = tokio::spawn(async move { gc.activate().await });
+
+        // Wait longer than the min-quorum delay.  With one Downstairs ready,
+        // we should still not be active.
+        tokio::time::sleep(NEGOTIATION_DELAY * 4).await;
+        assert!(!guest.query_is_active().await.unwrap());
+
+        // Replace DS1 with a new Downstairs.
+        let new_downstairs = tds.new_downstairs().await.unwrap();
+        let res = guest
+            .replace_downstairs(
+                tds.opts().id,
+                old_addr,
+                new_downstairs.address(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res, ReplaceResult::Started);
+
+        // Wait for the new Downstairs to be ready.  We want to be sure it
+        // has gotten to WQ.  If we don't be sure it is the later tests
+        // might not be testing what we want.
+        //
+        // After the replacement, the client waits CLIENT_RECONNECT_DELAY
+        // before it connects to the new Downstairs, so we must wait longer
+        // than that.
+        let deadline = tokio::time::Instant::now() + CLIENT_RECONNECT_DELAY * 2;
+        loop {
+            let VolumeInfo::Upstairs { targets, .. } =
+                guest.query_volume_info().await.unwrap()
+            else {
+                panic!("expected VolumeInfo::Upstairs");
+            };
+            if matches!(
+                targets[0].state,
+                DownstairsInfoStatus::Connecting {
+                    state: DownstairsInfoNegotiationStatus::WaitQuorum,
+                    ..
+                }
+            ) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "new downstairs not ready: {:?}",
+                targets[0]
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Two Downstairs are now ready, but the new one has never been
+        // active.  After the min-quorum delay we should still not be active.
+        tokio::time::sleep(NEGOTIATION_DELAY * 4).await;
+        assert!(!guest.query_is_active().await.unwrap());
+
+        // Restart DS2.  With all three ready, we now activate through
+        // reconciliation which includes the new Downstairs.
+        tds.downstairs2
+            .reboot_read_write_with_ports(port, rport)
+            .await
+            .unwrap();
+
+        // Getting past here means we have gone active.
+        s.await.unwrap().unwrap();
+
+        guest
+            .write(
+                BlockIndex(0),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
+            )
+            .await
+            .unwrap();
+        let mut buf = Buffer::new(2, BLOCK_SIZE);
+        guest.read(BlockIndex(0), &mut buf).await.unwrap();
+        assert_eq!(buf.to_vec(), vec![0x55; BLOCK_SIZE * 2]);
     }
 
     /// Validate the VolumeInfo from the Pantry

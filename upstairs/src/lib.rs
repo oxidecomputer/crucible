@@ -68,8 +68,8 @@ use guest::{GuestBlockRes, GuestIoHandle};
 mod stats;
 
 pub use client::{
-    ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
-    NegotiationState, NegotiationStateData,
+    CLIENT_RECONNECT_DELAY, ClientFaultReason, ClientNegotiationFailed,
+    ClientStopReason, NegotiationState, NegotiationStateData,
 };
 pub use crucible_common::impacted_blocks::*;
 
@@ -89,6 +89,7 @@ pub(crate) mod notify;
 mod client;
 mod downstairs;
 mod upstairs;
+pub use upstairs::NEGOTIATION_DELAY;
 use upstairs::{UpCounters, UpstairsAction};
 
 mod io_limits;
@@ -1077,6 +1078,11 @@ impl ReconcileIO {
             op,
             state: ClientData::new(ReconcileIOState::New),
         }
+    }
+
+    /// Marks the job as skipped for the given client
+    fn skip(&mut self, i: ClientId) {
+        self.state[i] = ReconcileIOState::Skipped;
     }
 }
 

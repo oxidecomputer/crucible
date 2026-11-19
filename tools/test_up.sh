@@ -419,6 +419,20 @@ while [[ "$cid" -lt "$region_count" ]]; do
     ((cid += 1))
 done
 
+echo "Now do the two_of_three test"
+echo "$ct" two-of-three -c 5 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ct" two-of-three -c 5 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed crutest two-of-three test"
+    echo "Failed crutest two-of-three test" >> "${log_prefix}_out.txt"
+    echo "Failed crutest two-of-three test" >> "$fail_log"
+    echo ""
+else
+    echo "Completed test: two-of-three"
+fi
+
+((gen += 20))
 echo "Now do the replace-reconcile test"
 
 # Get the port number for the last client, that is our replacement.
@@ -438,19 +452,13 @@ else
     echo "Completed test: replace-reconcile"
 fi
 
-((gen += 20))
-echo "Now do the replace-before-active test"
-echo "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
-    (( res += 1 ))
-    echo ""
-    echo "Failed crutest replace-before-active"
-    echo "Failed crutest replace-before-active" >> "${log_prefix}_out.txt"
-    echo "Failed crutest replace-before-active" >> "$fail_log"
-    echo ""
-else
-    echo "Completed test: replace-before-active"
-fi
+# The replace-reconcile test moves regions between sub_volumes as it
+# replaces Downstairs, and the replaced region it ends with is recreated
+# empty.  A test that runs after it and builds its volume from the dsc
+# regions in order will mix regions from different sub_volumes.  Those
+# regions can have matching generation and flush numbers but different
+# data, so the Upstairs won't see that they differ until a read compares
+# them.  If this is a concern, recreate the regions.
 
 # Tests done, shut down the downstairs.
 echo "All tests have completed, stopping all downstairs"
