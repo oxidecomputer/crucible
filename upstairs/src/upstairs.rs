@@ -46,8 +46,11 @@ use uuid::Uuid;
 /// How often to log stats for DTrace
 const STAT_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Minimum IO size (in bytes) before encryption / decryption is done off-thread
-const MIN_DEFER_SIZE_BYTES: u64 = 8192;
+/// Read responses larger than this are validated/decrypted off-thread.
+const READ_DEFER_THRESHOLD_BYTES: u64 = 16 * 1024;
+
+/// Writes larger than this are encrypted off-thread.
+const WRITE_DEFER_THRESHOLD_BYTES: u64 = 8 * 1024;
 
 /// Number of threads to dedicate to encryption / decryption
 ///
@@ -1526,7 +1529,7 @@ impl Upstairs {
             io_guard,
         ) {
             let should_defer = !self.deferred_ops.is_empty()
-                || w.data.len() > MIN_DEFER_SIZE_BYTES as usize;
+                || w.data.len() > WRITE_DEFER_THRESHOLD_BYTES as usize;
             if should_defer {
                 let tx = self.deferred_ops.push_oneshot();
                 self.pool.spawn(move || {
@@ -1657,7 +1660,7 @@ impl Upstairs {
                 // decryption, or there are other deferred messages in the queue
                 // (to preserve order).  Otherwise, handle it immediately.
                 if let Message::ReadResponse { header, data } = m {
-                    // Any read larger than `MIN_DEFER_SIZE_BYTES` constant
+                    // Any read larger than `READ_DEFER_THRESHOLD_BYTES`
                     // should be deferred to the worker pool; smaller reads can
                     // be processed in-thread (since the overhead isn't worth
                     // it)
@@ -1672,7 +1675,7 @@ impl Upstairs {
                                         .map(|b| b.block_size())
                                         .unwrap_or(0);
 
-                                response_size > MIN_DEFER_SIZE_BYTES
+                                response_size > READ_DEFER_THRESHOLD_BYTES
                             }
                             Err(_) => false,
                         };
@@ -4047,14 +4050,17 @@ pub(crate) mod test {
         }
     }
 
-    #[test]
-    fn good_decryption() {
+    #[tokio::test]
+    async fn good_decryption_at_read_defer_threshold() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
 
-        let data = Buffer::new(1, 512);
+        let blocks = READ_DEFER_THRESHOLD_BYTES as usize / 512;
+        assert_eq!(blocks, 32);
+
+        let data = Buffer::new(blocks, 512);
         let offset = BlockIndex(7);
-        let (_res, done) = BlockOpWaiter::pair();
+        let (res, done) = BlockOpWaiter::pair();
         let io_guard = IOLimitGuard::dummy();
         up.apply(UpstairsAction::Guest(BlockOp::Read {
             offset,
@@ -4073,15 +4079,19 @@ pub(crate) mod test {
             .unwrap()
             .encrypt_in_place(&mut data);
 
-        let blocks = Ok(vec![ReadBlockContext::Encrypted {
-            ctx: crucible_protocol::EncryptionContext {
-                nonce: nonce.into(),
-                tag: tag.into(),
-            },
-        }]);
-        let data = BytesMut::from(&data[..]);
+        let ctx = crucible_protocol::EncryptionContext {
+            nonce: nonce.into(),
+            tag: tag.into(),
+        };
+        let mut responses = Vec::with_capacity(blocks);
+        let mut response_data = BytesMut::with_capacity(blocks * 512);
+        for _ in 0..blocks {
+            responses.push(ReadBlockContext::Encrypted { ctx });
+            response_data.extend_from_slice(&data);
+        }
+        let responses = Ok(responses);
 
-        // Because this read is small, it happens right away
+        // A read exactly at the threshold is processed inline.
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(0),
             action: ClientAction::Response(Message::ReadResponse {
@@ -4089,15 +4099,16 @@ pub(crate) mod test {
                     upstairs_id: up.cfg.upstairs_id,
                     session_id: up.cfg.session_id,
                     job_id: JobId(1000),
-                    blocks,
+                    blocks: responses,
                 },
-                data,
+                data: response_data,
             }),
         }));
 
-        // This was a small read and handled in-line
+        // This 32-block (16 KiB) read did not enter the deferred queue.
         assert!(up.deferred_msgs.is_empty());
-        // No panic, great job everyone
+        // The inline response completed the guest read successfully.
+        assert!(matches!(res.wait_raw().await, Some(Ok(_))));
     }
 
     #[tokio::test]
@@ -4105,7 +4116,8 @@ pub(crate) mod test {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
 
-        let blocks = 16384 / 512;
+        let blocks = (READ_DEFER_THRESHOLD_BYTES as usize / 512) + 1;
+        assert_eq!(blocks, 33);
         let data = Buffer::new(blocks, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
@@ -4157,7 +4169,7 @@ pub(crate) mod test {
             }),
         }));
 
-        // This was a large read and was deferred
+        // This 33-block (16.5 KiB) read entered the deferred queue.
         assert!(!up.deferred_msgs.is_empty());
 
         up.await_deferred_msgs().await;
@@ -4169,7 +4181,7 @@ pub(crate) mod test {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
 
-        let blocks = 16384 / 512;
+        let blocks = (READ_DEFER_THRESHOLD_BYTES as usize / 512) + 1;
         let data = Buffer::new(blocks, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
@@ -4697,8 +4709,8 @@ pub(crate) mod test {
         let mut up = make_upstairs();
         up.force_active().unwrap();
 
-        const NODEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize - 512;
-        const DEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize * 2;
+        const NODEFER_SIZE: usize = WRITE_DEFER_THRESHOLD_BYTES as usize - 512;
+        const DEFER_SIZE: usize = WRITE_DEFER_THRESHOLD_BYTES as usize + 512;
 
         // Submit a short write, which should not be deferred
         let mut data = BytesMut::new();
