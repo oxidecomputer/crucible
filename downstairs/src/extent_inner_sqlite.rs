@@ -118,6 +118,12 @@ impl ExtentInner for SqliteInner {
             .unwrap()
             .set_dirty_and_block_context(block_context)
     }
+
+    #[cfg(test)]
+    fn block_dirty(&self, block: u64) -> bool {
+        let block: usize = block as usize;
+        self.0.lock().unwrap().dirty_blocks.contains_key(&block)
+    }
 }
 
 impl SqliteInner {
