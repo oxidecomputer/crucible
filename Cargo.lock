@@ -1924,6 +1924,7 @@ dependencies = [
  "crossbeam-utils",
  "crossterm",
  "crypto-common 0.1.6",
+ "crypto-common 0.2.2",
  "digest 0.10.7",
  "dof 0.3.0",
  "dof 0.4.0",

@@ -3064,8 +3064,8 @@ pub(crate) fn validate_encrypted_read_response(
     use aes_gcm_siv::{Nonce, Tag};
     let decryption_result = encryption_context.decrypt_in_place(
         data,
-        Nonce::from_slice(&ctx.nonce[..]),
-        Tag::from_slice(&ctx.tag[..]),
+        &Nonce::from(ctx.nonce),
+        &Tag::from(ctx.tag),
     );
     if decryption_result.is_ok() {
         Ok(())
