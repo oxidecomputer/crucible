@@ -31,7 +31,7 @@ use tracing::instrument;
 use usdt::register_probes;
 use uuid::Uuid;
 
-use aes_gcm_siv::aead::AeadInPlace;
+use aes_gcm_siv::aead::AeadInOut;
 use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce, Tag};
 
 pub mod control;
@@ -582,8 +582,8 @@ impl Debug for EncryptionContext {
 impl EncryptionContext {
     pub fn new(key: Vec<u8>, block_size: usize) -> EncryptionContext {
         assert!(key.len() == 32);
-        let key = Key::<Aes256GcmSiv>::from_slice(&key[..]);
-        let cipher = Aes256GcmSiv::new(key);
+        let key = Key::<Aes256GcmSiv>::try_from(&key[..]).unwrap();
+        let cipher = Aes256GcmSiv::new(&key);
 
         EncryptionContext { cipher, block_size }
     }
@@ -594,9 +594,7 @@ impl EncryptionContext {
 
     #[cfg(any(target_os = "illumos", target_os = "macos"))]
     fn get_random_nonce(&self) -> Nonce {
-        let mut random_iv: Nonce = aes_gcm_siv::aead::generic_array::arr![u8;
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-        ];
+        let mut random_iv = Nonce::default();
 
         // macos' and illumos' libc contain this
         unsafe extern "C" {
@@ -611,9 +609,7 @@ impl EncryptionContext {
 
     #[cfg(not(any(target_os = "illumos", target_os = "macos")))]
     fn get_random_nonce(&self) -> Nonce {
-        let mut random_iv: Nonce = aes_gcm_siv::aead::generic_array::arr![u8;
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-        ];
+        let mut random_iv = Nonce::default();
 
         let filled = unsafe {
             libc::getrandom(
@@ -635,8 +631,11 @@ impl EncryptionContext {
         // 1 << 36 bytes (A_MAX and P_MAX from RFC8452 § 6).  We encrypt on a
         // per-block basis (max of 1 << 15) with a 12-byte nonce, so these
         // conditions should never fail.
-        let tag = match self.cipher.encrypt_in_place_detached(&nonce, b"", data)
-        {
+        let tag = match self.cipher.encrypt_inout_detached(
+            &nonce,
+            b"",
+            data.into(),
+        ) {
             Ok(tag) => tag,
             Err(e) => panic!("Could not encrypt! {e:?}"),
         };
@@ -655,7 +654,8 @@ impl EncryptionContext {
         tag: &Tag,
     ) -> Result<()> {
         let result =
-            self.cipher.decrypt_in_place_detached(nonce, b"", data, tag);
+            self.cipher
+                .decrypt_inout_detached(nonce, b"", data.into(), tag);
 
         if result.is_err() {
             bail!("Could not decrypt! {:?}", result.err().unwrap());
