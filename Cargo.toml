@@ -140,7 +140,7 @@ uuid = { version = "1", features = [ "serde", "v4" ] }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
 nexus-client = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
 internal-dns-resolver = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
-internal-dns-types = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
+internal-dns-types = { git = "https://github.com/oxidecomputer/omicron", rev = "e58294a578eb91cd83586ff8361974835d80e9c4" }
 omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", rev = "5fd53a9c9ff2b0e47bfef3fe842b7516877b0162" }
