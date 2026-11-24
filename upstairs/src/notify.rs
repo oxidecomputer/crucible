@@ -61,6 +61,58 @@ pub(crate) enum NotifyRequest {
     },
 }
 
+fn repair_finish_notification(
+    time: DateTime<Utc>,
+    request: &NotifyRequest,
+) -> (Uuid, &'static str, RepairFinishInfo) {
+    let (upstairs_id, repair_id, session_id, repairs, aborted, is_live) =
+        match request {
+            NotifyRequest::LiveRepairFinish {
+                upstairs_id,
+                repair_id,
+                session_id,
+                repairs,
+                aborted,
+            } => (upstairs_id, repair_id, session_id, repairs, aborted, true),
+            NotifyRequest::ReconcileFinish {
+                upstairs_id,
+                repair_id,
+                session_id,
+                repairs,
+                aborted,
+            } => (upstairs_id, repair_id, session_id, repairs, aborted, false),
+            _ => panic!("expected a repair finish notification"),
+        };
+
+    let description = match (is_live, *aborted) {
+        (true, true) => "live repair aborted",
+        (true, false) => "live repair finished",
+        (false, true) => "reconcile aborted",
+        (false, false) => "reconcile finished",
+    };
+    let repair_type = if is_live {
+        UpstairsRepairType::Live
+    } else {
+        UpstairsRepairType::Reconciliation
+    };
+    let info = RepairFinishInfo {
+        time,
+        repair_id: TypedUuid::from_untyped_uuid(*repair_id),
+        repair_type,
+        session_id: TypedUuid::from_untyped_uuid(*session_id),
+        repairs: repairs
+            .iter()
+            .map(|(region_uuid, target_addr)| DownstairsUnderRepair {
+                region_uuid: TypedUuid::from_untyped_uuid(*region_uuid),
+                target_addr: target_addr.to_string(),
+            })
+            .collect(),
+        aborted: *aborted,
+    };
+
+    (*upstairs_id, description, info)
+}
+
 impl NotifyRequest {
     pub(crate) fn qos(&self) -> NotifyQos {
         match &self {
@@ -278,52 +330,11 @@ async fn notify_task_nexus(
                     description,
                 )
             }
-            NotifyRequest::LiveRepairFinish {
-                upstairs_id,
-                repair_id,
-                session_id,
-                aborted,
-                repairs,
-            }
-            | NotifyRequest::ReconcileFinish {
-                upstairs_id,
-                repair_id,
-                session_id,
-                aborted,
-                repairs,
-            } => {
-                let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
-                let is_live =
-                    matches!(m, NotifyRequest::LiveRepairFinish { .. });
-                let description = match (is_live, *aborted) {
-                    (true, true) => "live repair aborted",
-                    (true, false) => "live repair finished",
-                    (false, true) => "reconcile aborted",
-                    (false, false) => "reconcile finished",
-                };
-                let repair_type = if is_live {
-                    UpstairsRepairType::Live
-                } else {
-                    UpstairsRepairType::Reconciliation
-                };
-                let info = RepairFinishInfo {
-                    time,
-                    repair_id: TypedUuid::from_untyped_uuid(*repair_id),
-                    repair_type,
-                    session_id: TypedUuid::from_untyped_uuid(*session_id),
-                    repairs: repairs
-                        .iter()
-                        .map(|(region_uuid, target_addr)| {
-                            DownstairsUnderRepair {
-                                region_uuid: TypedUuid::from_untyped_uuid(
-                                    *region_uuid,
-                                ),
-                                target_addr: target_addr.to_string(),
-                            }
-                        })
-                        .collect(),
-                    aborted: *aborted,
-                };
+            NotifyRequest::LiveRepairFinish { .. }
+            | NotifyRequest::ReconcileFinish { .. } => {
+                let (upstairs_id, description, info) =
+                    repair_finish_notification(time, &m);
+                let upstairs_id = TypedUuid::from_untyped_uuid(upstairs_id);
 
                 (
                     nexus_client
@@ -458,4 +469,63 @@ pub(crate) async fn get_nexus_client(
         client,
         log.clone(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repair_finish_notification_reports_kind_and_outcome() {
+        let cases = [
+            (true, true, "live repair aborted", UpstairsRepairType::Live),
+            (
+                true,
+                false,
+                "live repair finished",
+                UpstairsRepairType::Live,
+            ),
+            (
+                false,
+                true,
+                "reconcile aborted",
+                UpstairsRepairType::Reconciliation,
+            ),
+            (
+                false,
+                false,
+                "reconcile finished",
+                UpstairsRepairType::Reconciliation,
+            ),
+        ];
+
+        for (is_live, aborted, expected_description, expected_type) in cases {
+            let upstairs_id = Uuid::new_v4();
+            let repair_id = Uuid::new_v4();
+            let session_id = Uuid::new_v4();
+            let request = if is_live {
+                NotifyRequest::LiveRepairFinish {
+                    upstairs_id,
+                    repair_id,
+                    session_id,
+                    repairs: Vec::new(),
+                    aborted,
+                }
+            } else {
+                NotifyRequest::ReconcileFinish {
+                    upstairs_id,
+                    repair_id,
+                    session_id,
+                    repairs: Vec::new(),
+                    aborted,
+                }
+            };
+
+            let (_, description, info) =
+                repair_finish_notification(Utc::now(), &request);
+            assert_eq!(description, expected_description);
+            assert_eq!(info.aborted, aborted);
+            assert_eq!(info.repair_type, expected_type);
+        }
+    }
 }
