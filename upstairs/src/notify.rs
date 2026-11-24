@@ -346,31 +346,29 @@ async fn notify_task_nexus(
         };
 
         match r {
-            Ok(_) => {
-                match &m {
-                    NotifyRequest::LiveRepairFinish {
-                        repair_id,
-                        upstairs_id,
-                        session_id,
-                        ..
-                    }
-                    | NotifyRequest::ReconcileFinish {
-                        repair_id,
-                        upstairs_id,
-                        session_id,
-                        ..
-                    } => {
-                        info!(
-                            log,
-                            "notified Nexus: {s}";
-                            "repair_id" => repair_id.to_string(),
-                            "upstairs_id" => upstairs_id.to_string(),
-                            "session_id" => session_id.to_string(),
-                        );
-                    }
-                    _ => info!(log, "notified Nexus: {s}"),
+            Ok(_) => match &m {
+                NotifyRequest::LiveRepairFinish {
+                    repair_id,
+                    upstairs_id,
+                    session_id,
+                    ..
                 }
-            }
+                | NotifyRequest::ReconcileFinish {
+                    repair_id,
+                    upstairs_id,
+                    session_id,
+                    ..
+                } => {
+                    info!(
+                        log,
+                        "notified Nexus: {s}";
+                        "repair_id" => repair_id.to_string(),
+                        "upstairs_id" => upstairs_id.to_string(),
+                        "session_id" => session_id.to_string(),
+                    );
+                }
+                _ => info!(log, "notified Nexus: {s}"),
+            },
 
             Err(e) => {
                 match &m {
