@@ -293,12 +293,19 @@ async fn notify_task_nexus(
                 repairs,
             } => {
                 let upstairs_id = TypedUuid::from_untyped_uuid(*upstairs_id);
-                let (description, repair_type) =
-                    if matches!(m, NotifyRequest::LiveRepairFinish { .. }) {
-                        ("live repair finish", UpstairsRepairType::Live)
-                    } else {
-                        ("reconcile finish", UpstairsRepairType::Reconciliation)
-                    };
+                let is_live =
+                    matches!(m, NotifyRequest::LiveRepairFinish { .. });
+                let description = match (is_live, *aborted) {
+                    (true, true) => "live repair aborted",
+                    (true, false) => "live repair finished",
+                    (false, true) => "reconcile aborted",
+                    (false, false) => "reconcile finished",
+                };
+                let repair_type = if is_live {
+                    UpstairsRepairType::Live
+                } else {
+                    UpstairsRepairType::Reconciliation
+                };
                 let info = RepairFinishInfo {
                     time,
                     repair_id: TypedUuid::from_untyped_uuid(*repair_id),
@@ -329,11 +336,55 @@ async fn notify_task_nexus(
 
         match r {
             Ok(_) => {
-                info!(log, "notified Nexus of {s}");
+                match &m {
+                    NotifyRequest::LiveRepairFinish {
+                        repair_id,
+                        upstairs_id,
+                        session_id,
+                        ..
+                    }
+                    | NotifyRequest::ReconcileFinish {
+                        repair_id,
+                        upstairs_id,
+                        session_id,
+                        ..
+                    } => {
+                        info!(
+                            log,
+                            "notified Nexus: {s}";
+                            "repair_id" => repair_id.to_string(),
+                            "upstairs_id" => upstairs_id.to_string(),
+                            "session_id" => session_id.to_string(),
+                        );
+                    }
+                    _ => info!(log, "notified Nexus: {s}"),
+                }
             }
 
             Err(e) => {
-                warn!(log, "failed to notify Nexus of {s}: {e}");
+                match &m {
+                    NotifyRequest::LiveRepairFinish {
+                        repair_id,
+                        upstairs_id,
+                        session_id,
+                        ..
+                    }
+                    | NotifyRequest::ReconcileFinish {
+                        repair_id,
+                        upstairs_id,
+                        session_id,
+                        ..
+                    } => {
+                        warn!(
+                            log,
+                            "failed to notify Nexus of {s}: {e}";
+                            "repair_id" => repair_id.to_string(),
+                            "upstairs_id" => upstairs_id.to_string(),
+                            "session_id" => session_id.to_string(),
+                        );
+                    }
+                    _ => warn!(log, "failed to notify Nexus of {s}: {e}"),
+                }
 
                 // If there's a problem notifying Nexus, it could be due to
                 // Nexus being gone before the DNS was updated. If this is the
