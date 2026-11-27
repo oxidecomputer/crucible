@@ -189,6 +189,12 @@ enum Action {
         #[clap(long, default_value = "15", action)]
         extent_count: u32,
 
+        /// Registration address of an Oximeter collector. When set, each
+        /// downstairs is started with `--oximeter <addr>` and publishes
+        /// metrics to that collector.
+        #[clap(long, action)]
+        oximeter: Option<SocketAddr>,
+
         /// Downstairs will all be started read only (default: false)
         #[clap(long, action, default_value = "false")]
         read_only: bool,
@@ -235,6 +241,9 @@ struct DownstairsInfo {
     output_file: PathBuf,
     client_id: usize,
     read_only: bool,
+    /// Registration address of an Oximeter collector. When set, the spawned
+    /// downstairs is told to register and publish metrics (`--oximeter`).
+    oximeter: Option<SocketAddr>,
 }
 
 impl DownstairsInfo {
@@ -248,6 +257,7 @@ impl DownstairsInfo {
         output_file: PathBuf,
         client_id: usize,
         read_only: bool,
+        oximeter: Option<SocketAddr>,
     ) -> DownstairsInfo {
         DownstairsInfo {
             ds_bin,
@@ -258,6 +268,7 @@ impl DownstairsInfo {
             output_file,
             client_id,
             read_only,
+            oximeter,
         }
     }
 
@@ -276,16 +287,21 @@ impl DownstairsInfo {
         };
 
         let region_dir = self.region_dir.clone();
+        let mut args = vec![
+            "run".to_string(),
+            "-p".to_string(),
+            port_value,
+            "-d".to_string(),
+            region_dir.clone(),
+            "--mode".to_string(),
+            mode,
+        ];
+        if let Some(oximeter) = self.oximeter {
+            args.push("--oximeter".to_string());
+            args.push(oximeter.to_string());
+        }
         let cmd = Command::new(self.ds_bin.clone())
-            .args([
-                "run",
-                "-p",
-                &port_value,
-                "-d",
-                &region_dir,
-                "--mode",
-                &mode,
-            ])
+            .args(&args)
             .stdout(Stdio::from(outputs))
             .stderr(Stdio::from(errors))
             .spawn()
@@ -326,6 +342,8 @@ pub struct DscInfo {
     work: Mutex<DscWork>,
     /// If the downstairs are started read only
     read_only: bool,
+    /// Oximeter collector registration address passed to each downstairs
+    oximeter: Option<SocketAddr>,
 }
 
 impl DscInfo {
@@ -339,6 +357,7 @@ impl DscInfo {
         port_base: u32,
         region_count: usize,
         read_only: bool,
+        oximeter: Option<SocketAddr>,
     ) -> Result<Arc<Self>> {
         // Verify the downstairs binary exists as is a file
         if !Path::new(&downstairs_bin).exists() {
@@ -458,6 +477,7 @@ impl DscInfo {
             rs: mrs,
             work,
             read_only,
+            oximeter,
         }))
     }
 
@@ -589,6 +609,7 @@ impl DscInfo {
             output_path,
             ds_id,
             self.read_only,
+            self.oximeter,
         );
         rs.ds.push(Arc::new(dsi));
 
@@ -684,6 +705,7 @@ impl DscInfo {
                 output_path,
                 ds_id,
                 self.read_only,
+                self.oximeter,
             );
             rs.ds.push(Arc::new(dsi));
             port += rs.port_step;
@@ -1840,6 +1862,7 @@ fn main() -> Result<()> {
                 port_base,
                 region_count,
                 false,
+                None,
             )?;
 
             runtime.block_on(dsci.create_regions(
@@ -1858,7 +1881,8 @@ fn main() -> Result<()> {
             region_dir,
         } => {
             let dsci = DscInfo::new(
-                ds_bin, output_dir, region_dir, notify_tx, true, 8810, 3, false,
+                ds_bin, output_dir, region_dir, notify_tx, true, 8810, 3,
+                false, None,
             )?;
             runtime.block_on(region_create_test(&dsci, long, csv_out))
         }
@@ -1871,6 +1895,7 @@ fn main() -> Result<()> {
             encrypted,
             extent_size,
             extent_count,
+            oximeter,
             output_dir,
             port_base,
             read_only,
@@ -1899,6 +1924,7 @@ fn main() -> Result<()> {
                 port_base,
                 region_count,
                 read_only,
+                oximeter,
             )?;
 
             if create {
@@ -1954,6 +1980,7 @@ mod test {
             8810,
             3,
             false,
+            None,
         );
         assert!(res.is_ok());
         assert!(Path::new(&dir).exists());
@@ -1979,6 +2006,7 @@ mod test {
             8810,
             3,
             false,
+            None,
         );
         assert!(res.is_ok());
         assert!(Path::new(&dir).exists());
@@ -1998,8 +2026,9 @@ mod test {
         let r2 = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![r1, r2];
         let (tx, _) = watch::channel(0);
-        let res =
-            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 3, false);
+        let res = DscInfo::new(
+            ds_bin, dir, region_vec, tx, true, 8810, 3, false, None,
+        );
         assert!(res.is_err());
     }
 
@@ -2015,8 +2044,9 @@ mod test {
         let r3 = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![r1, r2, r3];
         let (tx, _) = watch::channel(0);
-        let res =
-            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 2, false);
+        let res = DscInfo::new(
+            ds_bin, dir, region_vec, tx, true, 8810, 2, false, None,
+        );
         assert!(res.is_err());
     }
 
@@ -2041,6 +2071,7 @@ mod test {
             8810,
             4,
             false,
+            None,
         );
         assert!(res.is_ok());
         assert!(Path::new(&dir).exists());
@@ -2066,6 +2097,7 @@ mod test {
             8810,
             3,
             false,
+            None,
         );
 
         assert!(res.is_err());
@@ -2091,13 +2123,14 @@ mod test {
             8810,
             3,
             false,
+            None,
         )
         .unwrap();
 
         // Now, create them again and expect an error.
         let (tx, _) = watch::channel(0);
         let res = DscInfo::new(
-            ds_bin, output_dir, region_vec, tx, true, 8810, 3, false,
+            ds_bin, output_dir, region_vec, tx, true, 8810, 3, false, None,
         );
         assert!(res.is_err());
     }
@@ -2110,9 +2143,10 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 3, false)
-                .unwrap();
+        let dsci = DscInfo::new(
+            ds_bin, dir, region_vec, tx, true, 8810, 3, false, None,
+        )
+        .unwrap();
 
         let res = dsci.delete_ds_region(0).await;
         println!("res is {:?}", res);
@@ -2130,9 +2164,10 @@ mod test {
         let r3 = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![r1.clone(), r2, r3];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 3, false)
-                .unwrap();
+        let dsci = DscInfo::new(
+            ds_bin, dir, region_vec, tx, true, 8810, 3, false, None,
+        )
+        .unwrap();
 
         // Manually create the first region directory.
         let ds_region_dir =
@@ -2166,6 +2201,7 @@ mod test {
             8810,
             3,
             false,
+            None,
         )
         .unwrap();
 
@@ -2480,6 +2516,7 @@ mod test {
             8810,
             3,
             false,
+            None,
         )
         .unwrap();
         assert!(Path::new(&dir).exists());
@@ -2522,6 +2559,7 @@ mod test {
             8810,
             4,
             false,
+            None,
         )
         .unwrap();
         assert!(Path::new(&dir).exists());
@@ -2565,6 +2603,7 @@ mod test {
             8810,
             3,
             false,
+            None,
         )
         .unwrap();
         assert!(Path::new(&dir).exists());
@@ -2603,6 +2642,7 @@ mod test {
             8810,
             4,
             false,
+            None,
         )
         .unwrap();
         assert!(Path::new(&dir).exists());
