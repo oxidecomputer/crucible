@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use cmon_common::{
     DtraceDisplay, DtraceWrapper, default_display_fields, format_header,
-    format_row,
+    format_row, short_state,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -29,7 +29,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    text::Span,
+    text::{self, Span},
     widgets::canvas::{Canvas, Line, Points},
     widgets::{Block, Borders, Paragraph, Row, Table, TableState},
 };
@@ -179,6 +179,25 @@ impl SparkScale {
     }
 }
 
+/// Whether the downstairs state columns are drawn in color.
+///
+/// Allow the user to disable/enable color as they please.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ColorMode {
+    #[default]
+    On,
+    Off,
+}
+
+impl ColorMode {
+    fn toggled(self) -> Self {
+        match self {
+            ColorMode::On => ColorMode::Off,
+            ColorMode::Off => ColorMode::On,
+        }
+    }
+}
+
 /// The most recent record for one session and what we recorded from
 /// the record before it.
 #[derive(Debug)]
@@ -210,6 +229,9 @@ struct CtopState {
 
     /// What the sparklines are measured against.
     spark_scale: SparkScale,
+
+    /// Whether the downstairs states are colored.
+    color_mode: ColorMode,
 
     /// Whether the selected session's history has the screen to
     /// itself, rather than the table of every session.
@@ -400,6 +422,14 @@ fn handle_key(key_event: KeyEvent, state: &mut CtopState) -> bool {
             state.spark_scale = state.spark_scale.toggled();
             true
         }
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => {
+            state.color_mode = state.color_mode.toggled();
+            true
+        }
         // The cursor only means anything next to the table it moves
         // through, so the arrows do nothing in the detail view.
         KeyEvent {
@@ -524,6 +554,83 @@ fn is_expired(session: &SessionData, now: Instant) -> bool {
         > Duration::from_secs(REMOVE_THRESHOLD_SECS)
 }
 
+/// The color for a downstairs state. None to leave it plain.
+fn ds_state_color(ds_state: &str) -> Option<Color> {
+    match ds_state {
+        "Active" => Some(Color::Green),
+        "WaitQuorum" | "Reconcile" | "LiveRepairReady" | "LiveRepair"
+        | "Replacing" | "Replaced" | "Offline" => Some(Color::Yellow),
+        "Faulted" | "Fault" | "NegotiationFailed" | "Disabled" => {
+            Some(Color::Red)
+        }
+        "New" | "Deactivated" => Some(Color::DarkGray),
+        _ => None,
+    }
+}
+
+/// Produce the same text as `format_row`, but broken into pieces so the
+/// DS0-DS2 cells can each have their own color.
+///
+/// In ratatui, a `Span` is a piece of text with one style: a color,
+/// bold, and so on.  A screen line (`Line`) is a list of spans drawn
+/// one after another.  `format_row` returns one `String`, which can only
+/// be drawn in one style.  To color part of a row, the row has to be
+/// split into separate spans.
+///
+/// 1. Color off: return the whole `format_row` output as one span with
+///    no color.
+/// 2. Color on: go through the fields the user asked for with `-o`, one
+///    at a time, and build the row in pieces:
+///    - Any field except State: call `format_row` with just that one
+///      field and add the result as one plain span.  For example, PID
+///      gives `"  2101"`.
+///    - The State field: don't call `format_row` for this one.  Loop
+///      over the three downstairs states and make one span for each:
+///      - The text is `format!(" {:>3}", short_state(state))`, so
+///        `"Active"` becomes `" ACT"` and `"LiveRepair"` becomes
+///        `"  LR"`.
+///      - The color comes from `ds_state_color(state)`, which looks at
+///        the full state name.  An unknown state gets no color.
+/// 3. Return the list of spans.  The caller adds the cursor and stale
+///    marker in front and the sparkline after, then draws them as one
+///    line.
+fn row_spans(
+    pid: u32,
+    info: &DtraceInfo,
+    delta: Option<u64>,
+    fields: &[DtraceDisplay],
+    color_mode: ColorMode,
+) -> Vec<Span<'static>> {
+    if color_mode == ColorMode::Off {
+        return vec![Span::raw(format_row(pid, info, delta, fields))];
+    }
+
+    let mut spans = Vec::new();
+    for field in fields {
+        if *field != DtraceDisplay::State {
+            spans.push(Span::raw(format_row(
+                pid,
+                info,
+                delta,
+                std::slice::from_ref(field),
+            )));
+            continue;
+        }
+
+        for state in &info.ds_state {
+            let style = match ds_state_color(state) {
+                Some(color) => Style::default().fg(color),
+                None => Style::default(),
+            };
+            spans.push(Span::styled(
+                format!(" {:>3}", short_state(state)),
+                style,
+            ));
+        }
+    }
+    spans
+}
+
 /// Give one session's delta history the whole screen.
 ///
 /// The sparkline in the table is a handful of columns; this is the
@@ -533,6 +640,7 @@ fn render_detail_view(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: &SessionData,
     display_fields: &[DtraceDisplay],
+    color_mode: ColorMode,
 ) -> io::Result<()> {
     let history: Vec<u64> = session.delta_history.iter().copied().collect();
 
@@ -591,16 +699,16 @@ fn render_detail_view(
         // width of its indicator columns.  As this view has no
         // indicators we don't need padding.
         f.render_widget(
-            Paragraph::new(format!(
-                "{}\n{}",
-                format_header(display_fields),
-                format_row(
+            Paragraph::new(vec![
+                text::Line::from(format_header(display_fields)),
+                text::Line::from(row_spans(
                     session.pid,
                     &session.dtrace_info,
                     session.current_delta,
                     display_fields,
-                )
-            )),
+                    color_mode,
+                )),
+            ]),
             chunks[0],
         );
 
@@ -676,7 +784,7 @@ fn render_detail_view(
         f.render_widget(canvas, chunks[1]);
 
         f.render_widget(
-            Paragraph::new("['d'/Esc: Back | 'q': Quit]"),
+            Paragraph::new("['d'/Esc: Back | 'c': Color | 'q': Quit]"),
             chunks[2],
         );
     })?;
@@ -687,16 +795,21 @@ fn render_detail_view(
 /// Draw one frame: a clock, a row per session, and the keys.
 ///
 /// `now` is passed in rather than read here so that every row in a
-/// frame is judged stale against the same instant.
+/// frame is judged stale against the same instant.  The settings and
+/// the reader's status come from `state`; the rows come from
+/// `sessions`, which is `state.sessions` already sorted.
 fn render_table_view(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &CtopState,
     sessions: &[&SessionData],
     display_fields: &[DtraceDisplay],
     table_state: &mut TableState,
     now: Instant,
-    spark_scale: SparkScale,
-    reader_status: &ReaderStatus,
 ) -> io::Result<()> {
+    let spark_scale = state.spark_scale;
+    let color_mode = state.color_mode;
+    let reader_status = &state.reader_status;
+
     // The busiest sample on screen, which is what the Global setting
     // measures against.  Derived from the sessions being drawn rather
     // than passed in, since nothing else needs it.
@@ -749,12 +862,6 @@ fn render_table_view(
                 let cursor = if Some(idx) == selected { '>' } else { ' ' };
                 let stale = if is_stale(s, now) { '*' } else { ' ' };
 
-                let row = format_row(
-                    s.pid,
-                    &s.dtrace_info,
-                    s.current_delta,
-                    display_fields,
-                );
                 // Both settings measure up from zero; they differ in
                 // what a full height bar means.
                 let max = match spark_scale {
@@ -765,7 +872,17 @@ fn render_table_view(
                 };
                 let spark =
                     render_sparkline(&s.delta_history, spark_width, max);
-                Row::new(vec![format!("{cursor}{stale}{row}{spark}")])
+
+                let mut spans = vec![Span::raw(format!("{cursor}{stale}"))];
+                spans.extend(row_spans(
+                    s.pid,
+                    &s.dtrace_info,
+                    s.current_delta,
+                    display_fields,
+                    color_mode,
+                ));
+                spans.push(Span::raw(spark));
+                Row::new(vec![text::Line::from(spans)])
             })
             .collect();
 
@@ -794,10 +911,12 @@ fn render_table_view(
             ])
             .split(chunks[3]);
 
+        // Kept short enough to fit eighty columns with the position, so
+        // the stale threshold is left to the README.
         f.render_widget(
             Paragraph::new(format!(
-                "[up/down: Move | 's': Scale | 'q': Quit]  \
-                 scale: {}  * = stale ({STALE_THRESHOLD_SECS}s)",
+                "[up/down: Move | 's': Scale | 'c': Color | 'q': Quit]  \
+                 scale: {}  *=stale",
                 spark_scale.label(),
             )),
             footer[0],
@@ -865,17 +984,19 @@ async fn display_loop(
                 .and_then(|i| sessions.get(i));
 
             match detail {
-                Some(session) => {
-                    render_detail_view(&mut terminal, session, display_fields)?
-                }
+                Some(session) => render_detail_view(
+                    &mut terminal,
+                    session,
+                    display_fields,
+                    state.color_mode,
+                )?,
                 None => render_table_view(
                     &mut terminal,
+                    &state,
                     &sessions,
                     display_fields,
                     &mut table_state,
                     now,
-                    state.spark_scale,
-                    &state.reader_status,
                 )?,
             }
 
@@ -989,5 +1110,214 @@ async fn main() -> Result<()> {
     match reader_result {
         Ok(Ok(Err(e))) => Err(e),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A DtraceInfo whose downstairs are in the given states.
+    fn info_with_states(states: [&str; 3]) -> DtraceInfo {
+        let json = format!(
+            r#"{{
+            "upstairs_id": "12345678-1111-2222-3333-444444444444",
+            "session_id": "87654321-1111-2222-3333-444444444444",
+            "up_count": 1,
+            "up_counters": {{
+                "apply": 1, "action_downstairs": 1, "action_guest": 1,
+                "action_deferred_block": 0, "action_deferred_message": 0,
+                "action_flush_check": 0, "action_stat_check": 0,
+                "action_control_check": 0, "action_noop": 0
+            }},
+            "next_job_id": 1000,
+            "ds_count": 3,
+            "write_bytes_out": 1,
+            "ds_state": ["{}", "{}", "{}"],
+            "ds_io_count": {{
+                "in_progress": [1, 2, 3], "done": [4, 5, 6],
+                "skipped": [0, 0, 0], "error": [0, 0, 0]
+            }},
+            "ds_reconciled": 0,
+            "ds_reconcile_needed": 0,
+            "ds_reconcile_aborted": 0,
+            "ds_live_repair_completed": [0, 0, 0],
+            "ds_live_repair_aborted": [0, 0, 0],
+            "ds_connected": [1, 1, 1],
+            "ds_replaced": [0, 0, 0],
+            "ds_extents_repaired": [0, 0, 0],
+            "ds_extents_confirmed": [0, 0, 0],
+            "ds_extent_limit": 0,
+            "ds_delay_us": [0, 0, 0],
+            "ds_ro_lr_skipped": [0, 0, 0]
+        }}"#,
+            states[0], states[1], states[2],
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn joined(spans: &[Span]) -> String {
+        spans.iter().map(|s| &*s.content).collect()
+    }
+
+    /// The spans that carry a color, as (text, color).
+    fn colored(spans: &[Span]) -> Vec<(String, Color)> {
+        spans
+            .iter()
+            .filter_map(|s| s.style.fg.map(|c| (s.content.to_string(), c)))
+            .collect()
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn test_ds_state_color_every_known_state() {
+        let expected = [
+            ("Active", Some(Color::Green)),
+            ("WaitQuorum", Some(Color::Yellow)),
+            ("Reconcile", Some(Color::Yellow)),
+            ("LiveRepairReady", Some(Color::Yellow)),
+            ("LiveRepair", Some(Color::Yellow)),
+            ("Replacing", Some(Color::Yellow)),
+            ("Replaced", Some(Color::Yellow)),
+            ("Offline", Some(Color::Yellow)),
+            ("Faulted", Some(Color::Red)),
+            ("Fault", Some(Color::Red)),
+            ("NegotiationFailed", Some(Color::Red)),
+            ("Disabled", Some(Color::Red)),
+            ("New", Some(Color::DarkGray)),
+            ("Deactivated", Some(Color::DarkGray)),
+            ("SomethingNew", None),
+            ("", None),
+        ];
+        for (state, color) in expected {
+            assert_eq!(ds_state_color(state), color, "{state}");
+        }
+    }
+
+    /// Wherever the state field sits, the spans read back as exactly
+    /// what format_row prints, and the three state cells carry the
+    /// colors of their states.
+    #[test]
+    fn test_row_spans_colors_states_wherever_they_are() {
+        let info = info_with_states(["Active", "LiveRepair", "Faulted"]);
+        let want = vec![
+            (" ACT".to_string(), Color::Green),
+            ("  LR".to_string(), Color::Yellow),
+            (" FLT".to_string(), Color::Red),
+        ];
+
+        let layouts = [
+            vec![DtraceDisplay::State],
+            vec![DtraceDisplay::State, DtraceDisplay::Pid],
+            vec![
+                DtraceDisplay::Pid,
+                DtraceDisplay::State,
+                DtraceDisplay::NextJobId,
+            ],
+            vec![DtraceDisplay::Pid, DtraceDisplay::State],
+            default_display_fields(),
+        ];
+        for fields in layouts {
+            let spans = row_spans(1234, &info, Some(5), &fields, ColorMode::On);
+            assert_eq!(
+                joined(&spans),
+                format_row(1234, &info, Some(5), &fields),
+                "{fields:?}",
+            );
+            assert_eq!(colored(&spans), want, "{fields:?}");
+        }
+    }
+
+    #[test]
+    fn test_row_spans_state_twice() {
+        let info = info_with_states(["Active", "New", "Offline"]);
+        let fields = [DtraceDisplay::State, DtraceDisplay::State];
+        let spans = row_spans(1, &info, None, &fields, ColorMode::On);
+
+        assert_eq!(joined(&spans), format_row(1, &info, None, &fields));
+        let colors: Vec<Color> =
+            colored(&spans).into_iter().map(|(_, c)| c).collect();
+        let once = [Color::Green, Color::DarkGray, Color::Yellow];
+        assert_eq!(colors, [once, once].concat());
+    }
+
+    #[test]
+    fn test_row_spans_without_state_is_plain() {
+        let info = info_with_states(["Faulted", "Faulted", "Faulted"]);
+        let fields = [DtraceDisplay::Pid, DtraceDisplay::NextJobId];
+        let spans = row_spans(1, &info, None, &fields, ColorMode::On);
+
+        assert_eq!(joined(&spans), format_row(1, &info, None, &fields));
+        assert!(colored(&spans).is_empty());
+    }
+
+    /// An unknown state is drawn plain, and does not take the color
+    /// of its neighbors.
+    #[test]
+    fn test_row_spans_unknown_state_is_plain() {
+        let info = info_with_states(["Active", "XYZ", "Faulted"]);
+        let fields = [DtraceDisplay::State];
+        let spans = row_spans(1, &info, None, &fields, ColorMode::On);
+
+        assert_eq!(joined(&spans), format_row(1, &info, None, &fields));
+        assert_eq!(
+            colored(&spans),
+            [
+                (" ACT".to_string(), Color::Green),
+                (" FLT".to_string(), Color::Red)
+            ],
+        );
+    }
+
+    /// An unknown state wider than its column pushes the row over,
+    /// and the colored row must be pushed over the same way.
+    #[test]
+    fn test_row_spans_wide_unknown_state_matches_format_row() {
+        let info = info_with_states(["Active", "SomethingNew", "Faulted"]);
+        let fields = [DtraceDisplay::State, DtraceDisplay::Pid];
+        let spans = row_spans(1, &info, None, &fields, ColorMode::On);
+
+        assert_eq!(joined(&spans), format_row(1, &info, None, &fields));
+        assert_eq!(
+            colored(&spans),
+            [
+                (" ACT".to_string(), Color::Green),
+                (" FLT".to_string(), Color::Red)
+            ],
+        );
+    }
+
+    #[test]
+    fn test_row_spans_color_off_is_one_plain_span() {
+        let info = info_with_states(["Active", "LiveRepair", "Faulted"]);
+        let fields = default_display_fields();
+        let spans = row_spans(1, &info, None, &fields, ColorMode::Off);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(joined(&spans), format_row(1, &info, None, &fields));
+        assert!(colored(&spans).is_empty());
+    }
+
+    #[test]
+    fn test_c_toggles_color_and_ctrl_c_quits() {
+        let mut state = CtopState::default();
+        assert_eq!(state.color_mode, ColorMode::On);
+
+        let c = key(KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(!is_quit(c));
+        assert!(handle_key(c, &mut state));
+        assert_eq!(state.color_mode, ColorMode::Off);
+        assert!(handle_key(c, &mut state));
+        assert_eq!(state.color_mode, ColorMode::On);
+
+        // The same toggle from the detail view.
+        state.detail_mode = true;
+        assert!(handle_key(c, &mut state));
+        assert_eq!(state.color_mode, ColorMode::Off);
+
+        assert!(is_quit(key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
     }
 }
